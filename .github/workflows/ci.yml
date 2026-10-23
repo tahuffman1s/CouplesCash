@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -27,9 +28,9 @@ jobs:
       run:
         working-directory: apps/api
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
@@ -44,7 +45,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: api-test-results
           path: apps/api/TestResults
@@ -59,9 +60,9 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -74,7 +75,7 @@ jobs:
       - id: pnpm-store
         run: echo "dir=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.dir }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('apps/web/pnpm-lock.yaml') }}
@@ -102,7 +103,7 @@ jobs:
 
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: |
@@ -111,13 +112,64 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------- Infra
+  infra:
+    name: Infra (compose, scripts, workflows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Shell syntax + shellcheck
+        run: |
+          bash -n install.sh scripts/*.sh
+          sudo apt-get install -y -qq shellcheck >/dev/null
+          shellcheck -S style install.sh scripts/*.sh
+
+      - name: Validate compose files
+        run: |
+          cp .env.example .env
+          export POSTGRES_PASSWORD=ci JWT_SECRET=ci-secret-ci-secret-ci-secret-ci-secret PUBLIC_URL=https://ci.example.com TUNNEL_TOKEN=ci
+          docker compose -f compose.yml config -q
+          docker compose -f compose.yml -f compose.dev.yml config -q
+          docker compose -f compose.yml --profile tunnel config -q
+
+      - name: Lint workflows (actionlint)
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) >/dev/null
+          ./actionlint -color
+
+  # ---------------------------------------------------------------- Docker build check
+  # Every branch/PR proves both Dockerfiles still build (amd64 only, nothing pushed).
+  docker:
+    name: Build ${{ matrix.app }} image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, web]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: apps/${{ matrix.app }}
+          file: apps/${{ matrix.app }}/Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+
   # ---------------------------------------------------------------- Images
-  # Multi-arch images → GHCR, only for pushes to main. The Pi pulls these
-  # (`make pi`) instead of compiling .NET and Node on an SD card.
+  # Multi-arch images → GHCR on pushes to the repository's default branch and on
+  # v* tags. The Pi pulls these (`make pi` / install.sh) instead of compiling
+  # .NET and Node on an SD card.
   images:
     name: Publish ${{ matrix.app }} image
-    needs: [api, web]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [api, web, infra, docker]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
+       startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -127,15 +179,15 @@ jobs:
       matrix:
         app: [api, web]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -144,17 +196,19 @@ jobs:
       # metadata-action lower-cases the owner, as GHCR requires. The result must
       # match IMAGE_PREFIX in .env (default ghcr.io/tahuffman1s).
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/couplescash-${{ matrix.app }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
           labels: |
             org.opencontainers.image.title=couplescash-${{ matrix.app }}
             org.opencontainers.image.description=CouplesCash ${{ matrix.app }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: apps/${{ matrix.app }}
           file: apps/${{ matrix.app }}/Dockerfile
