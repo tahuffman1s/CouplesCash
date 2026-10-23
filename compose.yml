@@ -33,6 +33,18 @@ x-api-env: &api-env
   ConnectionStrings__Default: Host=db;Port=5432;Database=couplescash;Username=couplescash;Password=${POSTGRES_PASSWORD}
   Jwt__Secret: ${JWT_SECRET}
   Api__EnableDocs: ${API_ENABLE_DOCS:-false}
+  # Web Push (VAPID). All optional: when the keys are empty the push endpoints
+  # answer 503 push_not_configured and the web hides the Notifications UI.
+  # `make vapid` fills VAPID_* in .env.
+  Push__VapidPublicKey: ${VAPID_PUBLIC_KEY:-}
+  Push__VapidPrivateKey: ${VAPID_PRIVATE_KEY:-}
+  Push__Subject: ${VAPID_SUBJECT:-}
+  # Passkeys (WebAuthn). Origin = PUBLIC_URL; the relying-party id is derived
+  # from its host. Self-disables (503) unless the origin is https://.
+  WebAuthn__Origin: ${PUBLIC_URL:-}
+  WebAuthn__RelyingPartyName: CouplesCash
+  # Background scheduler (autopay, reminders, hygiene) runs inside `api`.
+  Scheduler__Enabled: ${SCHEDULER_ENABLED:-true}
   # Keep the .NET GC under the container limit: 0x8000000 = 128 MiB heap hard
   # limit inside a 192 MiB container. Workstation GC + tiered PGO for a Pi.
   DOTNET_GCHeapHardLimit: "0x8000000"

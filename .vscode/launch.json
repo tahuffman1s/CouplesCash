@@ -26,6 +26,18 @@
 			}
 		},
 		{
+			"name": "API: generate VAPID keys",
+			"type": "coreclr",
+			"request": "launch",
+			"preLaunchTask": "api: build",
+			"program": "${workspaceFolder}/apps/api/CouplesCash.Api/bin/Debug/net10.0/CouplesCash.Api.dll",
+			"args": ["--vapid"],
+			"cwd": "${workspaceFolder}/apps/api/CouplesCash.Api",
+			"stopAtEntry": false,
+			"console": "integratedTerminal",
+			"envFile": "${workspaceFolder}/.env.dev"
+		},
+		{
 			"name": "Web (Chrome)",
 			"type": "pwa-chrome",
 			"request": "launch",

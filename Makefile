@@ -19,8 +19,10 @@ DB_USER      := couplescash
 DB_NAME      := couplescash
 BACKUP_DIR   := backups
 STAMP        := $(shell date +%Y%m%d-%H%M%S)
+# Guard against an api build that does not know `--vapid` yet and would start Kestrel instead of exiting.
+TIMEOUT      := $(shell command -v timeout >/dev/null 2>&1 && echo 'timeout 600' || true)
 
-.PHONY: help setup secrets dev-env dev-db dev-api dev-web dev migrate up down logs ps build pull \
+.PHONY: help setup secrets vapid dev-env dev-db dev-api dev-web dev migrate up down logs scheduler-logs ps build pull \
         tunnel-up tunnel-down pi backup restore test test-api test-web lint fmt clean
 
 ##@ Getting started
@@ -55,7 +57,38 @@ secrets: .env ## Fill empty JWT_SECRET / POSTGRES_PASSWORD in .env (FORCE=1 to r
 	}; \
 	fill JWT_SECRET        "$$(openssl rand -base64 48 | tr -d '\n')"; \
 	fill POSTGRES_PASSWORD "$$(openssl rand -hex 24)"
+	@$(MAKE) vapid
 	@$(MAKE) dev-env
+
+vapid: .env ## Fill empty VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY (Web Push) in .env; FORCE=1 rotates (every phone must re-enable notifications)
+	@set_kv() { \
+	  if grep -qE "^#?\s*$$1=" .env; then sed -i "s|^#\?\s*$$1=.*|$$1=$$2|" .env; else printf '%s=%s\n' "$$1" "$$2" >> .env; fi; \
+	}; \
+	get_kv() { grep -E "^$$1=" .env | head -n1 | cut -d= -f2- || true; }; \
+	if [ -z "$${FORCE:-}" ] && [ -n "$$(get_kv VAPID_PUBLIC_KEY)" ] && [ -n "$$(get_kv VAPID_PRIVATE_KEY)" ]; then \
+	  echo '  keep VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY (already set; use FORCE=1 to rotate)'; \
+	elif command -v $(DOTNET) >/dev/null 2>&1 && [ -f $(API_HOST_DIR)/CouplesCash.Api.csproj ]; then \
+	  echo '  generating VAPID keys with: dotnet run -- --vapid'; \
+	  out="$$(cd $(API_HOST_DIR) && $(TIMEOUT) $(DOTNET) run --no-launch-profile -- --vapid 2>&1)" || { printf '%s\n' "$$out" | tail -n 20; echo '  FAILED: dotnet run -- --vapid'; exit 1; }; \
+	  pub="$$(printf '%s\n' "$$out" | sed -n 's/^Push__VapidPublicKey=//p' | tail -n1)"; \
+	  priv="$$(printf '%s\n' "$$out" | sed -n 's/^Push__VapidPrivateKey=//p' | tail -n1)"; \
+	  [ -n "$$pub" ] && [ -n "$$priv" ] || { printf '%s\n' "$$out" | tail -n 20; echo '  FAILED: could not parse --vapid output'; exit 1; }; \
+	  set_kv VAPID_PUBLIC_KEY "$$pub"; set_kv VAPID_PRIVATE_KEY "$$priv"; echo '  set  VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY'; \
+	elif docker info >/dev/null 2>&1; then \
+	  echo '  generating VAPID keys with: docker compose run api dotnet CouplesCash.Api.dll --vapid'; \
+	  out="$$($(TIMEOUT) $(COMPOSE) run --rm --no-deps -T api dotnet CouplesCash.Api.dll --vapid 2>&1)" || { printf '%s\n' "$$out" | tail -n 20; echo '  FAILED: docker compose run api --vapid (is the api image pulled/built? try `make pull`)'; exit 1; }; \
+	  pub="$$(printf '%s\n' "$$out" | sed -n 's/^Push__VapidPublicKey=//p' | tail -n1)"; \
+	  priv="$$(printf '%s\n' "$$out" | sed -n 's/^Push__VapidPrivateKey=//p' | tail -n1)"; \
+	  [ -n "$$pub" ] && [ -n "$$priv" ] || { printf '%s\n' "$$out" | tail -n 20; echo '  FAILED: could not parse --vapid output'; exit 1; }; \
+	  set_kv VAPID_PUBLIC_KEY "$$pub"; set_kv VAPID_PRIVATE_KEY "$$priv"; echo '  set  VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY'; \
+	else \
+	  echo '  skip VAPID keys: need the dotnet SDK or a running docker daemon. Push stays disabled (503) until you run `make vapid`.'; \
+	fi; \
+	subj="$$(get_kv VAPID_SUBJECT)"; \
+	if [ -z "$$subj" ]; then \
+	  host="$$(get_kv PUBLIC_URL | sed -E 's#^[a-z]+://##; s#[:/].*$$##')"; \
+	  set_kv VAPID_SUBJECT "mailto:admin@$${host:-localhost}"; echo "  set  VAPID_SUBJECT=mailto:admin@$${host:-localhost} (edit .env to change)"; \
+	fi
 
 dev-env: .env ## Write .env.dev (derived env for running api/web natively & VS Code debugging)
 	@scripts/dev-env.sh
@@ -89,6 +122,9 @@ down: ## Stop and remove containers (data volume is kept)
 logs: ## Tail logs of all services (S=api to filter)
 	$(COMPOSE) --profile tunnel logs -f --tail=100 $(S)
 
+scheduler-logs: ## Tail api logs from the background scheduler only (autopay, reminders, hygiene)
+	$(COMPOSE) logs -f --tail=1000 api | grep --line-buffered -i 'scheduler'
+
 ps: ## Show service status and health
 	$(COMPOSE) --profile tunnel ps
 
@@ -96,7 +132,7 @@ build: ## Build api + web images locally (slow on a Pi; prefer `make pull`)
 	$(COMPOSE) build --pull api web
 
 pull: ## Pull the latest published images from GHCR
-	$(COMPOSE) --profile tunnel pull --ignore-buildable
+	$(COMPOSE) --profile tunnel pull
 
 tunnel-up: .env ## Start everything including the Cloudflare tunnel
 	$(COMPOSE) --profile tunnel up -d --remove-orphans

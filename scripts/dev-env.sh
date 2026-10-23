@@ -36,6 +36,15 @@ ConnectionStrings__Default="Host=localhost;Port=5432;Database=couplescash;Userna
 Jwt__Secret=${JWT_SECRET}
 Api__EnableDocs=true
 DOTNET_ENVIRONMENT=Development
+# Web Push: empty keys = push disabled (503). Fill them with \`make vapid\`.
+Push__VapidPublicKey=${VAPID_PUBLIC_KEY:-}
+Push__VapidPrivateKey=${VAPID_PRIVATE_KEY:-}
+Push__Subject=${VAPID_SUBJECT:-mailto:dev@localhost}
+# Passkeys: http://localhost is a secure context, so they work in dev without TLS.
+WebAuthn__Origin=http://localhost:${WEB_PORT}
+WebAuthn__RelyingPartyName=CouplesCash
+# Background job (autopay, reminders, hygiene). Set SCHEDULER_ENABLED=false in .env to pause it.
+Scheduler__Enabled=${SCHEDULER_ENABLED:-true}
 # ---- SvelteKit (apps/web) ----
 API_URL=http://localhost:${API_PORT}
 ORIGIN=http://localhost:${WEB_PORT}

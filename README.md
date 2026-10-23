@@ -22,6 +22,16 @@ ever sees your numbers.
 - **Accounts**: checking, savings, credit, cash, investment, loan — manual balances with history sparkline. No bank linking, by design.
 - **Bills, subscriptions, income** with real recurrence (weekly → yearly, month-end clamping), mark occurrences paid, monthly-equivalent totals.
 - **Calendar** of everything due, **Dashboard** with net worth and "due in the next 14 days", **Insights** donut by category.
+- **Push reminders** (v2): "Electric is due tomorrow · $142.50" on both phones N days before, at your hour, in your household's time zone; optional partner-activity pushes. Web Push with VAPID keys generated on your Pi — no third-party notification service. [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)
+- **Autopay auto-mark** (v2): bills your bank pays automatically mark themselves paid on the due date, with an **Undo**.
+- **Activity feed** (v2): every change says who did it — "Kaylee marked Rent paid · 2h ago".
+- **Expenses & budgets** (v2): one-off spending per category, monthly budgets with progress bars, over-budget flags.
+- **Pay-period view** (v2): weekly / biweekly / twice-monthly / monthly — "Until payday (Fri Nov 6)": expected income, due, paid, spendable.
+- **Savings goals** (v2): linked to a savings account or manual, with a projected completion date and "needed per month".
+- **Month-close report** (v2): one shareable card (PNG via Web Share, or print to PDF) that replaces the screenshot.
+- **To-pay checklist** (v2): shared list for the things that aren't bills — "Transfer $200 to savings".
+- **Household settings** (v2): currency, week start, default account, time zone, pay period.
+- **Passkeys** (v2): sign in with Face ID / fingerprint (WebAuthn, discoverable credentials); password stays as fallback. [docs/PASSKEYS.md](docs/PASSKEYS.md)
 - **Installable PWA** on iOS Safari and Android Chrome; light/dark follows the device.
 - **Secure by default**: Argon2id, 15-minute JWTs with rotating refresh tokens, household-scoped SQL, rate limiting, strict headers, non-root read-only containers, API never exposed to the internet. See [docs/SECURITY.md](docs/SECURITY.md).
 - **Pi-sized**: the whole stack idles at ~300 MB RAM; prebuilt `arm64` images from GHCR.
@@ -61,6 +71,10 @@ make setup      # checks tools, creates .env with fresh secrets, restores deps
 make dev        # Postgres in Docker; API (dotnet watch) + web (vite) natively
 ```
 
+`make setup` runs `make secrets`, which also generates the Web Push (VAPID) key pair
+(`make vapid`, via `dotnet run -- --vapid`); without the keys push is simply disabled.
+Passkeys work on `http://localhost` without TLS.
+
 Open <http://localhost:5173>. API docs at <http://localhost:8080/scalar>.
 Ctrl-C stops api + web; `make down` stops the database. Everything else:
 `make help`.
@@ -92,7 +106,9 @@ curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/main/instal
 ```
 
 Then: open your URL on phone 1 → **Register**; phone 2 → Register → **Couple** → scan phone 1's
-Couple Code; Settings → **Install app** on both. Full guide with troubleshooting:
+Couple Code; Settings → **Install app** on both, then (from the installed app) Settings →
+**Notifications** and **Passkeys**. The installer generates the VAPID keys for push;
+`make vapid` does the same later. Full guide with troubleshooting:
 [docs/RASPBERRY-PI.md](docs/RASPBERRY-PI.md). Tunnel setup: [infra/cloudflared/README.md](infra/cloudflared/README.md).
 
 ## Project layout
@@ -105,9 +121,9 @@ CouplesCash/
 ├─ infra/
 │  ├─ cloudflared/README.md  Tunnel + Access setup
 │  └─ postgres/postgresql.conf   Pi-tuned Postgres config
-├─ install.sh                one-line installer (any 64-bit Linux / Pi)
+├─ install.sh                one-line installer (any 64-bit Linux / Pi); generates VAPID keys
 ├─ scripts/                  dev.sh · dev-env.sh · backup.sh
-├─ docs/                     PLAN · API-CONTRACT · RASPBERRY-PI · SECURITY
+├─ docs/                     PLAN · PLAN-V2 · API-CONTRACT · RASPBERRY-PI · SECURITY · NOTIFICATIONS · PASSKEYS
 ├─ .vscode/ · .devcontainer/ · .github/
 ├─ compose.yml               db · migrate · api · web (· cloudflared via --profile tunnel)
 ├─ compose.dev.yml           publishes db on 127.0.0.1:5432 for native dev
@@ -118,8 +134,9 @@ CouplesCash/
 
 ## Documentation
 
-- [Build plan](docs/PLAN.md) · [API contract](docs/API-CONTRACT.md)
+- [Build plan](docs/PLAN.md) · [v2 plan](docs/PLAN-V2.md) · [API contract](docs/API-CONTRACT.md)
 - [Raspberry Pi guide](docs/RASPBERRY-PI.md) · [Cloudflare Tunnel](infra/cloudflared/README.md)
+- [Push notifications](docs/NOTIFICATIONS.md) · [Passkeys](docs/PASSKEYS.md)
 - [Security](docs/SECURITY.md)
 - [CLAUDE.md](CLAUDE.md) — conventions for humans and agents
 

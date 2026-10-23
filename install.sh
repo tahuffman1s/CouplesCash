@@ -10,13 +10,15 @@
 #   3. installs Docker Engine + the compose plugin, starts it, adds you to the docker group
 #   4. clones (or updates) the repo into ~/couplescash
 #   5. writes .env with fresh secrets and asks for your public URL + Cloudflare tunnel token
-#   6. pulls the arm64/amd64 images (or builds them if none are published) and starts the stack
+#   6. pulls the arm64/amd64 images (or builds them if none are published)
+#   7. generates the Web Push (VAPID) key pair with the api image, then starts the stack
 #
 # Options (flags or environment variables):
 #   --dir DIR            COUPLESCASH_DIR      install location          (default ~/couplescash)
 #   --branch NAME        COUPLESCASH_BRANCH   git branch to install     (default main)
 #   --public-url URL     PUBLIC_URL           e.g. https://cash.example.com
 #   --tunnel-token TOK   TUNNEL_TOKEN         Cloudflare tunnel token (omit for LAN-only mode)
+#   --email ADDR         VAPID_EMAIL          contact for push services (VAPID_SUBJECT; default admin@<host of PUBLIC_URL>)
 #   --pi                 COUPLESCASH_PI=1     Raspberry Pi mode: require arm64, set up zram swap, check NTP,
 #                                             and refuse to build images locally (pull only). Auto-detected
 #                                             on real Pi hardware; the flag forces it (e.g. in a VM/container).
@@ -32,6 +34,7 @@ INSTALL_DIR="${COUPLESCASH_DIR:-$HOME/couplescash}"
 BRANCH="${COUPLESCASH_BRANCH:-main}"
 PUBLIC_URL="${PUBLIC_URL:-}"
 TUNNEL_TOKEN="${TUNNEL_TOKEN:-}"
+VAPID_EMAIL="${VAPID_EMAIL:-}"
 PI_MODE="${COUPLESCASH_PI:-0}"
 LAN_MODE="${COUPLESCASH_LAN:-0}"
 NO_START="${COUPLESCASH_NO_START:-0}"
@@ -40,7 +43,7 @@ NONINTERACTIVE="${NONINTERACTIVE:-0}"
 
 usage() {
   if [[ -f "$0" ]]; then sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
-  else printf 'CouplesCash installer. Options: --pi --lan --dir DIR --branch NAME --public-url URL --tunnel-token TOK --no-start --build -y\n'; fi
+  else printf 'CouplesCash installer. Options: --pi --lan --dir DIR --branch NAME --public-url URL --tunnel-token TOK --email ADDR --no-start --build -y\n'; fi
 }
 
 while (( $# )); do
@@ -49,6 +52,7 @@ while (( $# )); do
     --branch) BRANCH="$2"; shift 2 ;;
     --public-url) PUBLIC_URL="$2"; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN="$2"; shift 2 ;;
+    --email) VAPID_EMAIL="$2"; shift 2 ;;
     --pi) PI_MODE=1; shift ;;
     --lan) LAN_MODE=1; shift ;;
     --no-start) NO_START=1; shift ;;
@@ -232,6 +236,7 @@ if [[ "$TARGET_USER" != root ]] && ! id -nG "$TARGET_USER" | tr ' ' '\n' | grep 
 fi
 
 # Docker command for the rest of this run: plain if it works, otherwise via sudo.
+DOCKER_OK=1
 if docker info >/dev/null 2>&1; then
   DOCKER=(docker)
 elif $SUDO docker info >/dev/null 2>&1; then
@@ -239,7 +244,7 @@ elif $SUDO docker info >/dev/null 2>&1; then
 else
   if [[ "$NO_START" == 1 ]]; then
     warn "docker daemon not reachable — continuing because --no-start was given"
-    DOCKER=(docker)
+    DOCKER=(docker); DOCKER_OK=0
   else
     die "docker daemon is not running. Start it (e.g. 'sudo systemctl start docker') and re-run this script."
   fi
@@ -342,6 +347,7 @@ if [[ "$LAN_MODE" == 1 ]]; then
   set_env WEB_BIND "0.0.0.0"
   sed -i 's|^COMPOSE_PROFILES=.*|# COMPOSE_PROFILES=tunnel|' "$ENV_FILE"
   ok "LAN mode: $PUBLIC_URL (no HTTPS — fine for testing; use the tunnel for daily use)"
+  warn "push notifications and passkeys need HTTPS: the app hides them until you configure a tunnel (infra/cloudflared/README.md)"
 else
   if [[ -z "$PUBLIC_URL" ]]; then
     PUBLIC_URL="$existing_url"
@@ -371,18 +377,29 @@ else
   fi
 fi
 set_env TZ "$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)"
+
+# Web Push contact (VAPID subject). Push services (Apple, Google, Mozilla) may use it to
+# reach the server operator; it is never shown to users. Defaults to admin@<public host>.
+existing_subj="$(get_env VAPID_SUBJECT)"; [[ "$existing_subj" == "mailto:you@example.com" ]] && existing_subj=""
+if [[ -n "$VAPID_EMAIL" || -z "$existing_subj" ]]; then
+  public_host="${PUBLIC_URL#*://}"; public_host="${public_host%%[:/]*}"
+  email="$VAPID_EMAIL"
+  [[ -n "$email" ]] || ask email "Contact email for push notifications (only sent to Apple/Google push services)" "admin@${public_host:-localhost}"
+  set_env VAPID_SUBJECT "mailto:${email#mailto:}"
+  ok "VAPID_SUBJECT=mailto:${email#mailto:}"
+fi
 chmod 600 "$ENV_FILE"
 
-# --- 7. start -----------------------------------------------------------------
+# --- 7. images ----------------------------------------------------------------
 if [[ "$NO_START" == 1 ]]; then
-  step "Skipping start (--no-start)"
+  step "Skipping image pull and start (--no-start)"
   printf '\n  Start it later with:  cd %s && make up      # or: make tunnel-up\n' "$INSTALL_DIR"
 else
   step "Images"
   if [[ "$BUILD_LOCAL" == 1 ]]; then
     warn "building images locally — on a Pi 4 this takes 15–30 minutes"
     "${DOCKER[@]}" compose build
-  elif ! "${DOCKER[@]}" compose --profile tunnel pull --ignore-buildable 2>/dev/null; then
+  elif ! "${DOCKER[@]}" compose --profile tunnel pull 2>/dev/null; then
     if [[ "${PI_PULL_ONLY:-0}" == 1 ]]; then
       die "could not pull the images. Either CI has not published them yet, or the GHCR packages are private (GitHub → your profile → Packages → couplescash-api/web → Package settings → Change visibility → Public). Alternatively 'docker login ghcr.io' first, or re-run with --build to compile locally (15–30 min on a Pi)."
     fi
@@ -391,7 +408,45 @@ else
   else
     ok "images pulled"
   fi
+fi
 
+# --- 8. Web Push keys (VAPID) ---------------------------------------------------
+# The api image generates the P-256 key pair (`dotnet CouplesCash.Api.dll --vapid`); no
+# database is needed. Without keys the app still works — push is just hidden (503).
+step "Web Push keys (VAPID)"
+if [[ -n "$(get_env VAPID_PUBLIC_KEY)" && -n "$(get_env VAPID_PRIVATE_KEY)" ]]; then
+  ok "VAPID keys already present"
+elif [[ "$DOCKER_OK" != 1 ]]; then
+  warn "docker daemon not reachable — skipped. Run 'make vapid' once Docker is up to enable push reminders."
+else
+  api_image="$("${DOCKER[@]}" compose config --images api 2>/dev/null | head -n1 || true)"
+  have_api_image=0
+  if [[ -n "$api_image" ]] && "${DOCKER[@]}" image inspect "$api_image" >/dev/null 2>&1; then
+    have_api_image=1
+  elif [[ "$BUILD_LOCAL" == 1 && "$NO_START" == 1 ]]; then
+    warn "api image not built yet (--no-start --build) — skipped. Run 'make build && make vapid' later."
+  elif "${DOCKER[@]}" compose pull api >/dev/null 2>&1; then
+    have_api_image=1; ok "pulled ${api_image:-api image}"
+  else
+    warn "could not pull the api image — skipped. Run 'make vapid' after 'make pull' (or 'make build') to enable push reminders."
+  fi
+  if (( have_api_image )); then
+    vapid_out="$("${DOCKER[@]}" compose run --rm --no-deps -T api dotnet CouplesCash.Api.dll --vapid 2>/dev/null || true)"
+    vapid_pub="$(printf '%s\n' "$vapid_out" | sed -n 's/^Push__VapidPublicKey=//p' | tail -n1)"
+    vapid_priv="$(printf '%s\n' "$vapid_out" | sed -n 's/^Push__VapidPrivateKey=//p' | tail -n1)"
+    if [[ -n "$vapid_pub" && -n "$vapid_priv" ]]; then
+      set_env VAPID_PUBLIC_KEY "$vapid_pub"
+      set_env VAPID_PRIVATE_KEY "$vapid_priv"
+      ok "generated VAPID key pair"
+    else
+      warn "the api image did not print VAPID keys (older image?) — run 'make vapid' after the next update. Push stays disabled until then."
+    fi
+  fi
+fi
+chmod 600 "$ENV_FILE"
+
+# --- 9. start -----------------------------------------------------------------
+if [[ "$NO_START" != 1 ]]; then
   step "Starting CouplesCash"
   "${DOCKER[@]}" compose up -d --remove-orphans
   printf '    waiting for services to become healthy'
@@ -409,10 +464,15 @@ fi
 printf '\n%s✓ CouplesCash is installed in %s%s\n\n' "$GREEN" "$INSTALL_DIR" "$RESET"
 if [[ "$NO_START" != 1 ]]; then
   printf '  Open %s%s%s on both phones, register, link with a Couple Code, then\n' "$BOLD" "$PUBLIC_URL" "$RESET"
-  printf '  Settings → "Install app" to add it to the home screen.\n\n'
+  printf '  Settings → "Install app" to add it to the home screen.\n'
+  if [[ "$LAN_MODE" != 1 ]]; then
+    printf '  Then Settings → "Notifications" for bill reminders (iOS: only from the installed app)\n'
+    printf '  and Settings → "Passkeys" to sign in with Face ID / fingerprint.\n'
+  fi
+  printf '\n'
 fi
 (( RELOGIN )) && printf '  Log out and back in (or run: newgrp docker) to use docker without sudo.\n\n'
 printf '  Update:   curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/%s/install.sh | bash\n' "$BRANCH"
 printf '  Status:   cd %s && make ps        Logs: make logs\n' "$INSTALL_DIR"
 printf '  Backup:   make backup                 Stop: make down\n'
-printf '  Docs:     docs/RASPBERRY-PI.md, infra/cloudflared/README.md\n\n'
+printf '  Docs:     docs/RASPBERRY-PI.md, docs/NOTIFICATIONS.md, docs/PASSKEYS.md, infra/cloudflared/README.md\n\n'

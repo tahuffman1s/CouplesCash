@@ -20,6 +20,9 @@ when something goes wrong.
    open ports on the Pi.
 6. **A bug in our own code** — a query that forgets to filter by household and
    leaks another couple's data.
+7. **The push and passkey plumbing** (v2) — a push service or a network observer
+   reading reminders; someone replaying a captured passkey response; a leaked
+   VAPID private key letting a stranger send notifications "from" your server.
 
 **Out of scope**: a fully compromised Pi (root access), a compromised
 Cloudflare account, or malware on the phone itself. Keep the OS updated, use
@@ -47,6 +50,12 @@ strong passwords on the Pi and Cloudflare, and enable 2FA on Cloudflare.
 | Log leakage | Logs capped at 3 × 10 MB per container; no tokens or passwords are logged. | `compose.yml` logging, `/etc/docker/daemon.json` |
 | Supply chain | Pinned base images, Dependabot for npm/NuGet/Docker/Actions weekly, CI builds images from source and publishes to GHCR under your account. | `.github/dependabot.yml`, `.github/workflows/ci.yml` |
 | Optional second factor | Cloudflare Access with email one-time codes for exactly your two addresses in front of the hostname. | `infra/cloudflared/README.md` §5 |
+| Push payloads read in transit or by the push service | Payloads are encrypted end-to-end to the device (RFC 8291) and signed with VAPID (RFC 8292); they contain **only the item name, the amount, a tag and a relative URL** — never tokens, balances or account numbers. Push services (Apple/Google/Mozilla) see ciphertext and an endpoint. | API `Push/`, `docs/NOTIFICATIONS.md` |
+| Leaked VAPID private key (strangers could push to subscribed phones) | Key pair generated locally by the api image (`make vapid`), stored only in `.env` (`chmod 600`) and the api container environment; never logged or returned by the API (only the **public** key is served). **Rotate**: `make vapid FORCE=1 && make up` — every device must re-enable notifications. Subscriptions are per user; the server only sends to the subscriber's own household events. | `.env.example`, `Makefile`, `compose.yml` `x-api-env` |
+| Dead or hijacked push endpoints | Subscriptions are removed after 5 consecutive failures, and immediately on 404/410 from the push service; disabling notifications on a device deletes its subscription. | API scheduler hygiene |
+| Passkey phishing / replay | WebAuthn credentials are bound to the rpId = host of `PUBLIC_URL`, so another origin cannot use them; the browser also checks the origin. Challenges are random, **expire after 5 minutes and are single-use**; the sign counter is checked against clones. `userVerification: required` (biometric/PIN). Login routes share the `auth` rate limit (10/min/IP). Passkeys are refused (503) unless the origin is https or localhost. | API `Auth/` (Fido2NetLib), `webauthn_challenges`, `docs/PASSKEYS.md` |
+| Background job touching the wrong household | The scheduler iterates households and runs every statement with an explicit `household_id`, exactly like a request; it has no "all households" mutation. Autopay writes `paid_by = NULL`, `auto = true`, so system actions are distinguishable from human ones and undo-able. | API `Scheduler/` |
+| "Who changed this?" / tampering by a partner | Every mutation writes an `activity_events` row in the same transaction (actor, kind, entity, summary, data) — an append-only audit trail both partners see on `/activity`. System actions have `actor_id = NULL`. | API `Data/`, migration `0002_v2.sql` |
 
 ## If a phone is lost or stolen
 
@@ -54,11 +63,15 @@ strong passwords on the Pi and Cloudflare, and enable 2FA on Cloudflare.
    Changing the password (`POST /v1/auth/password`) **revokes every refresh
    token** for your account. The lost phone's 15-minute access token expires
    on its own; after that it cannot obtain a new one.
-2. If you suspect the *partner's* account is also at risk, have them do the
+2. **Settings → Passkeys**: delete the lost phone's passkey — a password change
+   does not disable passkeys, and a passkey would let the holder sign in again
+   if they can unlock the phone. **Settings → Notifications**: remove the lost
+   device so reminders stop going to it.
+3. If you suspect the *partner's* account is also at risk, have them do the
    same.
-3. If you use Cloudflare Access, also revoke the user's session in **Zero
+4. If you use Cloudflare Access, also revoke the user's session in **Zero
    Trust → Access → … → Revoke session**.
-4. Use the phone vendor's remote wipe (Find My / Find My Device).
+5. Use the phone vendor's remote wipe (Find My / Find My Device).
 
 There is nothing to do on the Pi; no data is stored on the phone except the
 cached app shell (no financial data is precached by the service worker).
@@ -85,6 +98,22 @@ database, because `POSTGRES_PASSWORD` is baked into the Postgres data
 directory on first start (see `docs/RASPBERRY-PI.md` → *Changing the database
 password*).
 
+## Rotating the VAPID keys
+
+Rotate if `.env` leaked, or if notifications arrive that nobody sent. The new
+key pair invalidates every push subscription: each phone has to turn
+notifications off and on again (*Settings → Notifications*).
+
+```bash
+cd ~/couplescash
+make vapid FORCE=1   # new P-256 pair via the api image (or dotnet natively)
+make up              # recreates api with the new keys
+```
+
+Never share `VAPID_PRIVATE_KEY`; the API only ever exposes the public key
+(`GET /v1/push/vapid-public-key`). `make secrets FORCE=1` does **not** rotate
+VAPID keys — they have their own target because the blast radius is different.
+
 ## Why the API has no public port
 
 The browser only ever talks to the SvelteKit server. SvelteKit holds the
@@ -106,7 +135,10 @@ at `http://api:8080`. Consequences:
 - Back up (`make backup`) and store copies off the Pi; dumps contain all
   financial data — treat them like the database (`chmod 600`, encrypted disk).
 - `.env` is `chmod 600`; never paste it into chats or issues.
-- Time sync matters for token validation (`timedatectl`).
+- Time sync matters for token validation, VAPID tokens and reminder timing
+  (`timedatectl`); the scheduler uses the household time zone from Settings.
+- `make scheduler-logs` shows what the background job did; the `/activity`
+  feed is the user-visible audit trail.
 
 ## Reporting a vulnerability
 

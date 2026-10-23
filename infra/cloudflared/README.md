@@ -67,7 +67,23 @@ They must be **identical**: same scheme, same host, no trailing slash, no path.
 | `http://cash.yourdomain.com` | ❌ (tunnel serves https) |
 | `https://www.cash.yourdomain.com` | ❌ unless that is the hostname you route |
 
-After changing `PUBLIC_URL`: `make up` (recreates `web`).
+After changing `PUBLIC_URL`: `make up` (recreates `web` **and** `api`, which reads
+it as `WebAuthn__Origin`).
+
+### Keep the hostname stable — passkeys and push depend on it
+
+- **Passkeys** are bound to the *relying-party id*, which CouplesCash derives from
+  the host of `PUBLIC_URL` (`cash.yourdomain.com`). Browsers refuse to use a
+  passkey for any other rpId, so renaming the hostname (even `cash.` →
+  `money.`) invalidates every passkey both of you registered; you sign in with
+  your password and add new ones (`docs/PASSKEYS.md`). Changing the tunnel
+  token, the Pi, the IP or the Cloudflare account does **not** matter — only the
+  hostname does.
+- **Push notifications** and passkeys both require `https://`, which is exactly
+  what the tunnel gives you; they are hidden in LAN mode. If you add a second
+  public hostname for the same tunnel, pick one as `PUBLIC_URL` and stick to it
+  on the phones — the service worker, form CSRF check and passkeys are all
+  per-origin.
 
 ## 4. Recommended Cloudflare settings
 
@@ -117,3 +133,6 @@ site in Safari/Chrome once, re-authenticate, and the installed app works again.
 | Login form → **403** | `PUBLIC_URL` ≠ real URL (see §3). |
 | Works on Wi-Fi, not on cellular | Not a tunnel issue — check Cloudflare Access session or DNS propagation. |
 | Camera (QR scan) blocked | Only works on `https://` origins — never test the scanner over plain `http://<pi-ip>:3000`. |
+| Passkeys fail after a hostname change | rpId = host of `PUBLIC_URL`; old passkeys are invalid by design. Register new ones (§3). |
+| Notifications / Passkeys missing in Settings | Opened over `http://` (LAN), or `VAPID_*` empty in `.env` → `make vapid && make up`. See `docs/NOTIFICATIONS.md`. |
+| Cloudflare Access login page appears inside the installed app | Access session expired (§5). Push notifications are **not** affected by Access — they bypass the HTML gate — but the deep link they open may land on the Access page until you re-authenticate. |

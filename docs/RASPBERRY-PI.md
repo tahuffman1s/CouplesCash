@@ -58,14 +58,20 @@ explicitly to force Pi mode (for example in a VM). What `install.sh` does (it wo
 5. In Pi mode: requires arm64, makes sure NTP is on, enables **zram swap** (zstd, 25 % of RAM)
    if there is no swap, and refuses to fall back to a slow local image build unless `--build` is given.
 6. Clones the repo to `~/couplescash` (or `git pull`s it if present).
-7. Creates `.env`, generates `JWT_SECRET` and `POSTGRES_PASSWORD`, and asks whether you want a
+7. Creates `.env`, generates `JWT_SECRET` and `POSTGRES_PASSWORD`, asks whether you want a
    **Cloudflare Tunnel** (enter `PUBLIC_URL` + `TUNNEL_TOKEN`) or **LAN-only** mode
-   (`http://<pi-ip>:3000`, web bound to the whole LAN).
-8. Pulls the images (falls back to building locally) and starts the stack, waiting for health.
+   (`http://<pi-ip>:3000`, web bound to the whole LAN), and sets the push contact
+   `VAPID_SUBJECT=mailto:<--email or admin@your-host>`.
+8. Pulls the images (falls back to building locally).
+9. Generates the **Web Push (VAPID) key pair** with the api image
+   (`docker compose run --rm --no-deps api dotnet CouplesCash.Api.dll --vapid`) so bill
+   reminders work out of the box, then starts the stack and waits for health. With
+   `--no-start` and no Docker daemon this step is skipped with a warning; `make vapid` fills
+   the keys later.
 
-Flags: `--pi`, `--lan`, `--public-url URL`, `--tunnel-token TOK`, `--no-start`, `--build`, `--branch NAME`,
-`--dir DIR`, `-y` (non-interactive). Each also has an environment-variable form; `install.sh --help`
-lists them.
+Flags: `--pi`, `--lan`, `--public-url URL`, `--tunnel-token TOK`, `--email ADDR`, `--no-start`,
+`--build`, `--branch NAME`, `--dir DIR`, `-y` (non-interactive). Each also has an
+environment-variable form; `install.sh --help` lists them.
 
 If it added you to the `docker` group, **log out and back in** (or `newgrp
 docker`) before continuing.
@@ -83,6 +89,18 @@ Set two things:
   (For a LAN-only trial without a tunnel use `http://<pi-ip>:3000` and set
   `WEB_BIND=0.0.0.0`.)
 - `TUNNEL_TOKEN=…` — from Cloudflare; follow `infra/cloudflared/README.md`.
+
+Optional, for push reminders and passkeys (v2):
+
+- `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` — Web Push signing pair. Empty = push disabled
+  (the app hides the Notifications settings). Fill with `make vapid` (needs the api image:
+  `make pull` first). `VAPID_SUBJECT=mailto:you@example.com` is the contact push services
+  may use.
+- Passkeys need no extra variable: the API derives the WebAuthn origin and rpId from
+  `PUBLIC_URL`. **Keep the hostname stable** — changing it invalidates every passkey
+  (`docs/PASSKEYS.md`).
+- Both need `https://`, i.e. the tunnel. They are hidden in LAN mode.
+- `SCHEDULER_ENABLED=false` pauses the in-api background job (autopay, reminders).
 
 Leave `ASPNETCORE_ENVIRONMENT=Production` and `API_ENABLE_DOCS=false`.
 
@@ -113,6 +131,7 @@ Every service should show `Up … (healthy)` (`migrate` shows `Exited (0)`,
 curl -s http://localhost:3000/login -o /dev/null -w '%{http_code}\n'   # 200
 make logs S=api                                                       # "Now listening on: http://[::]:8080"
 make logs S=cloudflared                                               # "Registered tunnel connection"
+make scheduler-logs                                                   # background job: autopay / reminders ticks
 ```
 
 The API has no published port on purpose. To poke it from the Pi:
@@ -122,7 +141,10 @@ docker compose exec web node -e "fetch('http://api:8080/health').then(r=>r.text(
 ```
 
 Open `PUBLIC_URL` on each phone, register, link with the Couple Code, and use
-*Settings → Install app* to add it to the home screen.
+*Settings → Install app* to add it to the home screen. Then, from the
+**installed** app, *Settings → Notifications → Enable on this device* (iOS only
+delivers push to Home Screen apps — `docs/NOTIFICATIONS.md`) and *Settings →
+Passkeys → Add passkey* for Face ID / fingerprint sign-in (`docs/PASSKEYS.md`).
 
 ## 5. Day-two operations
 
@@ -136,6 +158,8 @@ Open `PUBLIC_URL` on each phone, register, link with the Couple Code, and use
 | Backup | `make backup` → `backups/couplescash-YYYYmmdd-HHMMSS.sql.gz` (keeps 14) |
 | Restore | `make restore FILE=backups/couplescash-….sql.gz` |
 | Rotate the JWT secret (signs everyone out) | `make secrets FORCE=1` *(also rotates the DB password — see below)* or edit `JWT_SECRET` in `.env`, then `make up` |
+| Generate / rotate Web Push keys | `make vapid` (fills empty keys) · `make vapid FORCE=1` (rotate; every phone re-enables notifications), then `make up` |
+| Watch the background job (autopay, reminders) | `make scheduler-logs` |
 
 ### Automatic nightly backups
 
@@ -230,6 +254,21 @@ that was powered off for a while needs network time before the first login.
 
 **Form submit → 403** — `PUBLIC_URL` in `.env` does not match the address in
 the browser exactly. See `infra/cloudflared/README.md` §3.
+
+**No "Notifications" or "Passkeys" in Settings** — either you are in LAN/http
+mode (both need `https://`, i.e. the tunnel), or `VAPID_*` are empty in `.env`
+(push only): `make vapid && make up`. Details and the iOS Home Screen
+requirement: `docs/NOTIFICATIONS.md`, `docs/PASSKEYS.md`.
+
+**Reminders arrive at the wrong time or not at all** — the scheduler runs inside
+`api` and evaluates the hour in the *household* time zone (Settings → Household),
+so (1) check that time zone, (2) check the Pi's clock is NTP-synchronised
+(`timedatectl`; a Pi has no RTC), (3) `make scheduler-logs`. Reminders are not
+replayed for hours the stack was down.
+
+**Passkeys stopped working after changing the domain** — passkeys are bound to
+the hostname in `PUBLIC_URL`. Sign in with the password and register new ones;
+the old ones can be deleted in Settings → Passkeys.
 
 **`web` is unhealthy but `api` is healthy** — `docker compose logs web`. A
 common cause is `ORIGIN` missing (compose refuses to start without

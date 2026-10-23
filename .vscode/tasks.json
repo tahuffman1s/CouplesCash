@@ -31,6 +31,14 @@
 			}
 		},
 		{
+			"label": "api: generate VAPID keys (make vapid)",
+			"type": "shell",
+			"command": "make vapid && make dev-env",
+			"detail": "dotnet run -- --vapid → fills empty VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY in .env, then rewrites .env.dev",
+			"presentation": { "panel": "shared" },
+			"problemMatcher": []
+		},
+		{
 			"label": "api: test",
 			"type": "process",
 			"command": "dotnet",

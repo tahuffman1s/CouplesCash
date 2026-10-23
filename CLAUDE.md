@@ -1,13 +1,18 @@
 # CLAUDE.md — CouplesCash cheat-sheet for coding agents
 
 Couples' shared-finance PWA. Two users per household; manual accounts, recurring
-bills/subscriptions/income, calendar, donut chart. Runs on a Raspberry Pi 4 via
-Docker Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` for the why.
+bills/subscriptions/income, calendar, donut chart; v2 adds push reminders, autopay
+auto-marking, activity feed, expenses + budgets, pay-period view, savings goals,
+month report, to-pay checklist, household settings and passkeys. Runs on a Raspberry
+Pi 4 via Docker Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1) and
+`docs/PLAN-V2.md` (v2) for the why.
 
 ## Source of truth
-- **`docs/API-CONTRACT.md` defines every route, shape and error.** Web and API are
-  built against it independently. Change the contract first, then both sides.
-- `docs/PLAN.md` §5 is the data model; §7 the security checklist (non-negotiable).
+- **`docs/API-CONTRACT.md` defines every route, shape and error** (v2 routes under
+  "# v2 additions"). Web and API are built against it independently. Change the
+  contract first, then both sides.
+- `docs/PLAN.md` §5 + `docs/PLAN-V2.md` "Data model additions" are the data model;
+  `docs/PLAN.md` §7 the security checklist (non-negotiable).
 
 ## Stack
 - `apps/web` — SvelteKit 3, **Svelte 5 runes only**, TypeScript, Tailwind 4 + daisyUI 5,
@@ -16,6 +21,8 @@ Docker Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` for the why.
 - `apps/api` — .NET 10 Minimal APIs, Npgsql + Dapper (hand-written SQL), DbUp
   migrations (`CouplesCash.Api/Migrations/000N_name.sql`, embedded), FluentValidation,
   JWT HS256 + rotating refresh tokens, Scalar at `/scalar` when `Api__EnableDocs=true`.
+  v2: Web Push (VAPID) sender, WebAuthn via Fido2NetLib, `SchedulerService` hosted
+  service (60 s tick: autopay, reminders, hygiene) inside the api process — no extra container.
 - Postgres 16. Compose/Make/CI/docs at repo root (`compose.yml`, `Makefile`, `infra/`, `.github/`).
 
 ## Where things live
@@ -23,11 +30,17 @@ Docker Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` for the why.
 |---|---|
 | Endpoints | `apps/api/CouplesCash.Api/Endpoints/*Endpoints.cs` (one file per resource, `MapXxx(this RouteGroupBuilder)`) |
 | SQL / repositories | `apps/api/CouplesCash.Api/Data/` |
-| Auth, tokens, Argon2, couple codes | `apps/api/CouplesCash.Api/Auth/` |
-| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` |
+| Auth, tokens, Argon2, couple codes, **passkeys (Fido2)** | `apps/api/CouplesCash.Api/Auth/` |
+| Pure engines (unit-tested, no I/O) | `apps/api/CouplesCash.Api/Domain/` — `RecurrenceEngine`, `PayPeriodEngine`, `GoalProjection`, `SchedulerRules`, `BudgetMath` |
+| Web Push (VAPID keys, sender, payloads, `--vapid` CLI) | `apps/api/CouplesCash.Api/Push/` |
+| Background job (autopay, reminders, hygiene) | `apps/api/CouplesCash.Api/Scheduler/` (`SchedulerService` hosted service; selection logic lives in `Domain/SchedulerRules.cs`) |
+| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = all v2 tables) |
 | API tests | `apps/api/CouplesCash.Api.Tests/` (xunit) |
 | Routes (pages + form actions) | `apps/web/src/routes/**/+page.svelte`, `+page.server.ts` |
 | API client + types | `apps/web/src/lib/server/api.ts`, `apps/web/src/lib/types.ts` |
+| Settings routes (profile, notifications, passkeys, household) | `apps/web/src/routes/(app)/settings/**`, `(app)/settings/household` |
+| v2 feature routes | `(app)/activity`, `expenses`, `todos`, `goals`, `payperiod`, `insights/report` |
+| Service worker (push display + click → `url`) | `apps/web/src/service-worker/index.ts` |
 | Components | `apps/web/src/lib/components/` |
 | Browser proxy to API | `apps/web/src/routes/api/[...path]/+server.ts` (needs `X-Requested-With: CouplesCash`) |
 | e2e | `apps/web/e2e/*.e2e.ts` (run against the in-memory mock API in `e2e/mock-api.ts`; also pass against the real API) |
@@ -38,13 +51,25 @@ make setup            # one-time: tools check, .env + secrets, restore deps
 make dev              # db in Docker, api (dotnet watch :8080) + web (vite :5173)
 make dev-db | dev-api | dev-web
 make up | down | logs S=api | ps        # full stack in Docker (prod-like)
+make scheduler-logs                      # api logs filtered to the background job
+make vapid                               # fill empty VAPID_* in .env (part of make secrets; FORCE=1 rotates)
 make test | lint | fmt                   # all languages
 make pi | backup | restore FILE=…        # Raspberry Pi ops
 cd apps/web && pnpm dev | check | lint | format | build | exec playwright test
 cd apps/api && dotnet build CouplesCash.slnx -warnaserror && dotnet test CouplesCash.slnx
 cd apps/api/CouplesCash.Api && dotnet run -- --migrate     # apply migrations and exit
+cd apps/api/CouplesCash.Api && dotnet run -- --vapid       # print Push__VapidPublicKey=… / Push__VapidPrivateKey=… and exit 0
 ```
 Native dev env comes from `.env.dev` (generated by `scripts/dev-env.sh` from `.env`).
+
+## Environment (api)
+`ConnectionStrings__Default`, `Jwt__Secret` (required) · `Push__VapidPublicKey`,
+`Push__VapidPrivateKey`, `Push__Subject` (mailto:; all empty → push endpoints 503
+`push_not_configured`) · `WebAuthn__Origin` (= `PUBLIC_URL`; passkeys 503 unless https or
+localhost), `WebAuthn__RelyingPartyId` (optional, derived from origin host),
+`WebAuthn__RelyingPartyName` (`CouplesCash`) · `Scheduler__Enabled` (default true).
+Compose maps `.env` → these in `compose.yml` `x-api-env`; `scripts/dev-env.sh` does the same
+for native dev. `--migrate` and `--vapid` must exit before any config validation.
 
 ## Conventions (do not bend)
 - **Money is integer cents** (`long` in C#, `number` in TS, `*_cents bigint` in SQL). Never floats.
@@ -63,7 +88,16 @@ Native dev env comes from `.env.dev` (generated by `scripts/dev-env.sh` from `.e
   component state. **Form actions first**, progressive enhancement with `use:enhance`;
   client fetch only for things that cannot be a form (calendar month nav) via `/api/...`.
 - Tailwind + daisyUI classes; theme via `data-theme` from the `theme` cookie; 44 px tap targets.
-- Secrets only via environment (`Jwt__Secret`, `ConnectionStrings__Default`). Nothing in appsettings.
+- Secrets only via environment (`Jwt__Secret`, `ConnectionStrings__Default`, `Push__VapidPrivateKey`).
+  Nothing in appsettings. The API serves only the VAPID *public* key, never logs the private one.
+- **Scheduler**: every statement is household-scoped like a request; "today"/"hour" are
+  evaluated in the household time zone; autopay writes `paid_by NULL, auto true`; reminders
+  are idempotent via `reminder_log`; an undone autopay is not re-marked the same day.
+  Log under category `*Scheduler*` so `make scheduler-logs` can grep it.
+- **Push payloads**: `{ title, body, url (relative), tag, icon }` — names and amounts only.
+- **Passkeys**: challenges 5-min TTL, single-use; rpId = host of `WebAuthn__Origin`.
+- **Activity**: every mutation writes `activity_events` in the same transaction (system
+  actions `actor_id NULL`).
 - Containers: non-root, read-only FS, listen on 8080 (api) / 3000 (web). Don't add `ports:` to api/db.
 - Commit messages: conventional (`feat(api): …`, `fix(web): …`, `chore(infra): …`).
 
@@ -80,7 +114,10 @@ Native dev env comes from `.env.dev` (generated by `scripts/dev-env.sh` from `.e
 
 ## Definition of done
 - `cd apps/api && dotnet build CouplesCash.slnx -warnaserror && dotnet test CouplesCash.slnx` ✅
+  (pure engines — recurrence, pay period, goal projection, autopay/reminder selection — have unit tests)
 - `cd apps/web && pnpm check && pnpm lint && pnpm build && pnpm exec playwright test` ✅
-- `docker compose config -q` ✅ if you touched compose/env; `bash -n scripts/*.sh` if scripts.
+- `docker compose config -q` ✅ if you touched compose/env; `bash -n` + `shellcheck -S style`
+  for `install.sh scripts/*.sh`; `make -n <target>` for Makefile changes.
+- Push/passkey UI hidden when the API answers 503 (not configured / insecure context).
 - Contract updated if the API surface changed; `CLAUDE.md`/docs updated if commands or paths moved.
 - No secrets, no `console.log`/`Console.WriteLine` debugging left behind, no new `ports:` on api/db.
