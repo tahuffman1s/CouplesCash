@@ -132,3 +132,122 @@ The SvelteKit server exposes the API to the browser only through `/api/[...path]
 - Typed codes normalise Crockford aliases (`O→0`, `I/L→1`), case and dashes.
 - Summary: `monthly*`, `byKind` and `byCategory` are monthly equivalents of non-archived items active in the month; `byCategory` covers bills + subscriptions only, with a grey "Uncategorized" bucket. `dueThisMonth` = outflow occurrences in the month, `paidThisMonth` = recorded payments, `remainingThisMonth` = unpaid occurrences.
 - Accounts record a balance snapshot on create, on PUT when the balance changes, and on `/balance`. `GET /health` returns 503 `{ status: "degraded", db: "error" }` when the database is unreachable.
+
+---
+
+# v2 additions
+
+All v2 routes are under `/v1`, require auth and (except push/passkeys/prefs, which are per-user) a household. See [PLAN-V2.md](./PLAN-V2.md) for behaviour.
+
+```ts
+type PayPeriod = 'weekly' | 'biweekly' | 'bimonthly' | 'monthly';
+// Household gains settings:
+type Household = { id; name; createdAt; members: Member[];
+  currency: string /* ISO 4217, default USD */; weekStart: 0 | 1; timezone: string /* IANA */;
+  defaultAccountId: string | null; payPeriod: PayPeriod; payAnchorDate: string | null };
+// Occurrence.paid gains `auto`:
+type Paid = { paidAt: string; paidBy: string | null; amountCents: number; auto: boolean };
+
+type ActivityEvent = { id: string; kind: string; summary: string; actorId: string | null; actorName: string | null;
+  entityType: string; entityId: string | null; data: Record<string, unknown>; createdAt: string };
+type Expense = { id: string; name: string; amountCents: number; categoryId: string | null; accountId: string | null;
+  spentOn: string; note: string | null; deducted: boolean; createdBy: string; createdAt: string; updatedAt: string };
+type BudgetRow = { categoryId: string; name: string; color: string; icon: string; budgetCents: number | null;
+  recurringCents: number; expensesCents: number; spentCents: number; remainingCents: number | null; percent: number | null };
+type PushPrefs = { remindersEnabled: boolean; daysBefore: number[]; hourLocal: number; activityEnabled: boolean; subscriptions: { id: string; userAgent: string; createdAt: string; lastUsedAt: string | null }[] };
+type Todo = { id: string; title: string; amountCents: number | null; dueDate: string | null; sortOrder: number;
+  doneAt: string | null; doneBy: string | null; doneByName: string | null; createdBy: string; createdAt: string };
+type Goal = { id: string; name: string; targetCents: number; targetDate: string | null; accountId: string | null; accountName: string | null;
+  color: string; icon: string; currentCents: number; percent: number; monthlyPaceCents: number | null /* avg change/month, last 90d */;
+  projectedDate: string | null; monthlyNeededCents: number | null /* to hit targetDate */; history: { at: string; value: number }[]; createdAt: string };
+type Passkey = { id: string; name: string; createdAt: string; lastUsedAt: string | null; backedUp: boolean };
+type PayPeriodView = { period: PayPeriod; start: string; end: string /* inclusive */; nextPayday: string; daysLeft: number;
+  expectedIncomeCents: number; dueCents: number; paidCents: number; remainingCents: number;
+  spendableCents: number /* checking + cash balances − remaining */; occurrences: Occurrence[]; expensesCents: number };
+type MonthReport = { month: string; summary: Summary; previousNetWorthCents: number | null; netWorthDeltaCents: number | null;
+  expensesTotalCents: number; topExpenses: Expense[]; budgets: BudgetRow[]; autoPaid: Occurrence[]; paidCount: number; unpaidCount: number;
+  generatedAt: string };
+```
+
+## Household settings
+| Method | Route | Body | Response |
+|---|---|---|---|
+| PATCH | `/v1/couple` | `{ name?, currency?, weekStart?, timezone?, defaultAccountId?, payPeriod?, payAnchorDate? }` (all optional, validated: currency 3 upper letters, timezone valid IANA, account in household) | `200 Household` |
+`GET /v1/couple` and `AuthResult.household` return the extended shape.
+
+## Activity
+| GET | `/v1/activity?before=<createdAt ISO>&limit=30` (limit ≤ 100) | `200 { events: ActivityEvent[]; nextBefore: string | null }` newest first |
+
+Kinds (dot-separated): `account.created|updated|balance|deleted`, `recurring.created|updated|deleted`, `occurrence.paid|unpaid|autopaid`, `expense.created|updated|deleted`, `budget.set|cleared`, `todo.created|done|undone|deleted`, `goal.created|updated|contributed|deleted`, `couple.joined|left|settings`, `category.created|updated|deleted`, `user.renamed`. `summary` is a ready-to-show English sentence without the actor ("marked **Rent** paid · $1,850.00"); the web prefixes the actor name. `data` carries ids/amounts for deep links.
+
+## Expenses
+| Method | Route | Body | Response |
+|---|---|---|---|
+| GET | `/v1/expenses?month=YYYY-MM` (default current) or `?from&to` (≤ 93 days) | — | `200 Expense[]` newest `spentOn` first |
+| POST | `/v1/expenses` | `{ name, amountCents (>0), categoryId?, accountId?, spentOn, note?, deduct?: boolean (default true when accountId set) }` | `201 Expense` (deducting adjusts the account balance and records a snapshot) |
+| PUT | `/v1/expenses/{id}` | same fields (changing amount/account re-applies the deduction delta) | `200 Expense` |
+| DELETE | `/v1/expenses/{id}` | — | `204` (reverses the deduction if `deducted`) |
+
+## Budgets
+| GET | `/v1/budgets?month=YYYY-MM` | `200 { month, rows: BudgetRow[] (every category, budgeted or not), totalBudgetCents, totalSpentCents }` |
+| PUT | `/v1/budgets/{categoryId}` `{ amountCents (≥ 0) }` | `200 BudgetRow` |
+| DELETE | `/v1/budgets/{categoryId}` | `204` |
+`spentCents = recurringCents (monthly equivalents of bills+subscriptions in the category) + expensesCents (expenses in the month)`.
+
+## Pay period
+| GET | `/v1/payperiod?date=YYYY-MM-DD` (default today in household tz) | `200 PayPeriodView` · `409 { title: "Pay period not configured" }` when `payAnchorDate` is null |
+Period math (pure, unit-tested): `weekly` = 7 days from anchor; `biweekly` = 14; `monthly` = anchor day each month (clamped); `bimonthly` = anchor day and anchor day + 15 (clamped; if anchor day > 15, the other payday is anchor − 15). `start` = most recent payday ≤ date, `end` = next payday − 1, `nextPayday` = `end + 1`. `expectedIncomeCents` = income occurrences in `[start, end]`.
+
+## Autopay & occurrences
+`PUT/DELETE /v1/recurring/{id}/occurrences/{date}/paid` unchanged; `Occurrence.paid.auto` is `true` for scheduler payments. Unpaying an auto payment is the **undo**.
+
+## To-pay checklist
+| Method | Route | Body | Response |
+|---|---|---|---|
+| GET | `/v1/todos?includeDone=false` | — | `200 Todo[]` open first by sortOrder, then done by doneAt desc (last 30 days) |
+| POST | `/v1/todos` | `{ title (1-120), amountCents?, dueDate? }` | `201 Todo` |
+| PUT | `/v1/todos/{id}` | `{ title, amountCents?, dueDate?, sortOrder? }` | `200 Todo` |
+| POST | `/v1/todos/{id}/done` | — | `200 Todo` |
+| DELETE | `/v1/todos/{id}/done` | — | `200 Todo` |
+| DELETE | `/v1/todos/{id}` | — | `204` |
+| PUT | `/v1/todos/order` | `{ ids: string[] }` | `204` |
+
+## Savings goals
+| Method | Route | Body | Response |
+|---|---|---|---|
+| GET | `/v1/goals` | — | `200 Goal[]` (non-archived) |
+| POST | `/v1/goals` | `{ name, targetCents (>0), targetDate?, accountId?, color?, icon? }` | `201 Goal` |
+| GET | `/v1/goals/{id}` | — | `200 Goal` (history: account snapshots or manual contributions, oldest first, ≤ 90 points) |
+| PUT | `/v1/goals/{id}` | same as POST | `200 Goal` |
+| DELETE | `/v1/goals/{id}` | — | `204` (soft) |
+| POST | `/v1/goals/{id}/contribute` | `{ amountCents (≠ 0) }` | `200 Goal` · `400` for account-linked goals (update the account balance instead) |
+Projection: `monthlyPaceCents` = (latest − earliest value in the last 90 days) ÷ months elapsed (null with < 2 points or < 7 days). `projectedDate` = today + (target − current) ÷ pace (null if pace ≤ 0 or already reached). `monthlyNeededCents` = (target − current) ÷ months until `targetDate` (null without a date or if reached).
+
+## Push notifications
+| Method | Route | Body | Response |
+|---|---|---|---|
+| GET | `/v1/push/vapid-public-key` | — | `200 { publicKey }` · `503 { type: ".../push_not_configured" }` |
+| POST | `/v1/push/subscriptions` | `{ endpoint, keys: { p256dh, auth }, userAgent? }` | `201 { id }` (upsert by endpoint) |
+| DELETE | `/v1/push/subscriptions` | `{ endpoint }` | `204` |
+| GET | `/v1/push/prefs` | — | `200 PushPrefs` |
+| PUT | `/v1/push/prefs` | `{ remindersEnabled, daysBefore (0-14, ≤ 5 values), hourLocal (0-23), activityEnabled }` | `200 PushPrefs` |
+| POST | `/v1/push/test` | — | `202` (sends "CouplesCash notifications are working 🎉" to the caller's subscriptions) |
+Payload JSON: `{ title, body, url, tag, icon: "/icons/icon-192.png" }`; the service worker shows it and opens `url` on click. Local hour is evaluated in the household time zone.
+
+## Passkeys (WebAuthn)
+| Method | Route | Body | Response |
+|---|---|---|---|
+| POST | `/v1/auth/passkeys/register/options` (auth) | `{ name (1-40) }` | `200 { challengeId, options: PublicKeyCredentialCreationOptionsJSON }` |
+| POST | `/v1/auth/passkeys/register` (auth) | `{ challengeId, name, credential: RegistrationResponseJSON }` | `201 Passkey` |
+| GET | `/v1/auth/passkeys` (auth) | — | `200 Passkey[]` |
+| DELETE | `/v1/auth/passkeys/{id}` (auth) | — | `204` |
+| POST | `/v1/auth/passkeys/login/options` (anon, `auth` rate limit) | `{}` | `200 { challengeId, options: PublicKeyCredentialRequestOptionsJSON }` (discoverable: empty allowCredentials, userVerification required) |
+| POST | `/v1/auth/passkeys/login` (anon, `auth` rate limit) | `{ challengeId, credential: AuthenticationResponseJSON }` | `200 AuthResult` · `401` |
+| GET | `/v1/auth/passkeys/config` (anon) | — | `200 { enabled: boolean, rpId }` |
+Options/response JSON follow the WebAuthn Level 3 JSON encodings (what `@simplewebauthn/browser` produces/consumes). Challenges expire after 5 minutes and are single-use.
+
+## Month report
+| GET | `/v1/reports/month?month=YYYY-MM` | `200 MonthReport` |
+
+## CLI
+`dotnet CouplesCash.Api.dll --vapid` prints `Push__VapidPublicKey=…` and `Push__VapidPrivateKey=…` (base64url, P-256) and exits 0.
