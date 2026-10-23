@@ -104,6 +104,8 @@ services:
     build: ./apps/api
     environment:
       <<: *api-env
+      # The dedicated `migrate` service already applied the schema.
+      Database__MigrateOnStartup: "false"
     read_only: true
     tmpfs:
       - /tmp
