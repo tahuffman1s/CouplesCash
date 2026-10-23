@@ -619,8 +619,12 @@ function goalView(g: Goal) {
 			.map((s) => ({ at: s.recordedAt, value: s.balanceCents }));
 		currentCents = account.balanceCents;
 	} else {
+		// the real API seeds a manual goal's history with a zero point at creation
 		let running = 0;
-		history = g.contributions.map((c) => ({ at: c.at, value: (running += c.amountCents) }));
+		history = [
+			{ at: g.createdAt, value: 0 },
+			...g.contributions.map((c) => ({ at: c.at, value: (running += c.amountCents) }))
+		];
 		currentCents = g.savedCents;
 	}
 	history = history.slice(-90);

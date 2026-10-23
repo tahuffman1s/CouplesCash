@@ -19,7 +19,8 @@
 
 	const pad = 8;
 	const geo = $derived.by(() => {
-		if (points.length === 0) return null;
+		// a single point (e.g. the creation marker) is not a trend yet
+		if (points.length < 2) return null;
 		const vals = [...points.map((p) => p.value), target, 0];
 		const min = Math.min(...vals);
 		const max = Math.max(...vals);
