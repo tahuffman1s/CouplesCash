@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+	<defs>
+		<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+			<stop offset="0" stop-color="#f4866f"/>
+			<stop offset="1" stop-color="#e1555f"/>
+		</linearGradient>
+	</defs>
+	<rect width="512" height="512" rx="112" fill="url(#g)"/>
+	<g transform="translate(61.44 61.44) scale(0.76)">
+		<path d="M256 440 C 130 350, 64 290, 64 200 C 64 140, 110 100, 164 100 C 203 100, 236 122, 256 156 C 276 122, 309 100, 348 100 C 402 100, 448 140, 448 200 C 448 290, 382 350, 256 440 Z" fill="#fff" opacity="0.96"/>
+		<text x="256" y="300" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-weight="700" font-size="190" fill="#e1555f">$</text>
+	</g>
+</svg>

@@ -1,0 +1,140 @@
+@import 'tailwindcss';
+@plugin 'daisyui' {
+	themes:
+		couplescash --default,
+		couplescash-dark --prefersdark;
+	logs: false;
+}
+
+/* Light: warm paper neutrals, coral primary, teal secondary, honey accent */
+@plugin 'daisyui/theme' {
+	name: 'couplescash';
+	default: true;
+	color-scheme: light;
+
+	--color-base-100: oklch(99% 0.006 75);
+	--color-base-200: oklch(96.5% 0.012 75);
+	--color-base-300: oklch(92% 0.018 70);
+	--color-base-content: oklch(25% 0.025 45);
+
+	--color-primary: oklch(66% 0.17 22);
+	--color-primary-content: oklch(99% 0.01 22);
+	--color-secondary: oklch(62% 0.1 190);
+	--color-secondary-content: oklch(99% 0.01 190);
+	--color-accent: oklch(78% 0.13 75);
+	--color-accent-content: oklch(28% 0.05 75);
+	--color-neutral: oklch(32% 0.03 45);
+	--color-neutral-content: oklch(96% 0.01 75);
+
+	--color-info: oklch(62% 0.12 240);
+	--color-info-content: oklch(98% 0.01 240);
+	--color-success: oklch(60% 0.13 155);
+	--color-success-content: oklch(98% 0.01 155);
+	--color-warning: oklch(76% 0.15 70);
+	--color-warning-content: oklch(25% 0.05 70);
+	--color-error: oklch(58% 0.2 25);
+	--color-error-content: oklch(98% 0.01 25);
+
+	--radius-selector: 1rem;
+	--radius-field: 0.75rem;
+	--radius-box: 1.25rem;
+	--size-selector: 0.25rem;
+	--size-field: 0.28125rem;
+	--border: 1px;
+	--depth: 1;
+	--noise: 0;
+}
+
+/* Dark: deep slate base, softened coral and teal so they sit comfortably on dark */
+@plugin 'daisyui/theme' {
+	name: 'couplescash-dark';
+	prefersdark: true;
+	color-scheme: dark;
+
+	--color-base-100: oklch(24% 0.025 265);
+	--color-base-200: oklch(20% 0.022 265);
+	--color-base-300: oklch(30% 0.028 265);
+	--color-base-content: oklch(93% 0.012 75);
+
+	--color-primary: oklch(74% 0.14 22);
+	--color-primary-content: oklch(20% 0.05 22);
+	--color-secondary: oklch(74% 0.1 190);
+	--color-secondary-content: oklch(20% 0.04 190);
+	--color-accent: oklch(82% 0.12 80);
+	--color-accent-content: oklch(25% 0.05 80);
+	--color-neutral: oklch(36% 0.03 265);
+	--color-neutral-content: oklch(94% 0.01 75);
+
+	--color-info: oklch(72% 0.11 240);
+	--color-info-content: oklch(18% 0.03 240);
+	--color-success: oklch(72% 0.13 155);
+	--color-success-content: oklch(18% 0.04 155);
+	--color-warning: oklch(80% 0.14 75);
+	--color-warning-content: oklch(22% 0.05 75);
+	--color-error: oklch(70% 0.17 25);
+	--color-error-content: oklch(18% 0.04 25);
+
+	--radius-selector: 1rem;
+	--radius-field: 0.75rem;
+	--radius-box: 1.25rem;
+	--size-selector: 0.25rem;
+	--size-field: 0.28125rem;
+	--border: 1px;
+	--depth: 1;
+	--noise: 0;
+}
+
+@theme {
+	--font-sans:
+		ui-rounded, 'SF Pro Rounded', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+@layer base {
+	html {
+		-webkit-tap-highlight-color: transparent;
+		-webkit-text-size-adjust: 100%;
+		scroll-behavior: smooth;
+	}
+	body {
+		overscroll-behavior-y: none;
+	}
+	:focus-visible {
+		outline: 2px solid var(--color-primary);
+		outline-offset: 2px;
+		border-radius: var(--radius-field);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		html {
+			scroll-behavior: auto;
+		}
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+		}
+	}
+}
+
+@utility tabular {
+	font-variant-numeric: tabular-nums;
+}
+
+@utility safe-bottom {
+	padding-bottom: env(safe-area-inset-bottom);
+}
+
+@utility safe-top {
+	padding-top: env(safe-area-inset-top);
+}
+
+/* A page's main scroll area leaves room for the dock plus the home indicator. */
+@utility pb-dock {
+	padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+}
+
+/* Hairline divider that matches the warm base */
+@utility hairline {
+	border-color: color-mix(in oklab, var(--color-base-content) 8%, transparent);
+}
