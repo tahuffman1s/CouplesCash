@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CouplesCash.Api.Contracts;
 using FluentValidation;
 
@@ -69,9 +70,23 @@ public sealed class JoinRequestValidator : AbstractValidator<JoinRequest>
     public JoinRequestValidator() => RuleFor(x => x.Code).NotEmpty().MaximumLength(64);
 }
 
-public sealed class RenameHouseholdRequestValidator : AbstractValidator<RenameHouseholdRequest>
+public sealed class HouseholdSettingsRequestValidator : AbstractValidator<HouseholdSettingsRequest>
 {
-    public RenameHouseholdRequestValidator() => RuleFor(x => x.Name).NotEmpty().Length(1, 60);
+    public const string CurrencyPattern = "^[A-Z]{3}$";
+
+    public HouseholdSettingsRequestValidator()
+    {
+        RuleFor(x => x.Name.Value).NotEmpty().Length(1, 60).When(x => x.Name.HasValue).OverridePropertyName("Name");
+        RuleFor(x => x.Currency.Value).NotEmpty().Matches(CurrencyPattern).When(x => x.Currency.HasValue).OverridePropertyName("Currency")
+            .WithMessage("Must be a 3-letter upper-case ISO 4217 code.");
+        RuleFor(x => x.WeekStart.Value).NotNull().InclusiveBetween(0, 1).When(x => x.WeekStart.HasValue).OverridePropertyName("WeekStart")
+            .WithMessage("Must be 0 (Sunday) or 1 (Monday).");
+        RuleFor(x => x.Timezone.Value).NotEmpty().MaximumLength(64).Must(IsKnownTimeZone).When(x => x.Timezone.HasValue).OverridePropertyName("Timezone")
+            .WithMessage("Must be a valid IANA time zone id (e.g. America/Chicago).");
+        RuleFor(x => x.PayPeriod.Value).NotNull().IsInEnum().When(x => x.PayPeriod.HasValue).OverridePropertyName("PayPeriod");
+    }
+
+    public static bool IsKnownTimeZone(string? id) => !string.IsNullOrWhiteSpace(id) && TimeZoneInfo.TryFindSystemTimeZoneById(id, out _);
 }
 
 public sealed class AccountRequestValidator : AbstractValidator<AccountRequest>
@@ -126,4 +141,114 @@ public sealed class MarkPaidRequestValidator : AbstractValidator<MarkPaidRequest
 {
     public MarkPaidRequestValidator() =>
         RuleFor(x => x.AmountCents).GreaterThan(0).LessThanOrEqualTo(Rules.MaxCents).When(x => x.AmountCents is not null);
+}
+
+public sealed class ExpenseRequestValidator : AbstractValidator<ExpenseRequest>
+{
+    public ExpenseRequestValidator()
+    {
+        RuleFor(x => x.Name).NotEmpty().MaximumLength(80);
+        RuleFor(x => x.AmountCents).GreaterThan(0).LessThanOrEqualTo(Rules.MaxCents);
+        RuleFor(x => x.SpentOn).NotNull();
+        RuleFor(x => x.Note).MaximumLength(500);
+    }
+}
+
+public sealed class BudgetRequestValidator : AbstractValidator<BudgetRequest>
+{
+    public BudgetRequestValidator() => RuleFor(x => x.AmountCents).InclusiveBetween(0, Rules.MaxCents);
+}
+
+public sealed class TodoRequestValidator : AbstractValidator<TodoRequest>
+{
+    public TodoRequestValidator()
+    {
+        RuleFor(x => x.Title).NotEmpty().Length(1, 120);
+        RuleFor(x => x.AmountCents).GreaterThan(0).LessThanOrEqualTo(Rules.MaxCents).When(x => x.AmountCents is not null);
+        RuleFor(x => x.SortOrder).InclusiveBetween(0, 100_000).When(x => x.SortOrder is not null);
+    }
+}
+
+public sealed class TodoOrderRequestValidator : AbstractValidator<TodoOrderRequest>
+{
+    public TodoOrderRequestValidator()
+    {
+        RuleFor(x => x.Ids).NotNull().Must(ids => ids is { Length: >= 1 and <= 500 }).WithMessage("Provide between 1 and 500 ids.");
+        RuleFor(x => x.Ids).Must(ids => ids.Distinct().Count() == ids.Length).When(x => x.Ids is not null).WithMessage("Ids must be unique.");
+    }
+}
+
+public sealed class GoalRequestValidator : AbstractValidator<GoalRequest>
+{
+    public GoalRequestValidator()
+    {
+        RuleFor(x => x.Name).NotEmpty().MaximumLength(60);
+        RuleFor(x => x.TargetCents).GreaterThan(0).LessThanOrEqualTo(Rules.MaxCents);
+        RuleFor(x => x.Color).Matches(Rules.HexColor).When(x => x.Color is not null);
+        RuleFor(x => x.Icon).Matches(Rules.Icon).MaximumLength(64).When(x => x.Icon is not null);
+    }
+}
+
+public sealed class ContributeRequestValidator : AbstractValidator<ContributeRequest>
+{
+    public ContributeRequestValidator() =>
+        RuleFor(x => x.AmountCents).NotEqual(0).InclusiveBetween(-Rules.MaxCents, Rules.MaxCents);
+}
+
+public sealed class PushSubscriptionRequestValidator : AbstractValidator<PushSubscriptionRequest>
+{
+    public PushSubscriptionRequestValidator()
+    {
+        RuleFor(x => x.Endpoint).NotEmpty().MaximumLength(2048)
+            .Must(e => Uri.TryCreate(e, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps)
+            .WithMessage("Must be an absolute https URL.");
+        RuleFor(x => x.Keys).NotNull();
+        RuleFor(x => x.Keys!.P256dh).NotEmpty().MaximumLength(200).When(x => x.Keys is not null).OverridePropertyName("keys.p256dh");
+        RuleFor(x => x.Keys!.Auth).NotEmpty().MaximumLength(100).When(x => x.Keys is not null).OverridePropertyName("keys.auth");
+        RuleFor(x => x.UserAgent).MaximumLength(256);
+    }
+}
+
+public sealed class PushUnsubscribeRequestValidator : AbstractValidator<PushUnsubscribeRequest>
+{
+    public PushUnsubscribeRequestValidator()
+    {
+        RuleFor(x => x.Endpoint).MaximumLength(2048);
+        RuleFor(x => x).Must(x => !string.IsNullOrWhiteSpace(x.Endpoint) || x.Id is { } id && id != Guid.Empty)
+            .WithMessage("Provide endpoint or id.").OverridePropertyName("endpoint");
+    }
+}
+
+public sealed class PushPrefsRequestValidator : AbstractValidator<PushPrefsRequest>
+{
+    public PushPrefsRequestValidator()
+    {
+        RuleFor(x => x.DaysBefore).NotNull().Must(d => d is { Length: <= 5 }).WithMessage("At most 5 values.");
+        RuleForEach(x => x.DaysBefore).InclusiveBetween(0, 14).When(x => x.DaysBefore is not null);
+        RuleFor(x => x.HourLocal).InclusiveBetween(0, 23);
+    }
+}
+
+public sealed class PasskeyOptionsRequestValidator : AbstractValidator<PasskeyOptionsRequest>
+{
+    public PasskeyOptionsRequestValidator() => RuleFor(x => x.Name).NotEmpty().Length(1, 40);
+}
+
+public sealed class PasskeyRegisterRequestValidator : AbstractValidator<PasskeyRegisterRequest>
+{
+    public PasskeyRegisterRequestValidator()
+    {
+        RuleFor(x => x.ChallengeId).NotEmpty();
+        RuleFor(x => x.Name).NotEmpty().Length(1, 40);
+        RuleFor(x => x.Credential).Must(c => c.ValueKind == JsonValueKind.Object).WithMessage("Must be a RegistrationResponseJSON object.");
+    }
+}
+
+public sealed class PasskeyLoginRequestValidator : AbstractValidator<PasskeyLoginRequest>
+{
+    public PasskeyLoginRequestValidator()
+    {
+        RuleFor(x => x.ChallengeId).NotEmpty();
+        RuleFor(x => x.Credential).Must(c => c.ValueKind == JsonValueKind.Object).WithMessage("Must be an AuthenticationResponseJSON object.");
+    }
 }

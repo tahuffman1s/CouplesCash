@@ -6,6 +6,7 @@ using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Npgsql;
 
 namespace CouplesCash.Api.Endpoints;
 
@@ -129,15 +130,37 @@ public static class AuthEndpoints
     private static async Task<Results<Ok<UserDto>, ProblemHttpResult>> UpdateMe(
         UpdateMeRequest request,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         UserRepository users,
+        HouseholdRepository households,
+        ActivityService activity,
         CancellationToken ct)
     {
         var userId = principal.GetUserId();
-        var user = request.DisplayName is { } name
-            ? await users.UpdateDisplayNameAsync(userId, name.Trim(), ct)
-            : await users.FindByIdAsync(userId, ct);
+        if (request.DisplayName is not { } name)
+        {
+            var current = await users.FindByIdAsync(userId, ct);
+            return current is null ? Problems.Unauthorized("Unknown user") : TypedResults.Ok(current.ToDto());
+        }
 
-        return user is null ? Problems.Unauthorized("Unknown user") : TypedResults.Ok(user.ToDto());
+        // Membership from the database: the rename shows up in the partner's feed even with a stale token.
+        var householdId = await households.GetHouseholdIdForUserAsync(userId, ct);
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var user = await users.UpdateDisplayNameAsync(uow.Connection, userId, name.Trim(), ct);
+        if (user is null)
+        {
+            return Problems.Unauthorized("Unknown user");
+        }
+
+        if (householdId is { } hh)
+        {
+            await activity.RecordAsync(uow, hh, userId, "user.renamed", "user", userId,
+                ActivitySummaries.UserRenamed(user.DisplayName), new { userId, displayName = user.DisplayName }, ct, user.DisplayName);
+        }
+
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(user.ToDto());
     }
 
     private static async Task<Results<NoContent, ValidationProblem, ProblemHttpResult>> ChangePassword(

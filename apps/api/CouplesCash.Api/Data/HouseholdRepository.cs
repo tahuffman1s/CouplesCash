@@ -1,13 +1,26 @@
 using CouplesCash.Api.Contracts;
+using CouplesCash.Api.Domain;
 using Dapper;
 using Npgsql;
 using static CouplesCash.Api.Data.Sql;
 
 namespace CouplesCash.Api.Data;
 
+/// <summary>Settings changes for PATCH /v1/couple. Null = leave as is; the <see cref="Optional{T}"/> fields can be cleared.</summary>
+public sealed record HouseholdSettingsUpdate(
+    string? Name,
+    string? Currency,
+    int? WeekStart,
+    string? Timezone,
+    Optional<Guid?> DefaultAccountId,
+    PayPeriod? PayPeriod,
+    Optional<DateOnly?> PayAnchorDate);
+
 public sealed class HouseholdRepository(NpgsqlDataSource db)
 {
-    private const string SelectHousehold = "SELECT id, name, created_at FROM households WHERE id = @Id";
+    private const string Columns = "id, name, created_at, currency, week_start, timezone, default_account_id, pay_period, pay_anchor_date";
+
+    private const string SelectHousehold = $"SELECT {Columns} FROM households WHERE id = @Id";
 
     private const string SelectMembers =
         """
@@ -47,6 +60,36 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
         return await LoadAsync(conn, householdId, ct);
+    }
+
+    public Task<HouseholdDto?> GetAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct) => LoadAsync(conn, householdId, ct);
+
+    /// <summary>The household's settings row (currency, time zone, pay period…). Null when the household does not exist.</summary>
+    public async Task<HouseholdRow?> GetRowAsync(Guid householdId, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<HouseholdRow>(Cmd(SelectHousehold, new { Id = householdId }, ct));
+    }
+
+    public Task<HouseholdRow?> GetRowAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct) =>
+        conn.QuerySingleOrDefaultAsync<HouseholdRow>(Cmd(SelectHousehold, new { Id = householdId }, ct));
+
+    /// <summary>Every household (for the scheduler).</summary>
+    public async Task<IReadOnlyList<HouseholdRow>> ListAllAsync(CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var rows = await conn.QueryAsync<HouseholdRow>(Cmd($"SELECT {Columns} FROM households ORDER BY id", null, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>Member user ids of a household.</summary>
+    public async Task<IReadOnlyList<Guid>> MemberIdsAsync(Guid householdId, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var rows = await conn.QueryAsync<Guid>(Cmd(
+            "SELECT user_id FROM household_members WHERE household_id = @Id ORDER BY joined_at",
+            new { Id = householdId }, ct));
+        return rows.ToList();
     }
 
     public async Task<HouseholdDto?> GetForUserAsync(Guid userId, CancellationToken ct)
@@ -101,21 +144,40 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
         return household;
     }
 
-    public async Task<bool> RenameAsync(Guid householdId, string name, CancellationToken ct)
+    /// <summary>Applies a settings patch. Returns false when the household does not exist.</summary>
+    public async Task<bool> UpdateSettingsAsync(NpgsqlConnection conn, Guid householdId, HouseholdSettingsUpdate update, CancellationToken ct)
     {
-        await using var conn = await db.OpenConnectionAsync(ct);
         var rows = await conn.ExecuteAsync(Cmd(
-            "UPDATE households SET name = @Name WHERE id = @Id",
-            new { Id = householdId, Name = name }, ct));
+            """
+            UPDATE households
+            SET name               = COALESCE(@Name, name),
+                currency           = COALESCE(@Currency, currency),
+                week_start         = COALESCE(@WeekStart, week_start),
+                timezone           = COALESCE(@Timezone, timezone),
+                pay_period         = COALESCE(@PayPeriod, pay_period),
+                default_account_id = CASE WHEN @SetDefaultAccount THEN @DefaultAccountId ELSE default_account_id END,
+                pay_anchor_date    = CASE WHEN @SetPayAnchor THEN @PayAnchorDate ELSE pay_anchor_date END
+            WHERE id = @Id
+            """,
+            new
+            {
+                Id = householdId,
+                update.Name,
+                update.Currency,
+                WeekStart = (short?)update.WeekStart,
+                update.Timezone,
+                PayPeriod = update.PayPeriod?.ToDb(),
+                SetDefaultAccount = update.DefaultAccountId.HasValue,
+                DefaultAccountId = update.DefaultAccountId.Value,
+                SetPayAnchor = update.PayAnchorDate.HasValue,
+                PayAnchorDate = update.PayAnchorDate.Value,
+            }, ct));
         return rows > 0;
     }
 
-    /// <summary>Removes a member; the household is deleted (cascading everything) once nobody is left.</summary>
-    public async Task LeaveAsync(Guid householdId, Guid userId, DateTime now, CancellationToken ct)
+    /// <summary>Removes a member; the household is deleted (cascading everything) once nobody is left. Returns true when the household was deleted.</summary>
+    public async Task<bool> LeaveAsync(NpgsqlConnection conn, Guid householdId, Guid userId, DateTime now, CancellationToken ct)
     {
-        await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
-
         await conn.ExecuteAsync(Cmd(
             "DELETE FROM household_members WHERE household_id = @HouseholdId AND user_id = @UserId",
             new { HouseholdId = householdId, UserId = userId }, ct));
@@ -126,11 +188,10 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
             "UPDATE couple_codes SET expires_at = @Now WHERE household_id = @HouseholdId AND created_by = @UserId AND redeemed_at IS NULL AND expires_at > @Now",
             new { HouseholdId = householdId, UserId = userId, Now = now }, ct));
 
-        await conn.ExecuteAsync(Cmd(
+        var deleted = await conn.ExecuteAsync(Cmd(
             "DELETE FROM households h WHERE h.id = @HouseholdId AND NOT EXISTS (SELECT 1 FROM household_members m WHERE m.household_id = h.id)",
             new { HouseholdId = householdId }, ct));
-
-        await tx.CommitAsync(ct);
+        return deleted > 0;
     }
 
     private static async Task<HouseholdDto?> LoadAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct)
@@ -146,6 +207,12 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
             household.Id,
             household.Name,
             household.CreatedAt,
-            members.Select(m => new MemberDto(m.UserId, m.DisplayName, m.Email, m.JoinedAt)).ToList());
+            members.Select(m => new MemberDto(m.UserId, m.DisplayName, m.Email, m.JoinedAt)).ToList(),
+            household.Currency,
+            household.WeekStart,
+            household.Timezone,
+            household.DefaultAccountId,
+            household.PayPeriod,
+            household.PayAnchorDate);
     }
 }

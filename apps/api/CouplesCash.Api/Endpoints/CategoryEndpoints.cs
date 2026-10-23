@@ -6,6 +6,7 @@ using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Npgsql;
 
 namespace CouplesCash.Api.Endpoints;
 
@@ -29,20 +30,71 @@ public static class CategoryEndpoints
         return TypedResults.Ok(rows.Select(c => c.ToDto()).ToList());
     }
 
-    private static async Task<Created<CategoryDto>> Create(CategoryRequest request, ClaimsPrincipal principal, CategoryRepository categories, CancellationToken ct)
+    private static async Task<Created<CategoryDto>> Create(
+        CategoryRequest request,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        CategoryRepository categories,
+        ActivityService activity,
+        CancellationToken ct)
     {
-        var row = await categories.CreateAsync(principal.GetHouseholdId(), request.Name.Trim(), request.Color.ToLowerInvariant(), request.Icon, request.SortOrder, ct);
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await categories.CreateAsync(uow.Connection, householdId, request.Name.Trim(), request.Color.ToLowerInvariant(), request.Icon, request.SortOrder, ct);
+        await activity.RecordAsync(uow, householdId, userId, "category.created", "category", row.Id,
+            ActivitySummaries.CategoryCreated(row), new { categoryId = row.Id }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
         return TypedResults.Created($"/v1/categories/{row.Id}", row.ToDto());
     }
 
-    private static async Task<Results<Ok<CategoryDto>, NotFound>> Update(Guid id, CategoryRequest request, ClaimsPrincipal principal, CategoryRepository categories, CancellationToken ct)
+    private static async Task<Results<Ok<CategoryDto>, NotFound>> Update(
+        Guid id,
+        CategoryRequest request,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        CategoryRepository categories,
+        ActivityService activity,
+        CancellationToken ct)
     {
-        var row = await categories.UpdateAsync(principal.GetHouseholdId(), id, request.Name.Trim(), request.Color.ToLowerInvariant(), request.Icon, request.SortOrder, ct);
-        return row is null ? TypedResults.NotFound() : TypedResults.Ok(row.ToDto());
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await categories.UpdateAsync(uow.Connection, householdId, id, request.Name.Trim(), request.Color.ToLowerInvariant(), request.Icon, request.SortOrder, ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "category.updated", "category", row.Id,
+            ActivitySummaries.CategoryUpdated(row), new { categoryId = row.Id }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(row.ToDto());
     }
 
-    private static async Task<Results<NoContent, NotFound>> Delete(Guid id, ClaimsPrincipal principal, CategoryRepository categories, CancellationToken ct) =>
-        await categories.DeleteAsync(principal.GetHouseholdId(), id, ct)
-            ? TypedResults.NoContent()
-            : TypedResults.NotFound();
+    private static async Task<Results<NoContent, NotFound>> Delete(
+        Guid id,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        CategoryRepository categories,
+        ActivityService activity,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await categories.DeleteAsync(uow.Connection, householdId, id, ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "category.deleted", "category", row.Id,
+            ActivitySummaries.CategoryDeleted(row), new { categoryId = row.Id, name = row.Name }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+        return TypedResults.NoContent();
+    }
 }

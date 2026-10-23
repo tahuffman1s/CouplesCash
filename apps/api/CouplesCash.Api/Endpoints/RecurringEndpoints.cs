@@ -7,6 +7,7 @@ using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Npgsql;
 
 namespace CouplesCash.Api.Endpoints;
 
@@ -24,7 +25,7 @@ public static class RecurringEndpoints
         group.MapPut("/{id:guid}/occurrences/{date}/paid", MarkPaid).WithValidation<MarkPaidRequest>()
             .WithSummary("Mark an occurrence paid (404 unless {date} is a real occurrence)");
         group.MapDelete("/{id:guid}/occurrences/{date}/paid", MarkUnpaid)
-            .WithSummary("Un-mark an occurrence");
+            .WithSummary("Un-mark an occurrence (undo for autopay: the scheduler will not re-pay it)");
 
         return group;
     }
@@ -56,19 +57,29 @@ public static class RecurringEndpoints
     private static async Task<Results<Created<RecurringItemDto>, ValidationProblem>> Create(
         RecurringRequest request,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         RecurringRepository items,
         CategoryRepository categories,
         AccountRepository accounts,
+        HouseholdRepository households,
+        ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
     {
         var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
         if (await CheckReferencesAsync(householdId, request, categories, accounts, ct) is { } problem)
         {
             return problem;
         }
 
-        var row = await items.CreateAsync(householdId, principal.GetUserId(), ToFields(request), time.Now(), ct);
+        var currency = await households.CurrencyAsync(householdId, ct);
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await items.CreateAsync(uow.Connection, householdId, userId, ToFields(request), time.Now(), ct);
+        await activity.RecordAsync(uow, householdId, userId, "recurring.created", "recurring", row.Id,
+            ActivitySummaries.RecurringCreated(row, currency), new { itemId = row.Id, kind = row.Kind.ToDb(), amountCents = row.AmountCents }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+
         return TypedResults.Created($"/v1/recurring/{row.Id}", row.ToDto(time.Today()));
     }
 
@@ -82,13 +93,16 @@ public static class RecurringEndpoints
         Guid id,
         RecurringRequest request,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         RecurringRepository items,
         CategoryRepository categories,
         AccountRepository accounts,
+        ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
     {
         var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
         if (await items.GetAsync(householdId, id, ct) is null)
         {
             return TypedResults.NotFound();
@@ -99,32 +113,73 @@ public static class RecurringEndpoints
             return problem;
         }
 
-        var row = await items.UpdateAsync(householdId, id, ToFields(request), time.Now(), ct);
-        return row is null ? TypedResults.NotFound() : TypedResults.Ok(row.ToDto(time.Today()));
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await items.UpdateAsync(uow.Connection, householdId, id, ToFields(request), time.Now(), ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "recurring.updated", "recurring", row.Id,
+            ActivitySummaries.RecurringUpdated(row), new { itemId = row.Id, kind = row.Kind.ToDb(), amountCents = row.AmountCents }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(row.ToDto(time.Today()));
     }
 
-    private static async Task<Results<NoContent, NotFound>> Archive(Guid id, ClaimsPrincipal principal, RecurringRepository items, TimeProvider time, CancellationToken ct) =>
-        await items.ArchiveAsync(principal.GetHouseholdId(), id, time.Now(), ct)
-            ? TypedResults.NoContent()
-            : TypedResults.NotFound();
+    private static async Task<Results<NoContent, NotFound>> Archive(
+        Guid id,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        RecurringRepository items,
+        ActivityService activity,
+        TimeProvider time,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await items.GetAsync(uow.Connection, householdId, id, ct);
+        if (row is null || !await items.ArchiveAsync(uow.Connection, householdId, id, time.Now(), ct))
+        {
+            return TypedResults.NotFound();
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "recurring.deleted", "recurring", row.Id,
+            ActivitySummaries.RecurringDeleted(row), new { itemId = row.Id, kind = row.Kind.ToDb() }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+        return TypedResults.NoContent();
+    }
 
     private static async Task<Results<Ok<OccurrenceDto>, NotFound>> MarkPaid(
         Guid id,
         DateOnly date,
         MarkPaidRequest? request,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         RecurringRepository items,
+        HouseholdRepository households,
+        ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
     {
-        var item = await items.GetAsync(principal.GetHouseholdId(), id, ct);
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+        var item = await items.GetAsync(householdId, id, ct);
         if (item is null || !RecurrenceEngine.IsOccurrence(item.Rule, date))
         {
             return TypedResults.NotFound();
         }
 
+        var currency = await households.CurrencyAsync(householdId, ct);
         var amount = request?.AmountCents ?? item.AmountCents;
-        var payment = await items.UpsertPaymentAsync(item.Id, date, principal.GetUserId(), amount, time.Now(), ct);
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var payment = await items.UpsertPaymentAsync(uow.Connection, item.Id, date, userId, amount, time.Now(), auto: false, ct);
+        await activity.RecordAsync(uow, householdId, userId, "occurrence.paid", "occurrence", item.Id,
+            ActivitySummaries.OccurrencePaid(item.Name, amount, currency), new { itemId = item.Id, dueDate = date, amountCents = amount }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+
         return TypedResults.Ok(item.ToOccurrence(date, payment));
     }
 
@@ -132,16 +187,35 @@ public static class RecurringEndpoints
         Guid id,
         DateOnly date,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         RecurringRepository items,
+        ActivityService activity,
+        TimeProvider time,
         CancellationToken ct)
     {
-        var item = await items.GetAsync(principal.GetHouseholdId(), id, ct);
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+        var item = await items.GetAsync(householdId, id, ct);
         if (item is null || !RecurrenceEngine.IsOccurrence(item.Rule, date))
         {
             return TypedResults.NotFound();
         }
 
-        await items.DeletePaymentAsync(item.Id, date, ct);
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var removed = await items.DeletePaymentAsync(uow.Connection, item.Id, date, ct);
+        if (removed is not null)
+        {
+            // Undo guard: once a user un-marks an autopay occurrence the scheduler must leave it alone.
+            if (removed.Auto || item.AutoPay)
+            {
+                await items.InsertAutopaySkipAsync(uow.Connection, item.Id, date, userId, time.Now(), ct);
+            }
+
+            await activity.RecordAsync(uow, householdId, userId, "occurrence.unpaid", "occurrence", item.Id,
+                ActivitySummaries.OccurrenceUnpaid(item.Name), new { itemId = item.Id, dueDate = date, wasAuto = removed.Auto }, ct, principal.GetDisplayName());
+        }
+
+        await uow.CommitAsync(ct);
         return TypedResults.Ok(item.ToOccurrence(date, null));
     }
 

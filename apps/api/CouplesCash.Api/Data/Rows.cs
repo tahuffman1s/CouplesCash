@@ -22,6 +22,18 @@ public sealed class HouseholdRow
     public string Name { get; init; } = "";
 
     public DateTime CreatedAt { get; init; }
+
+    public string Currency { get; init; } = "USD";
+
+    public int WeekStart { get; init; }
+
+    public string Timezone { get; init; } = "UTC";
+
+    public Guid? DefaultAccountId { get; init; }
+
+    public PayPeriod PayPeriod { get; init; } = PayPeriod.Monthly;
+
+    public DateOnly? PayAnchorDate { get; init; }
 }
 
 public sealed class MemberRow
@@ -155,7 +167,259 @@ public sealed class PaymentRow
 
     public DateTime PaidAt { get; init; }
 
-    public Guid PaidBy { get; init; }
+    public Guid? PaidBy { get; init; }
 
     public long AmountCents { get; init; }
+
+    public bool Auto { get; init; }
+}
+
+// ---------------------------------------------------------------------------------------------
+// v2
+// ---------------------------------------------------------------------------------------------
+
+public sealed class ActivityEventRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public Guid? ActorId { get; init; }
+
+    public string? ActorName { get; init; }
+
+    public string Kind { get; init; } = "";
+
+    public string EntityType { get; init; } = "";
+
+    public Guid? EntityId { get; init; }
+
+    public string Summary { get; init; } = "";
+
+    public string Data { get; init; } = "{}";
+
+    public DateTime CreatedAt { get; init; }
+}
+
+public sealed class ExpenseRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public string Name { get; init; } = "";
+
+    public long AmountCents { get; init; }
+
+    public Guid? CategoryId { get; init; }
+
+    public Guid? AccountId { get; init; }
+
+    public DateOnly SpentOn { get; init; }
+
+    public string? Note { get; init; }
+
+    public bool Deducted { get; init; }
+
+    public Guid CreatedBy { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public DateTime UpdatedAt { get; init; }
+}
+
+public sealed class BudgetRow
+{
+    public Guid HouseholdId { get; init; }
+
+    public Guid CategoryId { get; init; }
+
+    public long AmountCents { get; init; }
+
+    public DateTime UpdatedAt { get; init; }
+}
+
+public sealed class TodoRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public string Title { get; init; } = "";
+
+    public long? AmountCents { get; init; }
+
+    public DateOnly? DueDate { get; init; }
+
+    public int SortOrder { get; init; }
+
+    public DateTime? DoneAt { get; init; }
+
+    public Guid? DoneBy { get; init; }
+
+    public string? DoneByName { get; init; }
+
+    public Guid CreatedBy { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public DateTime UpdatedAt { get; init; }
+}
+
+public sealed class GoalRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public string Name { get; init; } = "";
+
+    public long TargetCents { get; init; }
+
+    public DateOnly? TargetDate { get; init; }
+
+    public Guid? AccountId { get; init; }
+
+    public long SavedCents { get; init; }
+
+    public string Color { get; init; } = "";
+
+    public string Icon { get; init; } = "";
+
+    public Guid CreatedBy { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public DateTime UpdatedAt { get; init; }
+
+    public DateTime? ArchivedAt { get; init; }
+
+    // Joined from accounts (null for manual goals).
+    public string? AccountName { get; init; }
+
+    public long? AccountBalanceCents { get; init; }
+
+    public bool IsLinked => AccountId is not null;
+
+    public long CurrentCents => IsLinked ? AccountBalanceCents ?? 0 : SavedCents;
+}
+
+public sealed class ContributionRow
+{
+    public Guid Id { get; init; }
+
+    public Guid GoalId { get; init; }
+
+    public long AmountCents { get; init; }
+
+    public Guid ContributedBy { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+}
+
+public sealed class AccountSnapshotPointRow
+{
+    public Guid AccountId { get; init; }
+
+    public long BalanceCents { get; init; }
+
+    public DateTime RecordedAt { get; init; }
+}
+
+public sealed class PushSubscriptionRow
+{
+    public Guid Id { get; init; }
+
+    public Guid UserId { get; init; }
+
+    public string Endpoint { get; init; } = "";
+
+    public string P256dh { get; init; } = "";
+
+    public string Auth { get; init; } = "";
+
+    public string? UserAgent { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public DateTime? LastUsedAt { get; init; }
+
+    public int Failures { get; init; }
+}
+
+public sealed class NotificationPrefsRow
+{
+    public Guid UserId { get; init; }
+
+    public bool RemindersEnabled { get; init; } = true;
+
+    public short[] DaysBefore { get; init; } = [1];
+
+    public int HourLocal { get; init; } = 9;
+
+    public bool ActivityEnabled { get; init; } = true;
+
+    public DateTime UpdatedAt { get; init; }
+
+    public static NotificationPrefsRow Defaults(Guid userId, DateTime now) => new() { UserId = userId, UpdatedAt = now };
+}
+
+/// <summary>A user the scheduler may need to notify: their prefs (defaults when none saved) plus household context.</summary>
+public sealed class ReminderUserRow
+{
+    public Guid UserId { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public string Timezone { get; init; } = "UTC";
+
+    public string Currency { get; init; } = "USD";
+
+    public bool RemindersEnabled { get; init; } = true;
+
+    public short[] DaysBefore { get; init; } = [1];
+
+    public int HourLocal { get; init; } = 9;
+}
+
+public sealed class WebAuthnCredentialRow
+{
+    public Guid Id { get; init; }
+
+    public Guid UserId { get; init; }
+
+    public byte[] CredentialId { get; init; } = [];
+
+    public byte[] PublicKey { get; init; } = [];
+
+    public long SignCount { get; init; }
+
+    public Guid? Aaguid { get; init; }
+
+    public string[] Transports { get; init; } = [];
+
+    public string Name { get; init; } = "";
+
+    public bool BackedUp { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public DateTime? LastUsedAt { get; init; }
+}
+
+public sealed class WebAuthnChallengeRow
+{
+    public Guid Id { get; init; }
+
+    public byte[] Challenge { get; init; } = [];
+
+    public Guid? UserId { get; init; }
+
+    public string Kind { get; init; } = "";
+
+    public string Options { get; init; } = "{}";
+
+    public DateTime ExpiresAt { get; init; }
+
+    public DateTime CreatedAt { get; init; }
 }

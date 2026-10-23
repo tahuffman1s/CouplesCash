@@ -26,6 +26,13 @@ public static class DataServiceCollectionExtensions
         services.AddSingleton<AccountRepository>();
         services.AddSingleton<CategoryRepository>();
         services.AddSingleton<RecurringRepository>();
+        services.AddSingleton<ActivityRepository>();
+        services.AddSingleton<ExpenseRepository>();
+        services.AddSingleton<BudgetRepository>();
+        services.AddSingleton<TodoRepository>();
+        services.AddSingleton<GoalRepository>();
+        services.AddSingleton<PushRepository>();
+        services.AddSingleton<WebAuthnRepository>();
 
         return services;
     }

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CouplesCash.Api.Domain;
 
 namespace CouplesCash.Api.Contracts;
@@ -18,7 +19,15 @@ public sealed record CoupleCodeRequest(string? Name);
 
 public sealed record JoinRequest(string Code);
 
-public sealed record RenameHouseholdRequest(string Name);
+/// <summary>PATCH /v1/couple: every field optional; nullable settings are cleared by sending <c>null</c>.</summary>
+public sealed record HouseholdSettingsRequest(
+    Optional<string?> Name,
+    Optional<string?> Currency,
+    Optional<int?> WeekStart,
+    Optional<string?> Timezone,
+    Optional<Guid?> DefaultAccountId,
+    Optional<PayPeriod?> PayPeriod,
+    Optional<DateOnly?> PayAnchorDate);
 
 public sealed record AccountRequest(
     string Name,
@@ -47,3 +56,42 @@ public sealed record RecurringRequest(
     string? Url);
 
 public sealed record MarkPaidRequest(long? AmountCents);
+
+public sealed record ExpenseRequest(
+    string Name,
+    long AmountCents,
+    Guid? CategoryId,
+    Guid? AccountId,
+    DateOnly? SpentOn,
+    string? Note,
+    bool? Deduct);
+
+public sealed record BudgetRequest(long AmountCents);
+
+public sealed record TodoRequest(string Title, long? AmountCents, DateOnly? DueDate, int? SortOrder);
+
+public sealed record TodoOrderRequest(Guid[] Ids);
+
+public sealed record GoalRequest(
+    string Name,
+    long TargetCents,
+    DateOnly? TargetDate,
+    Guid? AccountId,
+    string? Color,
+    string? Icon);
+
+public sealed record ContributeRequest(long AmountCents);
+
+public sealed record PushKeys(string P256dh, string Auth);
+
+public sealed record PushSubscriptionRequest(string Endpoint, PushKeys? Keys, string? UserAgent);
+
+public sealed record PushUnsubscribeRequest(string? Endpoint, Guid? Id);
+
+public sealed record PushPrefsRequest(bool RemindersEnabled, int[]? DaysBefore, int HourLocal, bool ActivityEnabled);
+
+public sealed record PasskeyOptionsRequest(string Name);
+
+public sealed record PasskeyRegisterRequest(Guid ChallengeId, string Name, JsonElement Credential);
+
+public sealed record PasskeyLoginRequest(Guid ChallengeId, JsonElement Credential);

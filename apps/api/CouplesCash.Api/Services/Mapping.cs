@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
@@ -45,5 +46,39 @@ public static class Mapping
         i.CategoryColor,
         i.AccountId,
         i.AccountName,
-        paid is null ? null : new PaidInfo(paid.PaidAt, paid.PaidBy, paid.AmountCents));
+        paid is null ? null : new PaidInfo(paid.PaidAt, paid.PaidBy, paid.AmountCents, paid.Auto));
+
+    // ---------------------------------------------------------------------------------------------
+    // v2
+    // ---------------------------------------------------------------------------------------------
+
+    public static ExpenseDto ToDto(this ExpenseRow e) =>
+        new(e.Id, e.Name, e.AmountCents, e.CategoryId, e.AccountId, e.SpentOn, e.Note, e.Deducted, e.CreatedBy, e.CreatedAt, e.UpdatedAt);
+
+    public static TodoDto ToDto(this TodoRow t) =>
+        new(t.Id, t.Title, t.AmountCents, t.DueDate, t.SortOrder, t.DoneAt, t.DoneBy, t.DoneByName, t.CreatedBy, t.CreatedAt);
+
+    public static ActivityEventDto ToDto(this ActivityEventRow e) =>
+        new(e.Id, e.Kind, e.Summary, e.ActorId, e.ActorName, e.EntityType, e.EntityId, ParseData(e.Data), e.CreatedAt);
+
+    public static PasskeyDto ToDto(this WebAuthnCredentialRow c) => new(c.Id, c.Name, c.CreatedAt, c.LastUsedAt, c.BackedUp);
+
+    public static PushSubscriptionDto ToDto(this PushSubscriptionRow s) => new(s.Id, s.UserAgent ?? "", s.CreatedAt, s.LastUsedAt);
+
+    public static PushPrefsDto ToDto(this NotificationPrefsRow p, IEnumerable<PushSubscriptionRow> subscriptions) =>
+        new(p.RemindersEnabled, p.DaysBefore.Select(d => (int)d).ToList(), p.HourLocal, p.ActivityEnabled, subscriptions.Select(s => s.ToDto()).ToList());
+
+    private static JsonElement ParseData(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+            return doc.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            using var empty = JsonDocument.Parse("{}");
+            return empty.RootElement.Clone();
+        }
+    }
 }

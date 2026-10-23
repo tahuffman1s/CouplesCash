@@ -53,15 +53,13 @@ public sealed class CoupleCodeRepository(NpgsqlDataSource db)
     }
 
     /// <summary>
-    /// Atomically redeems a code: locks it, adds the caller to the household (the SQL trigger rejects a
-    /// third member) and marks the code used. <paramref name="lookupHash"/> is either sha256(payload bytes)
-    /// or sha256(typed code); both columns are checked.
+    /// Redeems a code inside the caller's transaction: locks it, adds the caller to the household (the SQL
+    /// trigger rejects a third member) and marks the code used. <paramref name="lookupHash"/> is either
+    /// sha256(payload bytes) or sha256(typed code); both columns are checked. On a non-Redeemed status the
+    /// transaction is aborted and the caller must not commit.
     /// </summary>
-    public async Task<RedeemResult> RedeemAsync(byte[] lookupHash, Guid userId, DateTime now, CancellationToken ct)
+    public async Task<RedeemResult> RedeemAsync(NpgsqlConnection conn, Guid userId, byte[] lookupHash, DateTime now, CancellationToken ct)
     {
-        await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
-
         var code = await conn.QuerySingleOrDefaultAsync<CoupleCodeRow>(Cmd(
             """
             SELECT id, household_id, created_by, expires_at
@@ -97,7 +95,6 @@ public sealed class CoupleCodeRepository(NpgsqlDataSource db)
             "UPDATE couple_codes SET redeemed_at = @Now, redeemed_by = @UserId WHERE id = @Id",
             new { code.Id, UserId = userId, Now = now }, ct));
 
-        await tx.CommitAsync(ct);
         return new RedeemResult(RedeemStatus.Redeemed, code.HouseholdId);
     }
 }

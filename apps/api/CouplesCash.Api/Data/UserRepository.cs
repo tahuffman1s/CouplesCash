@@ -38,12 +38,15 @@ public sealed class UserRepository(NpgsqlDataSource db)
             new { Id = Guid.CreateVersion7(), Email = email, DisplayName = displayName, PasswordHash = passwordHash, Now = now }, ct));
     }
 
-    public async Task<UserRow?> UpdateDisplayNameAsync(Guid id, string displayName, CancellationToken ct)
-    {
-        await using var conn = await db.OpenConnectionAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<UserRow>(Cmd(
+    public Task<UserRow?> UpdateDisplayNameAsync(NpgsqlConnection conn, Guid id, string displayName, CancellationToken ct) =>
+        conn.QuerySingleOrDefaultAsync<UserRow>(Cmd(
             $"UPDATE users SET display_name = @DisplayName WHERE id = @Id RETURNING {Columns}",
             new { Id = id, DisplayName = displayName }, ct));
+
+    public async Task<string?> DisplayNameAsync(Guid id, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<string>(Cmd("SELECT display_name FROM users WHERE id = @Id", new { Id = id }, ct));
     }
 
     public async Task UpdatePasswordHashAsync(Guid id, string passwordHash, CancellationToken ct)

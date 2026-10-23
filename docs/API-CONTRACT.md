@@ -251,3 +251,90 @@ Options/response JSON follow the WebAuthn Level 3 JSON encodings (what `@simplew
 
 ## CLI
 `dotnet CouplesCash.Api.dll --vapid` prints `Push__VapidPublicKey=…` and `Push__VapidPrivateKey=…` (base64url, P-256) and exits 0.
+
+---
+
+# v2 implementation notes (resolved during build)
+
+Read these alongside the §v2 tables above; where the two differ the notes describe what the API actually does.
+
+- **Money is hundredths for every currency.** `*Cents` fields are integer hundredths of the household `currency`
+  (USD cents, EUR cents, JPY "hundredths" too) — the API is currency-agnostic and never converts. `currency` only
+  drives formatting (activity summaries, push bodies): symbol for USD/EUR/GBP/CAD/AUD (`$1,850.00`, `€12.50`,
+  `CA$…`, `A$…`), otherwise the ISO code prefix (`CHF 1,234.56`).
+- **Activity `summary` is plain text, no markdown.** E.g. `marked Rent paid · $1,850.00`; the web prefixes the actor
+  name (`actorName`, null for system events such as autopay) and uses the ids in `data` for links. `data` always
+  carries the entity id (`accountId`, `itemId` + `dueDate`, `expenseId`, `categoryId`, `todoId`, `goalId`) plus
+  amounts where relevant. `GET /v1/activity` pages with `before` = the last event's `createdAt` (keyset on
+  `created_at DESC, id DESC`); `nextBefore` is null on the last page.
+- **Household settings:** `PATCH /v1/couple` body fields are all optional; sending `null` for `defaultAccountId` or
+  `payAnchorDate` clears them (other fields reject null). `timezone` must resolve with
+  `TimeZoneInfo.TryFindSystemTimeZoneById` (IANA ids; the container ships tzdata). A name-only patch is recorded
+  as `couple.settings` with summary "renamed the household to …". `GET /v1/couple`, `GET /v1/auth/me` and every
+  `AuthResult.household` carry `currency, weekStart, timezone, defaultAccountId, payPeriod, payAnchorDate`.
+- **Summary (`GET /v1/summary`) now includes expenses.** `byCategory` = monthly equivalents of active bills +
+  subscriptions **plus** the month's expenses (count = items + expenses; names/colours come from the categories
+  table, deleted categories fold into "Uncategorized"); `dueThisMonth` and `paidThisMonth` both add the month's
+  expenses total (an expense is spent the moment it is recorded); `remainingThisMonth` stays "unpaid occurrences".
+  "Active in the month" now also requires `anchorDate ≤ month end` (an item starting next year does not count).
+- **Calendar** responses gain `expenses: Expense[]` (those dated in `[from, to]`) next to `occurrences`, so the grid
+  can show expense dots without a second call. `Occurrence.paid` carries `auto` and `paidBy` is null for autopay.
+- **Expenses:** `deduct` defaults to `true` whenever `accountId` is set; `deduct: true` without an account is a
+  400 on `deduct`. Deducting adjusts the account inside the same transaction and records a balance snapshot:
+  assets go **down** by the amount, liabilities (`credit`/`loan`, stored as amount owed) go **up**. `PUT` nets the
+  old deduction against the new one per account (same account + new amount → one delta; moved account → restore
+  one, charge the other; account removed → restore). `DELETE` reverses when `deducted`. `GET /v1/expenses/{id}`
+  exists in addition to the list routes.
+- **Budgets:** every category gets a row. `percent` = `round(spent / budget × 100)` (whole number, **not capped**,
+  so over-budget reads 120, 250 …); null when unbudgeted; a zero budget is 100 when anything was spent else 0.
+  `totalBudgetCents`/`totalSpentCents` sum **budgeted** categories only. `PUT /v1/budgets/{categoryId}` takes an
+  optional `?month=YYYY-MM` (default current) and returns that month's row; a foreign `categoryId` is 404.
+- **Pay period:** `daysLeft` = days from the requested date to `nextPayday` (0 on payday itself, which starts a new
+  period). `spendableCents` = checking + cash balances − `remainingCents` (unpaid outflow in the period).
+  `?date` defaults to today in the household time zone. Weekly/biweekly anchors may lie in the future (periods
+  are projected backwards); monthly/bimonthly use only the anchor's day of month.
+- **To-pay:** `GET /v1/todos` returns open items only unless `?includeDone=true`, which appends items done in the
+  last 30 days (newest first). `POST` ignores `sortOrder` (appended at the end); `PUT /v1/todos/order` rejects any
+  id outside the household with a 400 on `ids`. Checking an already-done item keeps the original who/when and
+  writes no activity event.
+- **Goals:** `percent` is clamped to 0–100. Manual goals start their `history` with `{ createdAt, 0 }` and add one
+  point per contribution (running sum); account-linked goals use the account's latest 90 snapshots (oldest first).
+  `monthlyPaceCents` uses points from the last 90 days (null with < 2 points or < 7 days between them); a month is
+  30.4375 days; `monthlyNeededCents` rounds up and equals the full remainder when `targetDate` has passed.
+  Taking out more than has been saved is a 400 on `amountCents`; so is contributing to a linked goal.
+- **Autopay & undo guard:** the scheduler marks `autoPay` occurrences due today (household tz; also up to
+  `Scheduler__AutopayLookbackDays` = 3 days back, for a Pi that was off) with `auto = true, paidBy = null`,
+  writes `occurrence.autopaid` (`actorId` null) and pushes "Rent auto-paid · $1,850.00" to members with
+  `activityEnabled`. `DELETE …/paid` on an auto-paid (or any `autoPay` item's) occurrence records a row in
+  `autopay_skips (recurring_item_id, due_date)` so the scheduler **never re-pays it**; marking it paid by hand
+  removes the skip. The event data carries `wasAuto`.
+- **Push:** every `/v1/push/*` route is per-user (no household needed) and answers 503
+  `type: https://couplescash.app/problems/push_not_configured`, title "Push not configured", while
+  `Push__VapidPublicKey`/`Push__VapidPrivateKey` are blank. `DELETE /v1/push/subscriptions` takes
+  `{ endpoint?: string, id?: string }` (either identifies one of the **caller's** subscriptions; 404 when neither
+  matches, 400 when both are missing). Subscribing re-uses the id for the same endpoint (upsert) and resets its
+  failure count. `daysBefore` is stored deduplicated and sorted. `POST /v1/push/test` returns 202 immediately;
+  delivery happens on a background queue. Push failures: 404/410 delete the subscription at once, other failures
+  count up and the subscription is dropped at 5. Payloads are `{ title, body, url, tag, icon }`; partner-activity
+  pushes use body "<Actor> <summary>" and a deep link per entity (`/calendar?m=YYYY-MM&d=YYYY-MM-DD` for
+  occurrences and reminders, `/goals/{id}`, `/expenses/{id}`, `/todos`, …).
+- **Passkeys:** `GET /v1/auth/passkeys/config` is always 200 (`enabled`, `rpId` or null). The other routes answer
+  503 `type: https://couplescash.app/problems/passkeys_not_configured` unless `WebAuthn__Origin` (falling back to
+  `Api__PublicUrl`) is https — `http://localhost[:port]` is the only exception. `rpId` defaults to the origin's host.
+  Registration uses `residentKey: required`, `userVerification: required`, `attestation: none`; options/response
+  JSON are the WebAuthn L3 encodings used by `@simplewebauthn/browser` (extra fields such as `publicKey`,
+  `authenticatorAttachment` are ignored). A failed/garbled registration is a 400 on `credential`; a failed login
+  is 401. Challenges are single-use with a 5-minute TTL; the user handle is the user id's 16 bytes.
+- **Month report:** `previousNetWorthCents` = latest snapshot per active account recorded strictly before the first
+  day of the month (liabilities subtracted); null when no account has one that old, in which case
+  `netWorthDeltaCents` is null too. `paidCount`/`unpaidCount` count outflow occurrences of the month; `autoPaid`
+  lists occurrences with `paid.auto`. `topExpenses` = 5 largest by amount.
+- **Activity on v1 routes:** account create/update/balance/archive, recurring create/update/archive, occurrence
+  paid/unpaid, category create/update/delete, couple join/leave/settings and `PATCH /v1/auth/me` (rename, when
+  the user has a household) all write their event in the same transaction as the change.
+- **Scheduler config:** `Scheduler__Enabled` (default true; set false in tests), `Scheduler__IntervalSeconds` (60),
+  `Scheduler__AutopayLookbackDays` (3). The job starts only after the app is listening (after migrations) and
+  logs under `CouplesCash.Api.Scheduler.SchedulerService`.
+- **CLI:** `dotnet CouplesCash.Api.dll --vapid` runs before any configuration is read (no database, no
+  `Jwt__Secret`, read-only FS fine) and prints exactly two stdout lines, `Push__VapidPublicKey=…` and
+  `Push__VapidPrivateKey=…` (base64url, 65-byte uncompressed P-256 point / 32-byte scalar), exit code 0.

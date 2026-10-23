@@ -165,6 +165,206 @@ Authorization: Bearer {{accessToken}}
 GET {{host}}/v1/summary?month=2024-02
 Authorization: Bearer {{accessToken}}
 
+### ---------------------------------------------------------------------------------------------
+### v2
+### ---------------------------------------------------------------------------------------------
+
+### Household settings (all fields optional; null clears defaultAccountId / payAnchorDate)
+PATCH {{host}}/v1/couple
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "currency": "USD",
+  "weekStart": 1,
+  "timezone": "America/Chicago",
+  "defaultAccountId": "{{account.response.body.id}}",
+  "payPeriod": "biweekly",
+  "payAnchorDate": "2026-01-09"
+}
+
+### Pay period view (default: today in the household time zone)
+GET {{host}}/v1/payperiod?date=2026-02-03
+Authorization: Bearer {{accessToken}}
+
+### Record an expense (deducts from the account + snapshot; deduct defaults to true when accountId is set)
+# @name expense
+POST {{host}}/v1/expenses
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "Groceries run",
+  "amountCents": 4210,
+  "categoryId": "{{categories.response.body.4.id}}",
+  "accountId": "{{account.response.body.id}}",
+  "spentOn": "2024-02-15",
+  "note": "weekly shop"
+}
+
+### Expenses of a month (or ?from=&to=, ≤ 93 days)
+GET {{host}}/v1/expenses?month=2024-02
+Authorization: Bearer {{accessToken}}
+
+### Delete the expense (reverses the deduction)
+DELETE {{host}}/v1/expenses/{{expense.response.body.id}}
+Authorization: Bearer {{accessToken}}
+
+### Set a monthly budget for Housing (returns the row for ?month, default current)
+PUT {{host}}/v1/budgets/{{categories.response.body.0.id}}?month=2024-02
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "amountCents": 200000 }
+
+### Budget rows for a month (every category)
+GET {{host}}/v1/budgets?month=2024-02
+Authorization: Bearer {{accessToken}}
+
+### Clear the budget
+DELETE {{host}}/v1/budgets/{{categories.response.body.0.id}}
+Authorization: Bearer {{accessToken}}
+
+### To-pay: add an item
+# @name todo
+POST {{host}}/v1/todos
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "title": "Transfer $200 to savings", "amountCents": 20000, "dueDate": "2026-12-01" }
+
+### To-pay: open items (?includeDone=true appends the last 30 days of done items)
+GET {{host}}/v1/todos?includeDone=true
+Authorization: Bearer {{accessToken}}
+
+### To-pay: check off / un-check
+POST {{host}}/v1/todos/{{todo.response.body.id}}/done
+Authorization: Bearer {{accessToken}}
+
+###
+DELETE {{host}}/v1/todos/{{todo.response.body.id}}/done
+Authorization: Bearer {{accessToken}}
+
+### To-pay: reorder (sortOrder = position)
+PUT {{host}}/v1/todos/order
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "ids": ["{{todo.response.body.id}}"] }
+
+### Goals: create a manual goal
+# @name goal
+POST {{host}}/v1/goals
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Vacation", "targetCents": 300000, "targetDate": "2027-06-01", "color": "#f43f5e", "icon": "plane" }
+
+### Goals: contribute (manual goals only; negative takes money out)
+POST {{host}}/v1/goals/{{goal.response.body.id}}/contribute
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "amountCents": 50000 }
+
+### Goals: list with pace / projection / history
+GET {{host}}/v1/goals
+Authorization: Bearer {{accessToken}}
+
+### Goals: account-linked goal (current = account balance; contribute → 400)
+POST {{host}}/v1/goals
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Emergency fund", "targetCents": 1000000, "accountId": "{{account.response.body.id}}" }
+
+### Activity feed (newest first; follow nextBefore for older pages)
+GET {{host}}/v1/activity?limit=30
+Authorization: Bearer {{accessToken}}
+
+### Month-close report
+GET {{host}}/v1/reports/month?month=2024-02
+Authorization: Bearer {{accessToken}}
+
+### Push: VAPID public key (503 push_not_configured until Push__Vapid* are set)
+GET {{host}}/v1/push/vapid-public-key
+Authorization: Bearer {{accessToken}}
+
+### Push: register a subscription (what PushManager.subscribe() returns)
+POST {{host}}/v1/push/subscriptions
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "endpoint": "https://fcm.googleapis.com/fcm/send/example",
+  "keys": { "p256dh": "BPUBLICKEY…", "auth": "AUTHSECRET…" },
+  "userAgent": "Travis's iPhone"
+}
+
+### Push: preferences (defaults created on first GET)
+GET {{host}}/v1/push/prefs
+Authorization: Bearer {{accessToken}}
+
+###
+PUT {{host}}/v1/push/prefs
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "remindersEnabled": true, "daysBefore": [0, 1, 3], "hourLocal": 20, "activityEnabled": true }
+
+### Push: send a test notification to my devices (202; delivered in the background)
+POST {{host}}/v1/push/test
+Authorization: Bearer {{accessToken}}
+
+### Push: remove a subscription by endpoint or id
+DELETE {{host}}/v1/push/subscriptions
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "endpoint": "https://fcm.googleapis.com/fcm/send/example" }
+
+### Passkeys: availability (anonymous)
+GET {{host}}/v1/auth/passkeys/config
+
+### Passkeys: start registration (PublicKeyCredentialCreationOptionsJSON for navigator.credentials.create)
+# @name passkeyOptions
+POST {{host}}/v1/auth/passkeys/register/options
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Travis's iPhone" }
+
+### Passkeys: finish registration — credential = RegistrationResponseJSON from @simplewebauthn/browser startRegistration()
+POST {{host}}/v1/auth/passkeys/register
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "challengeId": "{{passkeyOptions.response.body.challengeId}}",
+  "name": "Travis's iPhone",
+  "credential": { "id": "…", "rawId": "…", "type": "public-key", "response": { "clientDataJSON": "…", "attestationObject": "…", "transports": ["internal"] }, "clientExtensionResults": {} }
+}
+
+### Passkeys: list / delete
+GET {{host}}/v1/auth/passkeys
+Authorization: Bearer {{accessToken}}
+
+### Passkeys: sign in (anonymous) — discoverable credential, no email
+# @name loginOptions
+POST {{host}}/v1/auth/passkeys/login/options
+Content-Type: application/json
+
+{}
+
+###
+POST {{host}}/v1/auth/passkeys/login
+Content-Type: application/json
+
+{
+  "challengeId": "{{loginOptions.response.body.challengeId}}",
+  "credential": { "id": "…", "rawId": "…", "type": "public-key", "response": { "clientDataJSON": "…", "authenticatorData": "…", "signature": "…", "userHandle": "…" }, "clientExtensionResults": {} }
+}
+
 ### Logout (revokes the refresh token)
 POST {{host}}/v1/auth/logout
 Authorization: Bearer {{accessToken}}

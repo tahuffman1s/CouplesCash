@@ -10,6 +10,9 @@ public sealed class ApiOptions
     /// <summary>CORS origins. Empty (the default) means CORS is not enabled at all: the BFF talks server-to-server.</summary>
     public string[] AllowedOrigins { get; set; } = [];
 
+    /// <summary>The public https URL the PWA is served from (<c>PUBLIC_URL</c>). Default WebAuthn origin.</summary>
+    public string? PublicUrl { get; set; }
+
     /// <summary>
     /// Reads <c>Api:AllowedOrigins</c> either as an array (<c>Api__AllowedOrigins__0</c>) or as a single
     /// comma-separated string (<c>Api__AllowedOrigins=https://a,https://b</c>).
@@ -44,4 +47,17 @@ public sealed class DatabaseOptions
     public const string SectionName = "Database";
 
     public bool MigrateOnStartup { get; set; } = true;
+}
+
+public sealed class SchedulerOptions
+{
+    public const string SectionName = "Scheduler";
+
+    /// <summary>Run the autopay / reminder / hygiene background job. Off in tests.</summary>
+    public bool Enabled { get; set; } = true;
+
+    public int IntervalSeconds { get; set; } = 60;
+
+    /// <summary>How many days back autopay still marks a missed due date (the Pi may have been off).</summary>
+    public int AutopayLookbackDays { get; set; } = 3;
 }

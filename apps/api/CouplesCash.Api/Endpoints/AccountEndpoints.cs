@@ -7,6 +7,7 @@ using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Npgsql;
 
 namespace CouplesCash.Api.Endpoints;
 
@@ -38,11 +39,23 @@ public static class AccountEndpoints
     private static async Task<Created<AccountDto>> Create(
         AccountRequest request,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         AccountRepository accounts,
+        HouseholdRepository households,
+        ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
     {
-        var row = await accounts.CreateAsync(principal.GetHouseholdId(), principal.GetUserId(), ToFields(request), time.Now(), ct);
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+        var currency = await households.CurrencyAsync(householdId, ct);
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await accounts.CreateAsync(uow.Connection, householdId, userId, ToFields(request), time.Now(), ct);
+        await activity.RecordAsync(uow, householdId, userId, "account.created", "account", row.Id,
+            ActivitySummaries.AccountCreated(row, currency), new { accountId = row.Id, balanceCents = row.BalanceCents }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+
         return TypedResults.Created($"/v1/accounts/{row.Id}", row.ToDto());
     }
 
@@ -56,29 +69,79 @@ public static class AccountEndpoints
         Guid id,
         AccountRequest request,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         AccountRepository accounts,
+        ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
     {
-        var row = await accounts.UpdateAsync(principal.GetHouseholdId(), id, principal.GetUserId(), ToFields(request), time.Now(), ct);
-        return row is null ? TypedResults.NotFound() : TypedResults.Ok(row.ToDto());
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await accounts.UpdateAsync(uow.Connection, householdId, id, userId, ToFields(request), time.Now(), ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "account.updated", "account", row.Id,
+            ActivitySummaries.AccountUpdated(row), new { accountId = row.Id, balanceCents = row.BalanceCents }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(row.ToDto());
     }
 
-    private static async Task<Results<NoContent, NotFound>> Archive(Guid id, ClaimsPrincipal principal, AccountRepository accounts, TimeProvider time, CancellationToken ct) =>
-        await accounts.ArchiveAsync(principal.GetHouseholdId(), id, time.Now(), ct)
-            ? TypedResults.NoContent()
-            : TypedResults.NotFound();
+    private static async Task<Results<NoContent, NotFound>> Archive(
+        Guid id,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        AccountRepository accounts,
+        ActivityService activity,
+        TimeProvider time,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await accounts.ArchiveAsync(uow.Connection, householdId, id, time.Now(), ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "account.deleted", "account", row.Id,
+            ActivitySummaries.AccountDeleted(row), new { accountId = row.Id }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+        return TypedResults.NoContent();
+    }
 
     private static async Task<Results<Ok<AccountDto>, NotFound>> SetBalance(
         Guid id,
         BalanceRequest request,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         AccountRepository accounts,
+        HouseholdRepository households,
+        ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
     {
-        var row = await accounts.SetBalanceAsync(principal.GetHouseholdId(), id, principal.GetUserId(), request.BalanceCents, time.Now(), ct);
-        return row is null ? TypedResults.NotFound() : TypedResults.Ok(row.ToDto());
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+        var currency = await households.CurrencyAsync(householdId, ct);
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var row = await accounts.SetBalanceAsync(uow.Connection, householdId, id, userId, request.BalanceCents, time.Now(), ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "account.balance", "account", row.Id,
+            ActivitySummaries.AccountBalance(row, currency), new { accountId = row.Id, balanceCents = row.BalanceCents }, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(row.ToDto());
     }
 
     private static async Task<Results<Ok<List<BalanceSnapshotDto>>, NotFound>> History(

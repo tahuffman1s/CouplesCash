@@ -1,9 +1,12 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CouplesCash.Api.Auth;
+using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Endpoints;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Push;
+using CouplesCash.Api.Scheduler;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -13,6 +16,20 @@ using Microsoft.Extensions.Options;
 using Scalar.AspNetCore;
 using Serilog;
 using Serilog.Formatting.Compact;
+
+// ---------------------------------------------------------------------------------------------
+// `dotnet CouplesCash.Api.dll --vapid`: print a fresh VAPID key pair and exit. Runs before any
+// configuration is read or validated (no database, no Jwt__Secret, works on a read-only FS).
+// ---------------------------------------------------------------------------------------------
+if (args.Contains("--vapid", StringComparer.OrdinalIgnoreCase))
+{
+    foreach (var line in VapidKeys.EnvLines(VapidKeys.Generate()))
+    {
+        Console.Out.WriteLine(line);
+    }
+
+    return 0;
+}
 
 var builder = WebApplication.CreateBuilder(args);
 var configuration = builder.Configuration;
@@ -64,9 +81,15 @@ var apiOptions = configuration.GetSection(ApiOptions.SectionName).Get<ApiOptions
 apiOptions.AllowedOrigins = ApiOptions.ReadAllowedOrigins(configuration);
 var rateLimiting = configuration.GetSection(RateLimitingOptions.SectionName).Get<RateLimitingOptions>() ?? new RateLimitingOptions();
 var database = configuration.GetSection(DatabaseOptions.SectionName).Get<DatabaseOptions>() ?? new DatabaseOptions();
+var scheduler = configuration.GetSection(SchedulerOptions.SectionName).Get<SchedulerOptions>() ?? new SchedulerOptions();
+var push = PushOptions.Read(configuration);
+var webAuthn = WebAuthnOptions.Resolve(configuration);
 
 builder.Services.AddSingleton(Options.Create(jwt));
 builder.Services.AddSingleton(apiOptions);
+builder.Services.AddSingleton(scheduler);
+builder.Services.AddSingleton(push);
+builder.Services.AddSingleton(webAuthn);
 builder.Services.AddSingleton(TimeProvider.System);
 
 // ---------------------------------------------------------------------------------------------
@@ -77,6 +100,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     options.SerializerOptions.DictionaryKeyPolicy = JsonNamingPolicy.CamelCase;
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+    options.SerializerOptions.Converters.Add(new OptionalJsonConverterFactory());
     options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.Never;
 });
 
@@ -90,7 +114,20 @@ builder.Services.AddSingleton<CoupleCodeService>();
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<AuthSessionService>();
 builder.Services.AddSingleton<OccurrenceService>();
+builder.Services.AddSingleton<SummaryService>();
+builder.Services.AddSingleton<BudgetService>();
+builder.Services.AddSingleton<GoalService>();
+builder.Services.AddSingleton<ActivityService>();
+builder.Services.AddSingleton<PasskeyService>();
 builder.Services.AddCouplesCashValidators();
+
+// Web Push: a bounded queue drained by a hosted service so requests never wait on the push service.
+builder.Services.AddHttpClient<IPushSender, WebPushSender>(client => client.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddSingleton<PushNotifier>();
+builder.Services.AddHostedService<PushDispatchService>();
+
+// Autopay, reminders and hygiene (Scheduler__Enabled=false in tests).
+builder.Services.AddHostedService<SchedulerService>();
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -139,6 +176,9 @@ if (docsEnabled)
 
 var app = builder.Build();
 
+app.Logger.LogInformation("Web Push {State}", push.Enabled ? "enabled" : "disabled (set Push__VapidPublicKey / Push__VapidPrivateKey; generate with --vapid)");
+app.Logger.LogInformation("Passkeys {State}", webAuthn.Enabled ? $"enabled for rpId {webAuthn.RelyingPartyId} (origin {webAuthn.Origin})" : $"disabled ({webAuthn.DisabledReason})");
+
 // ---------------------------------------------------------------------------------------------
 // Migrations: `dotnet CouplesCash.Api.dll --migrate` migrates and exits; otherwise run on startup.
 // ---------------------------------------------------------------------------------------------
@@ -166,8 +206,9 @@ app.UseForwardedHeaders();
 
 // Request logging sits outside the exception handler so it records the status the client actually
 // received (a JSON binding failure is a 400, not a 500) and never double-logs handled exceptions.
+// 503 is the deliberate "push / passkeys not configured" answer the web probes for, not an error.
 app.UseSerilogRequestLogging(options => options.GetLevel = static (httpContext, _, exception) =>
-    exception is not null || httpContext.Response.StatusCode >= StatusCodes.Status500InternalServerError
+    exception is not null || httpContext.Response.StatusCode is >= StatusCodes.Status500InternalServerError and not StatusCodes.Status503ServiceUnavailable
         ? Serilog.Events.LogEventLevel.Error
         : Serilog.Events.LogEventLevel.Information);
 

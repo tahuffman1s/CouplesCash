@@ -6,6 +6,7 @@ using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Npgsql;
 
 namespace CouplesCash.Api.Endpoints;
 
@@ -16,15 +17,15 @@ public static class CoupleEndpoints
         var group = v1.MapGroup("/couple").WithTags("Couple").RequireAuthorization();
 
         group.MapGet("", GetCouple)
-            .WithSummary("The caller's household, or null");
+            .WithSummary("The caller's household (with settings), or null");
         group.MapPost("/code", CreateCode).WithValidation<CoupleCodeRequest>()
             .WithSummary("Create a Couple Code (creates the household when the caller has none)");
         group.MapPost("/join", Join).WithValidation<JoinRequest>().RequireRateLimiting(RateLimitPolicies.Auth)
             .WithSummary("Join a household with a typed code or QR payload");
         group.MapPost("/leave", Leave)
             .WithSummary("Leave the household (deleted when empty)");
-        group.MapPatch("", Rename).RequireHousehold().WithValidation<RenameHouseholdRequest>()
-            .WithSummary("Rename the household");
+        group.MapPatch("", UpdateSettings).RequireHousehold().WithValidation<HouseholdSettingsRequest>()
+            .WithSummary("Update household name and settings (currency, week start, time zone, default account, pay period)");
 
         return group;
     }
@@ -75,9 +76,11 @@ public static class CoupleEndpoints
         JoinRequest request,
         HttpRequest http,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         UserRepository users,
         HouseholdRepository households,
         CoupleCodeRepository codes,
+        ActivityService activity,
         AuthSessionService sessions,
         TimeProvider time,
         CancellationToken ct)
@@ -93,21 +96,28 @@ public static class CoupleEndpoints
             return InvalidCode();
         }
 
-        var redeemed = await codes.RedeemAsync(hash, userId, time.Now(), ct);
-        switch (redeemed.Status)
-        {
-            case RedeemStatus.NotFound:
-                return InvalidCode();
-            case RedeemStatus.HouseholdFull:
-                return Problems.Conflict("Household is full", "This household already has two members.");
-            case RedeemStatus.AlreadyMember:
-                return Problems.Conflict("Already in a household");
-        }
-
         var user = await users.FindByIdAsync(userId, ct);
         if (user is null)
         {
             return Problems.Unauthorized("Unknown user");
+        }
+
+        await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+        {
+            var redeemed = await codes.RedeemAsync(uow.Connection, userId, hash, time.Now(), ct);
+            switch (redeemed.Status)
+            {
+                case RedeemStatus.NotFound:
+                    return InvalidCode();
+                case RedeemStatus.HouseholdFull:
+                    return Problems.Conflict("Household is full", "This household already has two members.");
+                case RedeemStatus.AlreadyMember:
+                    return Problems.Conflict("Already in a household");
+            }
+
+            await activity.RecordAsync(uow, redeemed.HouseholdId!.Value, userId, "couple.joined", "household", redeemed.HouseholdId,
+                ActivitySummaries.CoupleJoined(), new { userId }, ct, user.DisplayName);
+            await uow.CommitAsync(ct);
         }
 
         return TypedResults.Ok(await sessions.StartAsync(user, http.UserAgent(), ct));
@@ -116,8 +126,10 @@ public static class CoupleEndpoints
     private static async Task<Results<Ok<AuthResult>, ProblemHttpResult>> Leave(
         HttpRequest http,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         UserRepository users,
         HouseholdRepository households,
+        ActivityService activity,
         AuthSessionService sessions,
         TimeProvider time,
         CancellationToken ct)
@@ -129,31 +141,105 @@ public static class CoupleEndpoints
             return Problems.NoHousehold();
         }
 
-        await households.LeaveAsync(householdId.Value, userId, time.Now(), ct);
-
         var user = await users.FindByIdAsync(userId, ct);
         if (user is null)
         {
             return Problems.Unauthorized("Unknown user");
         }
 
+        await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+        {
+            // Recorded before the membership row goes; if the household ends up empty the cascade removes the event too.
+            await activity.RecordAsync(uow, householdId.Value, userId, "couple.left", "household", householdId,
+                ActivitySummaries.CoupleLeft(), new { userId }, ct, user.DisplayName);
+            await households.LeaveAsync(uow.Connection, householdId.Value, userId, time.Now(), ct);
+            await uow.CommitAsync(ct);
+        }
+
         return TypedResults.Ok(await sessions.StartAsync(user, http.UserAgent(), ct));
     }
 
-    private static async Task<Results<Ok<HouseholdDto>, NotFound>> Rename(
-        RenameHouseholdRequest request,
+    private static async Task<Results<Ok<HouseholdDto>, NotFound, ValidationProblem>> UpdateSettings(
+        HouseholdSettingsRequest request,
         ClaimsPrincipal principal,
+        NpgsqlDataSource db,
         HouseholdRepository households,
+        AccountRepository accounts,
+        ActivityService activity,
         CancellationToken ct)
     {
         var householdId = principal.GetHouseholdId();
-        if (!await households.RenameAsync(householdId, request.Name.Trim(), ct))
+        var userId = principal.GetUserId();
+
+        if (request.DefaultAccountId is { HasValue: true, Value: { } accountId } && !await accounts.ExistsAsync(householdId, accountId, ct))
+        {
+            return Problems.Validation("defaultAccountId", "Unknown account.");
+        }
+
+        var update = new HouseholdSettingsUpdate(
+            Name: request.Name.HasValue ? request.Name.Value?.Trim() : null,
+            Currency: request.Currency.HasValue ? request.Currency.Value?.Trim().ToUpperInvariant() : null,
+            WeekStart: request.WeekStart.HasValue ? request.WeekStart.Value : null,
+            Timezone: request.Timezone.HasValue ? request.Timezone.Value?.Trim() : null,
+            DefaultAccountId: request.DefaultAccountId,
+            PayPeriod: request.PayPeriod.HasValue ? request.PayPeriod.Value : null,
+            PayAnchorDate: request.PayAnchorDate);
+
+        var changed = new List<string>();
+        if (update.Currency is not null)
+        {
+            changed.Add("currency");
+        }
+
+        if (update.WeekStart is not null)
+        {
+            changed.Add("week start");
+        }
+
+        if (update.Timezone is not null)
+        {
+            changed.Add("time zone");
+        }
+
+        if (update.DefaultAccountId.HasValue)
+        {
+            changed.Add("default account");
+        }
+
+        if (update.PayPeriod is not null || update.PayAnchorDate.HasValue)
+        {
+            changed.Add("pay period");
+        }
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        if (!await households.UpdateSettingsAsync(uow.Connection, householdId, update, ct))
         {
             return TypedResults.NotFound();
         }
 
-        var household = await households.GetAsync(householdId, ct);
-        return household is null ? TypedResults.NotFound() : TypedResults.Ok(household);
+        var household = await households.GetAsync(uow.Connection, householdId, ct);
+        if (household is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        var summary = update.Name is not null && changed.Count == 0
+            ? ActivitySummaries.CoupleRenamed(household.Name)
+            : ActivitySummaries.CoupleSettings(changed);
+        var data = new
+        {
+            name = update.Name,
+            currency = update.Currency,
+            weekStart = update.WeekStart,
+            timezone = update.Timezone,
+            defaultAccountId = update.DefaultAccountId.HasValue ? update.DefaultAccountId.Value : null,
+            payPeriod = update.PayPeriod,
+            payAnchorDate = update.PayAnchorDate.HasValue ? update.PayAnchorDate.Value : null,
+        };
+        await activity.RecordAsync(uow, householdId, userId, "couple.settings", "household", householdId, summary, data, ct, principal.GetDisplayName());
+        await uow.CommitAsync(ct);
+
+        return TypedResults.Ok(household);
     }
 
     private static ProblemHttpResult InvalidCode() =>
