@@ -29,7 +29,7 @@ fine) and the stack installed on the Pi (`docs/RASPBERRY-PI.md`).
    | Domain | `yourdomain.com` |
    | Path | *(empty)* |
    | Type | `HTTP` |
-   | URL | `web:3000` |
+   | URL | `http://web:3000` (the newer Cloudflare UI requires the `http://` prefix; `localhost` would point at the cloudflared container itself, not the Pi) |
 
    `web` is the compose **service name**; cloudflared resolves it through
    Docker's internal DNS because both containers share the `couplescash`
@@ -128,7 +128,7 @@ site in Safari/Chrome once, re-authenticate, and the installed app works again.
 | Symptom | Cause / fix |
 |---|---|
 | `cloudflared` restarts, log says `Unauthorized` | Token wrong or truncated; copy it again (no quotes, no spaces). |
-| Dashboard: tunnel *Healthy*, browser: **502 Bad Gateway** | `web` is not up or unhealthy (`make ps`), or the hostname's URL is not `web:3000`. |
+| Dashboard: tunnel *Healthy*, browser: **502 Bad Gateway** | `web` is not up or unhealthy (`make ps`), or the hostname's URL is not `http://web:3000` (a `localhost:…` URL is the classic mistake — inside Docker that is cloudflared itself). |
 | **Error 1033** | Tunnel is down (Pi off, container stopped, no internet). |
 | Login form → **403** | `PUBLIC_URL` ≠ real URL (see §3). |
 | Works on Wi-Fi, not on cellular | Not a tunnel issue — check Cloudflare Access session or DNS propagation. |
