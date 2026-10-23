@@ -95,3 +95,34 @@ public sealed record PasskeyOptionsRequest(string Name);
 public sealed record PasskeyRegisterRequest(Guid ChallengeId, string Name, JsonElement Credential);
 
 public sealed record PasskeyLoginRequest(Guid ChallengeId, JsonElement Credential);
+
+// ---------------------------------------------------------------------------------------------
+// v3
+// ---------------------------------------------------------------------------------------------
+
+public sealed record BankClaimRequest(string SetupToken, string? Name);
+
+public sealed record BankLinkPatchRequest(string? Name, bool? SyncEnabled);
+
+public sealed record ExternalAccountCreateSpec(string Name, AccountType? Type, string? Institution);
+
+/// <summary><c>{ accountId }</c> maps (null unmaps) or <c>{ create: {…} }</c> creates the CouplesCash account and maps it.</summary>
+public sealed record ExternalAccountMapRequest(Guid? AccountId, ExternalAccountCreateSpec? Create);
+
+public enum ConfirmAs
+{
+    Expense,
+    Occurrence,
+}
+
+public sealed record InboxConfirmRequest(ConfirmAs? As, Guid? CategoryId, string? Name, Guid? ItemId, DateOnly? DueDate);
+
+public sealed record InboxBulkRequest(string Action, Guid[]? Ids)
+{
+    public const string ConfirmSuggested = "confirm-suggested";
+    public const string Ignore = "ignore";
+}
+
+public sealed record CsvRowRequest(DateOnly? PostedOn, long AmountCents, string Description, string? Payee, string? Memo);
+
+public sealed record CsvImportRequest(Guid? AccountId, string Filename, CsvRowRequest[]? Rows);

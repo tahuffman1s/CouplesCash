@@ -33,6 +33,8 @@ public static class DataServiceCollectionExtensions
         services.AddSingleton<GoalRepository>();
         services.AddSingleton<PushRepository>();
         services.AddSingleton<WebAuthnRepository>();
+        services.AddSingleton<BankRepository>();
+        services.AddSingleton<ImportRepository>();
 
         return services;
     }

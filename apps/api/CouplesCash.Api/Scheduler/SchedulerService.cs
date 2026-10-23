@@ -13,7 +13,9 @@ namespace CouplesCash.Api.Scheduler;
 /// <item>auto-marks <c>autoPay</c> occurrences due today (household time zone) — <c>auto = true</c>, <c>paid_by NULL</c>, an
 /// <c>occurrence.autopaid</c> activity event and a push to members with activity pushes on;</item>
 /// <item>sends due-date reminders during each user's local <c>hourLocal</c>, once per (item, due date, user) via <c>reminder_log</c>;</item>
-/// <item>deletes expired WebAuthn challenges and dead push subscriptions.</item>
+/// <item>deletes expired WebAuthn challenges and dead push subscriptions;</item>
+/// <item>(v3) syncs every enabled bank link whose last sync is older than <c>Sync__IntervalHours</c>, auto-matching
+/// high-confidence recurring payments — see <see cref="BankSyncService"/>.</item>
 /// </list>
 /// Selection logic is in <see cref="SchedulerRules"/>; this class only does I/O. Every exception is caught and logged.
 /// The logger category contains "Scheduler" so <c>make scheduler-logs</c> can filter for it.
@@ -28,6 +30,7 @@ public sealed class SchedulerService(
     WebAuthnRepository webAuthn,
     ActivityService activity,
     PushNotifier notifier,
+    BankSyncService bankSync,
     IHostApplicationLifetime lifetime,
     TimeProvider time,
     ILogger<SchedulerService> logger) : BackgroundService
@@ -82,6 +85,7 @@ public sealed class SchedulerService(
         await RunPhaseAsync("autopay", () => AutopayAsync(nowUtc, ct));
         await RunPhaseAsync("reminders", () => RemindersAsync(nowUtc, ct));
         await RunPhaseAsync("hygiene", () => HygieneAsync(nowUtc, ct));
+        await RunPhaseAsync("bank-sync", () => bankSync.SyncDueAsync(nowUtc, ct));
     }
 
     private async Task RunPhaseAsync(string name, Func<Task> phase)

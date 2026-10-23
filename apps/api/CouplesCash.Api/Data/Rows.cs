@@ -172,6 +172,16 @@ public sealed class PaymentRow
     public long AmountCents { get; init; }
 
     public bool Auto { get; init; }
+
+    /// <summary>manual | autopay | bank</summary>
+    public string Source { get; init; } = PaymentSource.Manual;
+}
+
+public static class PaymentSource
+{
+    public const string Manual = "manual";
+    public const string Autopay = "autopay";
+    public const string Bank = "bank";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -422,4 +432,184 @@ public sealed class WebAuthnChallengeRow
     public DateTime ExpiresAt { get; init; }
 
     public DateTime CreatedAt { get; init; }
+}
+
+// ---------------------------------------------------------------------------------------------
+// v3
+// ---------------------------------------------------------------------------------------------
+
+public sealed class BankLinkRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public string Provider { get; init; } = "simplefin";
+
+    public string Name { get; init; } = "";
+
+    public byte[] AccessUrlEnc { get; init; } = [];
+
+    public Guid CreatedBy { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public DateTime? LastSyncedAt { get; init; }
+
+    public DateTime? LastManualSyncAt { get; init; }
+
+    /// <summary>Last sync attempt, successful or not; the scheduler backs off from it.</summary>
+    public DateTime? LastAttemptAt { get; init; }
+
+    public string? LastError { get; init; }
+
+    public string[] BridgeErrors { get; init; } = [];
+
+    public bool SyncEnabled { get; init; } = true;
+}
+
+public sealed class ExternalAccountRow
+{
+    public Guid Id { get; init; }
+
+    public Guid BankLinkId { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public string ExternalId { get; init; } = "";
+
+    public string OrgName { get; init; } = "";
+
+    public string Name { get; init; } = "";
+
+    public string Currency { get; init; } = "USD";
+
+    /// <summary>Raw Bridge balance (credit/loan: negative when owed).</summary>
+    public long BalanceCents { get; init; }
+
+    public long? AvailableCents { get; init; }
+
+    public DateTime BalanceAt { get; init; }
+
+    public Guid? AccountId { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public DateTime UpdatedAt { get; init; }
+
+    // Joined from accounts.
+    public string? AccountName { get; init; }
+}
+
+public sealed class ImportedTransactionRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public string Source { get; init; } = "";
+
+    public Guid? ExternalAccountId { get; init; }
+
+    public Guid? AccountId { get; init; }
+
+    public string? ExternalId { get; init; }
+
+    public DateOnly PostedOn { get; init; }
+
+    /// <summary>Signed: negative = money out.</summary>
+    public long AmountCents { get; init; }
+
+    public string Description { get; init; } = "";
+
+    public string? Payee { get; init; }
+
+    public string? Memo { get; init; }
+
+    public bool Pending { get; init; }
+
+    public string Status { get; init; } = "pending";
+
+    public Guid? SuggestedCategoryId { get; init; }
+
+    public Guid? SuggestedItemId { get; init; }
+
+    public DateOnly? SuggestedDueDate { get; init; }
+
+    public bool SuggestedTransfer { get; init; }
+
+    public int Confidence { get; init; }
+
+    public Guid? ConfirmedExpenseId { get; init; }
+
+    public Guid? ConfirmedItemId { get; init; }
+
+    public DateOnly? ConfirmedDueDate { get; init; }
+
+    public bool ConfirmedAuto { get; init; }
+
+    public Guid? ReviewedBy { get; init; }
+
+    public DateTime? ReviewedAt { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    // Joined.
+    public string? AccountName { get; init; }
+
+    public string? SuggestedCategoryName { get; init; }
+
+    public string? SuggestedItemName { get; init; }
+
+    public string? SuggestedItemKind { get; init; }
+
+    public string? ReviewedByName { get; init; }
+
+    public string? ConfirmedCategoryName { get; init; }
+
+    public string? ConfirmedItemName { get; init; }
+
+    public bool IsPending => Status == "pending";
+
+    public bool IsOutflow => AmountCents < 0;
+
+    public long Magnitude => Math.Abs(AmountCents);
+}
+
+public sealed class PayeeRuleRow
+{
+    public Guid HouseholdId { get; init; }
+
+    public string PayeeNorm { get; init; } = "";
+
+    public Guid? CategoryId { get; init; }
+
+    public Guid? ItemId { get; init; }
+
+    public int Hits { get; init; }
+
+    public DateTime UpdatedAt { get; init; }
+}
+
+public sealed class CsvImportRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public Guid? AccountId { get; init; }
+
+    public string Filename { get; init; } = "";
+
+    public int RowCount { get; init; }
+
+    public int ImportedCount { get; init; }
+
+    public int DuplicateCount { get; init; }
+
+    public Guid CreatedBy { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public string? CreatedByName { get; init; }
 }

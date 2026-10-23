@@ -4,7 +4,8 @@
 on PostgreSQL 16 with Npgsql + Dapper, DbUp migrations, Argon2id passwords, HS256 JWTs with rotating
 refresh tokens and Scalar docs. v2 adds Web Push (VAPID), WebAuthn passkeys (Fido2NetLib), an activity feed,
 expenses, budgets, savings goals, a to-pay checklist, household settings, the pay-period view, the month report
-and an in-process scheduler (autopay, reminders, hygiene).
+and an in-process scheduler (autopay, reminders, hygiene). v3 adds SimpleFIN bank sync (encrypted access URLs,
+scheduled + manual sync, balance updates), CSV import, the review inbox with a suggestion engine, and auto-matching.
 
 ```
 apps/api/
@@ -13,21 +14,28 @@ apps/api/
 ├─ Dockerfile / .dockerignore     # multi-stage, multi-arch, non-root (USER app), port 8080
 ├─ CouplesCash.Api.http           # VS Code REST Client walkthrough
 ├─ scripts/smoke.sh               # curl + jq end-to-end smoke test
+├─ scripts/fake-simplefin.py      # protocol-shaped fake SimpleFIN Bridge for the smoke test (python3, stdlib only)
 ├─ CouplesCash.Api/
 │  ├─ Program.cs                  # host, DI, pipeline, --migrate, --vapid
 │  ├─ Endpoints/                  # one static class per area, MapGroup("/v1")
 │  ├─ Auth/                       # Argon2idPasswordHasher, TokenService, CoupleCodeService, JwtOptions, WebAuthnOptions
-│  ├─ Domain/                     # pure, unit-tested: RecurrenceEngine, PayPeriodEngine, GoalProjection, SchedulerRules, BudgetMath, Money
+│  ├─ Domain/                     # pure, unit-tested: RecurrenceEngine, PayPeriodEngine, GoalProjection, SchedulerRules, BudgetMath, Money,
+│  │                              # TransactionMatcher (suggestions), Fingerprint (dedupe), BankSyncRules (interval, cooldown, window)
 │  ├─ Data/                       # NpgsqlDataSource, Dapper repositories, UnitOfWork, DbUpMigrator
 │  ├─ Services/                   # AuthSessionService, OccurrenceService, SummaryService, BudgetService, GoalService,
-│  │                              # ActivityService (+ summaries), PasskeyService (Fido2NetLib), DTO mapping
+│  │                              # ActivityService (+ summaries), PasskeyService (Fido2NetLib), DTO mapping,
+│  │                              # BankSyncService (claim/sync/mapping), InboxService (matcher run, auto-match, confirm/ignore/restore)
+│  ├─ SimpleFin/                  # ISimpleFinClient + SimpleFinClient (claim, GET /accounts, URL masking/rewrite), SimpleFinParser
+│  ├─ Security/                   # DataProtector: AES-256-GCM for the stored access URL (Security__DataKey)
 │  ├─ Push/                       # PushOptions, VapidKeys (--vapid), WebPushSender (Lib.Net.Http.WebPush), PushNotifier queue + dispatcher
-│  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene)
+│  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene, bank sync)
 │  ├─ Validation/                 # FluentValidation validators + endpoint filter
 │  ├─ Infrastructure/             # ProblemDetails, exception handler, rate limiting, OpenAPI bearer, options, feature filters
-│  └─ Migrations/000N_*.sql       # embedded, journaled in public.schema_versions (0001 = v1, 0002 = v2)
+│  └─ Migrations/000N_*.sql       # embedded, journaled in public.schema_versions (0001 = v1, 0002 = v2, 0003 = v3 imports)
 └─ CouplesCash.Api.Tests/         # xunit: recurrence, pay period, goal projection, scheduler rules, budget math,
-                                  # VAPID keys, activity summaries, WebAuthn config, couple codes, tokens, Argon2
+                                  # VAPID keys, activity summaries, WebAuthn config, couple codes, tokens, Argon2,
+                                  # DataProtector, Fingerprint, TransactionMatcher, SimpleFIN parser/client helpers,
+                                  # bank sync rules, v3 validators
 ```
 
 ## Run locally
@@ -83,7 +91,26 @@ SMOKE_SCHEDULER_WAIT=70 scripts/smoke.sh               # also creates an autopay
 ```
 
 The smoke script adapts to the server: with VAPID keys / an https (or `http://localhost`) WebAuthn origin it
-exercises the push subscription flow and the passkey ceremonies; without them it checks the 503 problems.
+exercises the push subscription flow and the passkey ceremonies; without them it checks the 503 problems. Without a
+`Security__DataKey` it checks that claiming a bank link answers `503 bank_sync_not_configured`.
+
+To run the full **bank-sync flow** against the fake Bridge (`scripts/fake-simplefin.py`, started by the smoke script):
+
+```bash
+# terminal 1 — API pointed at the fake Bridge, syncing every scheduler tick
+export Security__DataKey="$(openssl rand -base64 32)" SimpleFin__BaseUrl=http://127.0.0.1:8765 \
+       Sync__IntervalHours=0 Scheduler__IntervalSeconds=5 RateLimiting__GlobalPerMinute=100000
+dotnet run --project CouplesCash.Api
+# terminal 2
+SMOKE_SIMPLEFIN_PORT=8765 SMOKE_SCHEDULER_WAIT=40 scripts/smoke.sh http://localhost:8080
+```
+
+That walks: claim (first sync inline) → 2 external accounts → map checking (balance + snapshot) → create-and-map the
+credit card (−540.00 → 54000 owed) → inbox: Rent suggested as occurrence ≥ 90, Kroger → Groceries, Netflix →
+Subscriptions, payroll → Income, pending coffee → confirm Rent (occurrence paid, `source: bank`) → confirm Kroger as
+expense (`deduct=false`) → ignore/restore → CSV import with a duplicate → learned payee rule → bulk confirm-suggested →
+manual sync (0 new) → 429 + `Retry-After` → scheduler auto-match of a second rent payment → undo restores the inbox row →
+> 64 KB CSV body on the import route → unlink.
 
 ## Configuration
 
@@ -108,6 +135,11 @@ exercises the push subscription flow and the passkey ceremonies; without them it
 | `Scheduler__Enabled` | `true` | Run the autopay / reminder / hygiene job (set `false` in tests) |
 | `Scheduler__IntervalSeconds` | `60` | Tick interval |
 | `Scheduler__AutopayLookbackDays` | `3` | Autopay still marks due dates up to this many days back (Pi was off) |
+| `Security__DataKey` | empty | base64 of 32 random bytes (`openssl rand -base64 32`; `DATA_KEY` in `.env`). AES-256-GCM key for stored SimpleFIN access URLs. **Secret.** Blank = bank sync disabled: `POST /v1/banks/simplefin/claim` and `/sync` answer `503 bank_sync_not_configured`, `GET /v1/banks` reports `lastError: "encryption key missing"`. A malformed key fails startup. Rotation = re-link |
+| `Sync__IntervalHours` | `6` | Scheduler syncs each enabled bank link when its last attempt is older than this (`0` = every tick; tests only) |
+| `Sync__ManualCooldownMinutes` | `15` | "Sync now" cooldown per link (429 + `Retry-After`); counts manual syncs only |
+| `Sync__ClaimSyncBudgetSeconds` | `20` | Time budget for the inline first sync during claim; on timeout the link is returned and the scheduler retries |
+| `SimpleFin__BaseUrl` | empty | Test override: rewrites the scheme/host/port of the claim and access URLs (fake Bridge). Never set in production |
 | `ASPNETCORE_URLS` | `http://+:8080` | Listening address |
 | `ASPNETCORE_ENVIRONMENT` | `Production` | `Development` enables docs, readable logs and the dev JWT secret |
 
@@ -147,6 +179,10 @@ against `GET /health`.
 - Every mutation writes an `activity_events` row in the same transaction (`UnitOfWork`), then — after commit —
   queues a "<Actor> <summary>" push to the other member if they have `activityEnabled`. Summaries are plain text.
 - Money is integer hundredths of the household `currency` for every currency; the API never converts.
+- v3: the SimpleFIN access URL is a credential — stored AES-256-GCM encrypted (`Security/DataProtector.cs`), decrypted
+  only inside a sync, masked in logs (`https://***@…`) and never part of any response. Suggestion scoring, confirm/ignore/
+  restore semantics, cursor format and every deviation from the contract tables are listed in
+  [`docs/API-CONTRACT.md`](../../docs/API-CONTRACT.md) "v3 implementation notes".
 
 ## Scheduler
 
@@ -164,8 +200,16 @@ listening:
    `reminder_log` so it is sent once per (item, due date, user).
 3. **Hygiene** — expired `webauthn_challenges` and push subscriptions with ≥ 5 failures are deleted.
 
-Selection logic is pure (`Domain/SchedulerRules.cs`, unit-tested); the service only does I/O and catches every
-exception. Logs are under the `CouplesCash.Api.Scheduler.SchedulerService` category (`make scheduler-logs`).
+4. **Bank sync (v3)** — every enabled `bank_links` row whose `max(last_synced_at, last_attempt_at)` is older than
+   `Sync__IntervalHours`: decrypt the access URL, `GET /accounts` (90 days on the first sync, 30 after, `pending=1`),
+   upsert `external_accounts`, insert `imported_transactions` with fingerprint dedupe, run the matcher, **auto-match**
+   recurring hits with confidence ≥ 90 whose item has a learned payee rule (`paid_by NULL, auto true, source 'bank'`,
+   inbox row confirmed with `auto`, `transaction.automatched` event), push Bridge balances onto mapped accounts
+   (credit/loan: negative-when-owed → positive owed, snapshot only when changed), write `bank.synced`, and push
+   "Synced Chase · N to review" when N > 0. Failures land in `last_error` + a `bank.error` event and never stop the loop.
+
+Selection logic is pure (`Domain/SchedulerRules.cs`, `Domain/BankSyncRules.cs`, `Domain/TransactionMatcher.cs`,
+unit-tested); the service only does I/O and catches every exception. Logs are under the `CouplesCash.Api.Scheduler.SchedulerService` category (`make scheduler-logs`).
 
 Push delivery runs on a bounded in-memory queue (`PushNotifier` → `PushDispatchService`) so requests never wait
 on the push service; 404/410 from the push service delete the subscription immediately, other failures count up.

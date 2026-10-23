@@ -1,5 +1,7 @@
 using System.Text.Json;
 using CouplesCash.Api.Contracts;
+using CouplesCash.Api.Endpoints;
+using CouplesCash.Api.Services;
 using FluentValidation;
 
 namespace CouplesCash.Api.Validation;
@@ -250,5 +252,84 @@ public sealed class PasskeyLoginRequestValidator : AbstractValidator<PasskeyLogi
     {
         RuleFor(x => x.ChallengeId).NotEmpty();
         RuleFor(x => x.Credential).Must(c => c.ValueKind == JsonValueKind.Object).WithMessage("Must be an AuthenticationResponseJSON object.");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// v3
+// ---------------------------------------------------------------------------------------------
+
+public sealed class BankClaimRequestValidator : AbstractValidator<BankClaimRequest>
+{
+    public BankClaimRequestValidator()
+    {
+        RuleFor(x => x.SetupToken).NotEmpty().MaximumLength(4096);
+        RuleFor(x => x.Name).Length(1, 60).When(x => x.Name is not null);
+    }
+}
+
+public sealed class BankLinkPatchRequestValidator : AbstractValidator<BankLinkPatchRequest>
+{
+    public BankLinkPatchRequestValidator()
+    {
+        RuleFor(x => x.Name).Length(1, 60).When(x => x.Name is not null);
+        RuleFor(x => x).Must(x => x.Name is not null || x.SyncEnabled is not null).WithMessage("Provide name or syncEnabled.").OverridePropertyName("name");
+    }
+}
+
+public sealed class ExternalAccountMapRequestValidator : AbstractValidator<ExternalAccountMapRequest>
+{
+    public ExternalAccountMapRequestValidator()
+    {
+        RuleFor(x => x).Must(x => x.AccountId is null || x.Create is null).WithMessage("Send accountId or create, not both.").OverridePropertyName("accountId");
+        RuleFor(x => x.Create!.Name).NotEmpty().MaximumLength(80).When(x => x.Create is not null).OverridePropertyName("create.name");
+        RuleFor(x => x.Create!.Type).IsInEnum().When(x => x.Create?.Type is not null).OverridePropertyName("create.type");
+        RuleFor(x => x.Create!.Institution).MaximumLength(80).When(x => x.Create is not null).OverridePropertyName("create.institution");
+    }
+}
+
+public sealed class InboxConfirmRequestValidator : AbstractValidator<InboxConfirmRequest>
+{
+    public InboxConfirmRequestValidator()
+    {
+        RuleFor(x => x.As).NotNull().IsInEnum().WithMessage("Must be 'expense' or 'occurrence'.");
+        RuleFor(x => x.Name).MaximumLength(InboxService.MaxExpenseNameLength);
+        RuleFor(x => x.ItemId).NotNull().When(x => x.As == ConfirmAs.Occurrence).WithMessage("itemId is required to confirm as a payment.");
+        RuleFor(x => x.DueDate).NotNull().When(x => x.As == ConfirmAs.Occurrence).WithMessage("dueDate is required to confirm as a payment.");
+    }
+}
+
+public sealed class InboxBulkRequestValidator : AbstractValidator<InboxBulkRequest>
+{
+    public InboxBulkRequestValidator()
+    {
+        RuleFor(x => x.Action).NotEmpty().Must(a => a is InboxBulkRequest.ConfirmSuggested or InboxBulkRequest.Ignore)
+            .WithMessage("Must be 'confirm-suggested' or 'ignore'.");
+        RuleFor(x => x.Ids).Must(ids => ids is { Length: <= 500 }).When(x => x.Ids is not null).WithMessage("At most 500 ids.");
+        RuleFor(x => x.Ids).Must(ids => ids!.Distinct().Count() == ids!.Length).When(x => x.Ids is not null).WithMessage("Ids must be unique.");
+    }
+}
+
+public sealed class CsvRowRequestValidator : AbstractValidator<CsvRowRequest>
+{
+    public CsvRowRequestValidator()
+    {
+        RuleFor(x => x.PostedOn).NotNull();
+        RuleFor(x => x.AmountCents).NotEqual(0).InclusiveBetween(-Rules.MaxCents, Rules.MaxCents);
+        RuleFor(x => x.Description).NotEmpty().MaximumLength(200);
+        RuleFor(x => x.Payee).MaximumLength(200);
+        RuleFor(x => x.Memo).MaximumLength(500);
+    }
+}
+
+public sealed class CsvImportRequestValidator : AbstractValidator<CsvImportRequest>
+{
+    public CsvImportRequestValidator()
+    {
+        RuleFor(x => x.AccountId).NotNull();
+        RuleFor(x => x.Filename).NotEmpty().MaximumLength(200);
+        RuleFor(x => x.Rows).NotNull().Must(rows => rows is { Length: >= 1 and <= ImportEndpoints.MaxRows })
+            .WithMessage($"Provide between 1 and {ImportEndpoints.MaxRows} rows.");
+        RuleForEach(x => x.Rows).SetValidator(new CsvRowRequestValidator()).When(x => x.Rows is not null);
     }
 }

@@ -46,7 +46,7 @@ public static class Mapping
         i.CategoryColor,
         i.AccountId,
         i.AccountName,
-        paid is null ? null : new PaidInfo(paid.PaidAt, paid.PaidBy, paid.AmountCents, paid.Auto));
+        paid is null ? null : new PaidInfo(paid.PaidAt, paid.PaidBy, paid.AmountCents, paid.Auto, paid.Source));
 
     // ---------------------------------------------------------------------------------------------
     // v2
@@ -80,5 +80,51 @@ public static class Mapping
             using var empty = JsonDocument.Parse("{}");
             return empty.RootElement.Clone();
         }
+    }
+}
+
+public static class MappingV3
+{
+    public static ExternalAccountDto ToDto(this ExternalAccountRow e) =>
+        new(e.Id, e.ExternalId, e.OrgName, e.Name, e.Currency, e.BalanceCents, e.AvailableCents, e.BalanceAt, e.AccountId, e.AccountName, e.UpdatedAt);
+
+    public static CsvImportHistoryDto ToDto(this CsvImportRow c) =>
+        new(c.Id, c.Filename, c.RowCount, c.ImportedCount, c.DuplicateCount, c.CreatedAt, c.CreatedByName ?? "");
+
+    public static InboxItemDto ToDto(this ImportedTransactionRow t) => new(
+        t.Id,
+        t.Source,
+        t.AccountId,
+        t.AccountName,
+        t.PostedOn,
+        t.AmountCents,
+        t.Description,
+        t.Payee,
+        t.Memo,
+        t.Pending,
+        t.Status,
+        Suggestion(t),
+        t.Status == "pending" ? null : new InboxConfirmedDto(t.ConfirmedExpenseId, t.ConfirmedItemId, t.ConfirmedDueDate, t.ReviewedBy, t.ReviewedByName, t.ReviewedAt, t.ConfirmedAuto, t.ConfirmedCategoryName, t.ConfirmedItemName),
+        t.CreatedAt);
+
+    private static SuggestionDto? Suggestion(ImportedTransactionRow t)
+    {
+        if (t is { SuggestedItemId: { } itemId, SuggestedDueDate: { } dueDate, SuggestedItemName: { } itemName })
+        {
+            var kind = Enum.TryParse<Kind>(t.SuggestedItemKind, ignoreCase: true, out var parsed) ? parsed : Kind.Bill;
+            return new OccurrenceSuggestionDto(itemId, itemName, kind, dueDate, t.Confidence);
+        }
+
+        if (t.SuggestedTransfer)
+        {
+            return new TransferSuggestionDto(t.Confidence);
+        }
+
+        if (t is { SuggestedCategoryId: { } categoryId, SuggestedCategoryName: { } categoryName })
+        {
+            return new CategorySuggestionDto(categoryId, categoryName, t.Confidence);
+        }
+
+        return null;
     }
 }

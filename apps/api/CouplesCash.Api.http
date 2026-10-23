@@ -365,6 +365,109 @@ Content-Type: application/json
   "credential": { "id": "…", "rawId": "…", "type": "public-key", "response": { "clientDataJSON": "…", "authenticatorData": "…", "signature": "…", "userHandle": "…" }, "clientExtensionResults": {} }
 }
 
+### ---------------------------------------------------------------------------------------------
+### v3 — bank sync, inbox, CSV import
+### ---------------------------------------------------------------------------------------------
+
+### Banks: list links with external accounts (works without Security__DataKey; lastError = "encryption key missing")
+GET {{host}}/v1/banks
+Authorization: Bearer {{accessToken}}
+
+### Banks: claim a SimpleFIN setup token (base64 of the claim URL from https://beta-bridge.simplefin.org/simplefin/create)
+### 503 bank_sync_not_configured without Security__DataKey · 400 errors.setupToken when invalid/claimed · 502 when the Bridge is down
+# @name link
+POST {{host}}/v1/banks/simplefin/claim
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "setupToken": "aHR0cHM6Ly9iZXRhLWJyaWRnZS5zaW1wbGVmaW4ub3JnL3NpbXBsZWZpbi9jbGFpbS9ERU1P", "name": "Chase" }
+
+### Banks: map an external account to an existing account (applies the balance + snapshot right away)
+PUT {{host}}/v1/banks/accounts/{{link.response.body.accounts.0.id}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "accountId": "{{account.response.body.id}}" }
+
+### Banks: or create the CouplesCash account from the bank account (type guessed from the name unless given)
+PUT {{host}}/v1/banks/accounts/{{link.response.body.accounts.1.id}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "create": { "name": "Visa", "type": "credit" } }
+
+### Banks: sync now (429 + Retry-After inside the 15-minute manual cooldown)
+POST {{host}}/v1/banks/{{link.response.body.id}}/sync
+Authorization: Bearer {{accessToken}}
+
+### Banks: rename / pause
+PATCH {{host}}/v1/banks/{{link.response.body.id}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Chase (joint)", "syncEnabled": true }
+
+### Inbox: dashboard summary
+GET {{host}}/v1/inbox/summary
+Authorization: Bearer {{accessToken}}
+
+### Inbox: pending rows, newest first (follow nextBefore: "YYYY-MM-DD_<id>")
+# @name inbox
+GET {{host}}/v1/inbox?status=pending&limit=50
+Authorization: Bearer {{accessToken}}
+
+### Inbox: confirm as an expense (category defaults to the suggestion; deduct=false; learns the payee rule)
+POST {{host}}/v1/inbox/{{inbox.response.body.items.0.id}}/confirm
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "as": "expense", "categoryId": "{{categories.response.body.4.id}}", "name": "Weekly shop" }
+
+### Inbox: confirm as a bill payment (marks the occurrence paid with the actual amount, source "bank")
+POST {{host}}/v1/inbox/{{inbox.response.body.items.1.id}}/confirm
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "as": "occurrence", "itemId": "{{rent.response.body.id}}", "dueDate": "2024-02-29" }
+
+### Inbox: ignore / restore
+POST {{host}}/v1/inbox/{{inbox.response.body.items.2.id}}/ignore
+Authorization: Bearer {{accessToken}}
+
+###
+POST {{host}}/v1/inbox/{{inbox.response.body.items.2.id}}/restore
+Authorization: Bearer {{accessToken}}
+
+### Inbox: confirm every pending row with confidence ≥ 70 using its suggestion (no ids = all pending)
+POST {{host}}/v1/inbox/bulk
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "action": "confirm-suggested" }
+
+### CSV import: normalised rows (the web parses the file; ≤ 5000 rows, body ≤ 2 MB on this route)
+POST {{host}}/v1/imports/csv
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "accountId": "{{account.response.body.id}}",
+  "filename": "statement.csv",
+  "rows": [
+    { "postedOn": "2026-10-02", "amountCents": -1249, "description": "KROGER #123", "payee": "Kroger" },
+    { "postedOn": "2026-10-03", "amountCents": -4000, "description": "SHELL OIL 12345", "memo": "fuel" },
+    { "postedOn": "2026-10-15", "amountCents": 320000, "description": "ACME PAYROLL" }
+  ]
+}
+
+### CSV import: history (last 20)
+GET {{host}}/v1/imports/csv
+Authorization: Bearer {{accessToken}}
+
+### Banks: unlink (inbox rows and mapped accounts are kept)
+DELETE {{host}}/v1/banks/{{link.response.body.id}}
+Authorization: Bearer {{accessToken}}
+
 ### Logout (revokes the refresh token)
 POST {{host}}/v1/auth/logout
 Authorization: Bearer {{accessToken}}

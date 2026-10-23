@@ -88,6 +88,35 @@ public static class ActivitySummaries
 
     public static string CategoryDeleted(CategoryRow c) => $"removed category {Bold(c.Name)}";
 
+    // Banks / inbox / imports (v3)
+    public static string BankLinked(string name) => $"linked bank {Bold(name)}";
+
+    public static string BankUnlinked(string name) => $"unlinked bank {Bold(name)}";
+
+    public static string BankSynced(string name, int newTransactions, int autoMatched) =>
+        $"synced {Bold(name)} · {Plural(newTransactions, "new transaction")}{(autoMatched > 0 ? $", {autoMatched} auto-matched" : "")}";
+
+    public static string BankError(string name, string error) => $"could not sync {Bold(name)}: {error}";
+
+    public static string BankMapped(string externalName, string accountName) => $"mapped {Bold(externalName)} to {Bold(accountName)}";
+
+    public static string BankUnmapped(string externalName) => $"stopped tracking {Bold(externalName)}";
+
+    public static string ImportCsv(string filename, int imported, int duplicates) =>
+        $"imported {Bold(filename)} · {Plural(imported, "transaction")}{(duplicates > 0 ? $", {Plural(duplicates, "duplicate")} skipped" : "")}";
+
+    public static string TransactionConfirmedExpense(string name, long amountCents, string currency) => $"confirmed {Bold(name)} · {Money(amountCents, currency)}";
+
+    public static string TransactionConfirmedOccurrence(string itemName, long amountCents, string currency) => $"matched {Bold(itemName)} · {Money(amountCents, currency)}";
+
+    public static string TransactionAutomatched(string itemName, long amountCents, string currency) => $"matched {Bold(itemName)} · {Money(amountCents, currency)} (auto)";
+
+    public static string TransactionIgnored(string name, long amountCents, string currency) => $"ignored {Bold(name)} · {Money(amountCents, currency)}";
+
+    public static string TransactionRestored(string name, long amountCents, string currency) => $"restored {Bold(name)} · {Money(amountCents, currency)} to the inbox";
+
+    public static string Plural(int count, string noun) => $"{count} {noun}{(count == 1 ? "" : "s")}";
+
     // Users
     public static string UserRenamed(string displayName) => $"changed their name to {Bold(displayName)}";
 

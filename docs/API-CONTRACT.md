@@ -390,3 +390,59 @@ type CsvImportResult = { id: string; rowCount: number; imported: number; duplica
 Activity kinds added: `bank.linked|unlinked|synced|error`, `import.csv`, `transaction.confirmed|ignored|restored|automatched`.
 Occurrence payments created from the inbox carry `paid.auto = false` (user) or `true` (auto-match); unpaying an auto-matched occurrence restores the inbox row to pending.
 Env: `Security__DataKey` (base64 32 bytes), `Sync__IntervalHours` (6), `Sync__ManualCooldownMinutes` (15), `SimpleFin__BaseUrl` (override for tests; default derived from the access URL).
+
+## v3 implementation notes (API)
+
+Deviations and clarifications from the tables above, as built in `apps/api`:
+
+- **SimpleFIN protocol** was re-verified against https://www.simplefin.org/protocol.html (now a v2.0.0-draft). The client
+  parses both the v1 shape the Bridge serves today (`errors: string[]`, per-account `org`, `payee`/`memo`) and the v2 draft
+  (`errlist: [{code,msg}]`, top-level `connections`, `transacted_at`, `posted: 0` while pending → treated as pending, dated
+  by `transacted_at` or today). Amounts are decimal strings → integer cents (banker's rounding); dates are unix seconds.
+  Requests send `start-date`, `end-date` (exclusive, = tomorrow) and `pending=1`; the Basic credentials from the access
+  URL's userinfo go in the `Authorization` header. SimpleFIN transaction ids are only unique per account, so the dedupe
+  fingerprint is `sha256('simplefin|' + accountExternalId + '|' + txId)`.
+- **`Occurrence.paid.source`**: `'manual' | 'autopay' | 'bank'` (new column `occurrence_payments.source`). `'bank'` for both
+  inbox confirm-as-occurrence (`auto=false`, `paidBy` = reviewer) and scheduler auto-match (`auto=true`, `paidBy=null`).
+  `auto` keeps its v2 meaning.
+- **`InboxItem.confirmed`** also carries `categoryName` (category of the created expense) and `itemName`.
+- **Manual sync cooldown** (`Sync__ManualCooldownMinutes`, 15) counts only `POST /banks/{id}/sync`; the inline first sync of
+  `claim` and scheduler syncs do not start it, so "Sync now" works right after linking. 429 carries `Retry-After` (seconds)
+  and a `retryAfter` extension.
+- **`PUT /banks/accounts/{id}` with `{ create }`** creates the account (type guessed from the bank's name unless given,
+  institution = bank org name unless given, balance = sign-converted Bridge balance) and returns the `ExternalAccount`
+  with the new `accountId`/`accountName`. `{ accountId: null }` (or `{}`) unmaps. Mapping re-points the external account's
+  inbox rows (`accountId`/`accountName`) and immediately writes the balance + a snapshot (snapshot `recordedBy` = caller;
+  scheduler syncs use the user who linked the bank). `ExternalAccount.balanceCents` is the **raw Bridge value**
+  (credit/loan negative when owed); only the mapped CouplesCash account stores positive amount owed.
+- **`POST /inbox/bulk`** without `ids` = every pending row. `confirm-suggested` takes rows with confidence ≥ 70: an
+  occurrence suggestion → paid, a transfer suggestion → ignored (counted in `ignored`), a category suggestion → expense
+  (outflows only; an inflow with a category suggestion is `skipped`). Rows below 70 or without a suggestion are `skipped`.
+  Bulk writes one activity event instead of one per row.
+- **Confirm as expense** refuses inflows (`400 errors.as`) — money in is matched to an income item or ignored. `categoryId`
+  defaults to the suggested category; `name` defaults to `payee ?? description` (≤ 80 chars); `note` = memo. Learning a
+  payee rule also re-suggests other pending rows with the same normalised payee (so confirming one Kroger row makes the
+  other Kroger rows "suggested").
+- **Suggestion order**: recurring match (90, +5 with a learned item rule) → transfer (80) → payee rule (70 + min(hits, 20))
+  → keyword (40). Within one sync batch each unpaid occurrence is handed out once. `payee_norm` is computed from
+  `payee` when present, else `description`. Transfer detection treats every account that receives bank or CSV rows as
+  "mapped".
+- **Auto-match** runs on every SimpleFIN sync (claim, manual, scheduler), never on CSV imports: recurring confidence ≥ 90
+  **and** a learned payee rule naming that item. It ignores `autopay_skips` (the bank proves the money moved).
+- **Undo** (`DELETE /recurring/{id}/occurrences/{date}/paid`) restores the inbox row that paid the occurrence (confirmed or
+  auto-matched) to pending; an autopay skip is written only when the item is `autoPay` (or the payment was a genuine
+  autopay). `POST /inbox/{id}/restore` on an occurrence confirmation likewise writes a skip only for `autoPay` items.
+- **Extra activity kinds**: `bank.updated` (rename / pause / resume), `bank.mapped`, `bank.unmapped`; `account.created`
+  is also written when `{ create }` is used. `bank.synced` is written on every sync (actor = user for manual, null for
+  scheduler/claim-inline) with `data: { newTransactions, updatedAccounts, autoMatched, errors, manual }`; the push
+  "Synced <name> · N to review" goes to members with activity pushes on (minus the actor) when N > 0.
+- **Scheduler back-off**: `bank_links.last_attempt_at` is set on success and failure; a link is due when
+  `max(last_synced_at, last_attempt_at)` is older than `Sync__IntervalHours`, so a broken link is retried at the normal
+  cadence instead of every tick. `Sync__IntervalHours=0` = every tick (tests/smoke only).
+- **CSV dedupe** is per source: a CSV row never dedupes against a SimpleFIN row of the same purchase (different
+  fingerprint inputs). Rows with `amountCents = 0`, no date or a blank description are counted in `skipped` rather than
+  failing the import (shape errors still 400). `POST /imports/csv` is the only route with a 2 MB body limit
+  (`RequestSizeLimit` metadata; everything else keeps Kestrel's 64 KB).
+- **Without `Security__DataKey`**: `POST /banks/simplefin/claim` and `POST /banks/{id}/sync` → `503 bank_sync_not_configured`;
+  `GET /banks` still works and reports `lastError: "encryption key missing"` on every link; the scheduler skips bank sync.
+  `SimpleFin__BaseUrl` (tests) rewrites the scheme/host/port of the claim and access URLs and allows plain-http access URLs.

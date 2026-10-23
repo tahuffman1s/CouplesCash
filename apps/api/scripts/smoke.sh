@@ -2,10 +2,15 @@
 # End-to-end smoke test against a running API (default http://localhost:8080).
 # Walks: register → couple code → second user joins → account → recurring → calendar → paid → summary,
 # then v2: settings → pay period → expenses (deduction) → budgets → to-pay → goals → activity → push →
-# passkeys config → month report → (optionally) autopay by the scheduler.
+# passkeys config → month report → (optionally) autopay by the scheduler,
+# then v3: inbox/CSV validation → (with SMOKE_SIMPLEFIN_PORT) fake SimpleFIN Bridge: claim → map → inbox → confirm/ignore/
+# restore → CSV import → bulk → sync/cooldown → scheduler auto-match → undo → unlink.
 # Requires: curl, jq. Usage: scripts/smoke.sh [base-url]
 #   SMOKE_SCHEDULER_WAIT=<seconds>  also create an autopay bill due today and wait for the scheduler
 #                                   to mark it (set to > Scheduler__IntervalSeconds); default 0 = skip.
+#   SMOKE_SIMPLEFIN_PORT=<port>     start scripts/fake-simplefin.py and run the bank-sync flow (API needs Security__DataKey
+#                                   and SimpleFin__BaseUrl=http://127.0.0.1:<port>; add Sync__IntervalHours=0 +
+#                                   Scheduler__IntervalSeconds=5 + SMOKE_SCHEDULER_WAIT for auto-match).
 # Push and passkey checks adapt to the server: 503 problems when unconfigured, real flows when configured.
 set -euo pipefail
 
@@ -21,16 +26,20 @@ pass() { printf '  ok   %s\n' "$1"; }
 fail() { printf '  FAIL %s\n' "$1"; exit 1; }
 
 TMP_BODY="$(mktemp)"
-trap 'rm -f "$TMP_BODY"' EXIT
+TMP_REQ="$(mktemp)"
+trap 'rm -f "$TMP_BODY" "$TMP_REQ"' EXIT
 STATUS=""
 BODY=""
 
-# request METHOD PATH [TOKEN] [JSON] → sets $STATUS and $BODY
+# request METHOD PATH [TOKEN] [JSON] → sets $STATUS and $BODY (the body goes through a file so large CSV payloads work)
 request() {
   local method="$1" path="$2" token="${3:-}" json="${4:-}"
   local -a args=(-s -o "$TMP_BODY" -w '%{http_code}' -X "$method" "$BASE$path" -H 'Content-Type: application/json')
   [[ -n "$token" ]] && args+=(-H "Authorization: Bearer $token")
-  [[ -n "$json" ]] && args+=(--data "$json")
+  if [[ -n "$json" ]]; then
+    printf '%s' "$json" > "$TMP_REQ"
+    args+=(--data-binary "@$TMP_REQ")
+  fi
   STATUS="$(curl "${args[@]}")"
   BODY="$(cat "$TMP_BODY")"
 }
@@ -385,6 +394,215 @@ if [[ "${SMOKE_SCHEDULER_WAIT:-0}" -gt 0 ]]; then
   pass "undo guard holds: still unpaid after another tick"
   request PUT "/v1/recurring/$GYM/occurrences/$TODAY_LOCAL/paid" "$A_TOKEN" '{}'; expect 200 "manual pay after undo (clears the skip)"
   request DELETE "/v1/recurring/$GYM" "$A_TOKEN"; expect 204 "archive Gym"
+fi
+
+
+# ---------------------------------------------------------------------------------------------
+# v3: bank sync, review inbox, CSV import
+#   SMOKE_SIMPLEFIN_PORT=<port>  start scripts/fake-simplefin.py on that port and run the full SimpleFIN flow.
+#                                The API must have been started with Security__DataKey set and
+#                                SimpleFin__BaseUrl=http://127.0.0.1:<port>; set Sync__IntervalHours=0 and
+#                                Scheduler__IntervalSeconds=5 to also exercise scheduler auto-match.
+#   Without it only the always-on inbox/import checks run and the claim route must answer 503 (no key) or 400/502.
+# ---------------------------------------------------------------------------------------------
+echo "--- v3: inbox & CSV import"
+request GET /v1/inbox/summary "$A_TOKEN"; expect 200 "inbox summary"
+echo "$BODY" | jq -e '.pending==0 and .suggested==0 and .linkCount==0 and .lastSyncedAt==null' >/dev/null || fail "empty inbox summary: $BODY"
+request GET "/v1/inbox?status=bogus" "$A_TOKEN"; expect 400 "bad inbox status → 400"
+request GET "/v1/inbox?before=yesterday" "$A_TOKEN"; expect 400 "bad inbox cursor → 400"
+request GET /v1/banks "$A_TOKEN"; expect 200 "bank links (none yet)"
+[[ "$(echo "$BODY" | jq length)" == "0" ]] || fail "expected no bank links"
+request POST /v1/imports/csv "$A_TOKEN" "$(jq -nc --arg a "$ACC" '{accountId:$a,filename:"bad.csv",rows:[{postedOn:"2026-10-01",amountCents:0,description:""}]}')"; expect 400 "CSV row validation → 400"
+[[ "$(echo "$BODY" | jq -r '.errors | keys | join(",")')" == *rows* ]] || fail "errors should name rows[...]"
+request POST /v1/imports/csv "$A_TOKEN" '{"accountId":"00000000-0000-7000-8000-000000000000","filename":"x.csv","rows":[{"postedOn":"2026-10-01","amountCents":-100,"description":"X"}]}'; expect 400 "foreign CSV accountId → 400"
+request POST /v1/inbox/bulk "$A_TOKEN" '{"action":"confirm-all"}'; expect 400 "bad bulk action → 400"
+request POST /v1/inbox/00000000-0000-7000-8000-000000000000/ignore "$A_TOKEN"; expect 404 "unknown inbox row → 404"
+
+if [[ -n "${SMOKE_SIMPLEFIN_PORT:-}" ]]; then
+  echo "--- v3: SimpleFIN via fake Bridge on port $SMOKE_SIMPLEFIN_PORT"
+  command -v python3 >/dev/null || fail "python3 is required for the fake SimpleFIN server"
+  TODAY_UTC="$(date -u +%F)"
+  RENT_ANCHOR="$(date -u -d "$TODAY_UTC -7 days" +%F)"
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 -I "$SCRIPT_DIR/fake-simplefin.py" --port "$SMOKE_SIMPLEFIN_PORT" --today "$TODAY_UTC" --rent-date "$TODAY_UTC" --rent2-date "$RENT_ANCHOR" &
+  FAKE_PID=$!
+  trap 'kill "$FAKE_PID" 2>/dev/null; rm -f "$TMP_BODY" "$TMP_REQ"' EXIT
+  FAKE="http://127.0.0.1:$SMOKE_SIMPLEFIN_PORT"
+  for _ in $(seq 1 50); do curl -fs "$FAKE/__health" >/dev/null 2>&1 && break; sleep 0.1; done
+  curl -fs "$FAKE/__health" >/dev/null || fail "fake SimpleFIN server did not start"
+  pass "fake SimpleFIN server up"
+
+  # A weekly "Rent" anchored 7 days ago: occurrences on $RENT_ANCHOR and $TODAY_UTC, both unpaid.
+  request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg c "$HOUSING" --arg a "$ACC" --arg d "$RENT_ANCHOR" '{name:"Rent (weekly test)",kind:"bill",amountCents:185000,categoryId:$c,accountId:$a,frequency:"weekly",anchorDate:$d}')"; expect 201 "create weekly Rent due $RENT_ANCHOR and $TODAY_UTC"
+  RENT_V3="$(echo "$BODY" | jq -r .id)"
+
+  request GET "/v1/accounts/$ACC" "$A_TOKEN"; expect 200 "account before mapping"
+  ACC_BALANCE_BEFORE="$(echo "$BODY" | jq -r .balanceCents)"
+  request GET "/v1/accounts/$ACC/history?limit=100" "$A_TOKEN"; HIST_BEFORE="$(echo "$BODY" | jq length)"
+
+  TOKEN="$(printf 'http://127.0.0.1:%s/simplefin/claim/demo' "$SMOKE_SIMPLEFIN_PORT" | base64 -w0)"
+  request POST /v1/banks/simplefin/claim "$A_TOKEN" '{"setupToken":"bm90IGEgdXJs"}'; expect 400 "garbage setup token → 400"
+  [[ "$(echo "$BODY" | jq -r '.errors | keys | join(",")')" == "setupToken" ]] || fail "errors should name setupToken"
+  EXPIRED="$(printf 'http://127.0.0.1:%s/simplefin/claim/expired' "$SMOKE_SIMPLEFIN_PORT" | base64 -w0)"
+  request POST /v1/banks/simplefin/claim "$A_TOKEN" "$(jq -nc --arg t "$EXPIRED" '{setupToken:$t}')"; expect 400 "already-claimed token (Bridge 403) → 400"
+  request POST /v1/banks/simplefin/claim "$A_TOKEN" "$(jq -nc --arg t "$TOKEN" '{setupToken:$t,name:"Demo Bank"}')"; expect 201 "claim setup token (first sync inline)"
+  LINK="$(echo "$BODY" | jq -r .id)"
+  echo "$BODY" | jq -e '.provider=="simplefin" and .name=="Demo Bank" and .lastSyncedAt!=null and .lastError==null and (.bridgeErrors|length==0) and (.accounts|length==2)' >/dev/null || fail "link shape: $BODY"
+  [[ "$(echo "$BODY" | jq -r 'tostring')" != *demo-pass* ]] || fail "access URL credentials leaked into the response"
+  EXT_CHK="$(echo "$BODY" | jq -r '.accounts[] | select(.externalId=="ACT-CHECKING") | .id')"
+  EXT_VISA="$(echo "$BODY" | jq -r '.accounts[] | select(.externalId=="ACT-VISA") | .id')"
+  [[ "$(echo "$BODY" | jq -r '.accounts[] | select(.externalId=="ACT-VISA") | .balanceCents')" == "-54000" ]] || fail "external credit balance is the raw Bridge value"
+  [[ "$(echo "$BODY" | jq -r '.accounts[] | select(.externalId=="ACT-CHECKING") | .accountId')" == "null" ]] || fail "not mapped yet"
+
+  request GET /v1/banks "$A_TOKEN"; expect 200 "list links"
+  [[ "$(echo "$BODY" | jq length)" == "1" ]] || fail "one link"
+
+  request PUT "/v1/banks/accounts/$EXT_CHK" "$A_TOKEN" '{"accountId":"00000000-0000-7000-8000-000000000000"}'; expect 400 "map to foreign account → 400"
+  request PUT "/v1/banks/accounts/$EXT_CHK" "$A_TOKEN" "$(jq -nc --arg a "$ACC" '{accountId:$a}')"; expect 200 "map checking to Joint checking"
+  [[ "$(echo "$BODY" | jq -r .accountId)" == "$ACC" && "$(echo "$BODY" | jq -r .accountName)" == "Joint checking" ]] || fail "mapping response: $BODY"
+  request GET "/v1/accounts/$ACC" "$A_TOKEN"
+  [[ "$(echo "$BODY" | jq -r .balanceCents)" == "245050" ]] || fail "mapped account balance should be 245050 (was $ACC_BALANCE_BEFORE), got $(echo "$BODY" | jq -r .balanceCents)"
+  request GET "/v1/accounts/$ACC/history?limit=100" "$A_TOKEN"
+  [[ "$(echo "$BODY" | jq length)" == "$((HIST_BEFORE + 1))" ]] || fail "mapping should add one snapshot"
+  pass "mapping applied balance + snapshot"
+
+  request PUT "/v1/banks/accounts/$EXT_VISA" "$A_TOKEN" '{"create":{"name":"Demo Visa","type":"credit"}}'; expect 200 "map credit card by creating an account"
+  VISA_ACC="$(echo "$BODY" | jq -r .accountId)"
+  [[ "$VISA_ACC" != "null" && "$(echo "$BODY" | jq -r .accountName)" == "Demo Visa" ]] || fail "create mapping response: $BODY"
+  request GET "/v1/accounts/$VISA_ACC" "$A_TOKEN"; expect 200 "created credit account"
+  [[ "$(echo "$BODY" | jq -r .balanceCents)" == "54000" && "$(echo "$BODY" | jq -r .type)" == "credit" ]] || fail "credit: Bridge -540.00 → 54000 owed, got $BODY"
+
+  request GET /v1/inbox/summary "$A_TOKEN"; expect 200 "inbox summary after sync"
+  echo "$BODY" | jq -e '.pending==5 and .linkCount==1 and .lastSyncedAt!=null' >/dev/null || fail "summary: $BODY"
+  request GET "/v1/inbox?status=pending" "$A_TOKEN"; expect 200 "pending inbox"
+  INBOX="$BODY"
+  [[ "$(echo "$INBOX" | jq '.items|length')" == "5" ]] || fail "5 pending rows"
+  TX_RENT="$(echo "$INBOX" | jq -r '.items[] | select(.description=="RENT PAYMENT") | .id')"
+  TX_KROGER="$(echo "$INBOX" | jq -r '.items[] | select(.description=="KROGER #123") | .id')"
+  TX_NETFLIX="$(echo "$INBOX" | jq -r '.items[] | select(.description=="NETFLIX.COM") | .id')"
+  TX_PAYROLL="$(echo "$INBOX" | jq -r '.items[] | select(.description|startswith("ACME")) | .id')"
+  TX_COFFEE="$(echo "$INBOX" | jq -r '.items[] | select(.description|contains("COFFEE")) | .id')"
+  echo "$INBOX" | jq -e --arg id "$TX_RENT" --arg item "$RENT_V3" --arg d "$TODAY_UTC" '.items[] | select(.id==$id) | .suggestion.kind=="occurrence" and .suggestion.itemId==$item and .suggestion.dueDate==$d and .suggestion.confidence>=90 and .amountCents==-185000 and .accountName=="Joint checking"' >/dev/null || fail "rent suggestion: $(echo "$INBOX" | jq -c --arg id "$TX_RENT" '.items[]|select(.id==$id)')"
+  echo "$INBOX" | jq -e --arg id "$TX_KROGER" '.items[] | select(.id==$id) | .suggestion.kind=="category" and .suggestion.categoryName=="Groceries" and .suggestion.confidence==40 and .payee=="Kroger"' >/dev/null || fail "kroger suggestion"
+  echo "$INBOX" | jq -e --arg id "$TX_NETFLIX" '.items[] | select(.id==$id) | .suggestion.kind=="category" and .suggestion.categoryName=="Subscriptions" and .accountName=="Demo Visa"' >/dev/null || fail "netflix suggestion"
+  echo "$INBOX" | jq -e --arg id "$TX_PAYROLL" '.items[] | select(.id==$id) | .suggestion.categoryName=="Income" and .amountCents==320000' >/dev/null || fail "payroll suggestion"
+  echo "$INBOX" | jq -e --arg id "$TX_COFFEE" '.items[] | select(.id==$id) | .pending==true and .suggestion.categoryName=="Fun"' >/dev/null || fail "coffee pending + Fun"
+  pass "suggestions: Rent→occurrence, Kroger→Groceries, Netflix→Subscriptions, payroll→Income, coffee pending"
+  request GET "/v1/inbox?status=pending&limit=2" "$A_TOKEN"; expect 200 "inbox page 1 (limit 2)"
+  NEXT="$(echo "$BODY" | jq -r .nextBefore)"; [[ "$NEXT" != "null" && "$(echo "$BODY" | jq '.items|length')" == "2" ]] || fail "page 1 should have a cursor"
+  request GET "/v1/inbox?status=pending&limit=2&before=$NEXT" "$A_TOKEN"; expect 200 "inbox page 2 via nextBefore"
+  [[ "$(echo "$BODY" | jq '.items|length')" == "2" ]] || fail "page 2"
+
+  request POST "/v1/inbox/$TX_RENT/confirm" "$A_TOKEN" "$(jq -nc --arg i "$RENT_V3" --arg d "$RENT_ANCHOR" '{as:"occurrence",itemId:$i,dueDate:"2020-01-01"}')"; expect 400 "confirm with a non-occurrence date → 400"
+  request POST "/v1/inbox/$TX_PAYROLL/confirm" "$A_TOKEN" "$(jq -nc --arg i "$RENT_V3" --arg d "$TODAY_UTC" '{as:"occurrence",itemId:$i,dueDate:$d}')"; expect 400 "inflow against a bill → 400 (sign/kind)"
+  request POST "/v1/inbox/$TX_RENT/confirm" "$A_TOKEN" "$(jq -nc --arg i "$RENT_V3" --arg d "$TODAY_UTC" '{as:"occurrence",itemId:$i,dueDate:$d}')"; expect 200 "confirm Rent as occurrence"
+  echo "$BODY" | jq -e --arg i "$RENT_V3" --arg d "$TODAY_UTC" '.status=="confirmed" and .confirmed.itemId==$i and .confirmed.dueDate==$d and .confirmed.auto==false and .confirmed.by!=null and .confirmed.itemName=="Rent (weekly test)"' >/dev/null || fail "confirmed rent: $BODY"
+  request POST "/v1/inbox/$TX_RENT/confirm" "$A_TOKEN" "$(jq -nc --arg i "$RENT_V3" --arg d "$TODAY_UTC" '{as:"occurrence",itemId:$i,dueDate:$d}')"; expect 400 "confirm twice → 400"
+  request GET "/v1/calendar?from=$TODAY_UTC&to=$TODAY_UTC" "$A_TOKEN"
+  echo "$BODY" | jq -e --arg i "$RENT_V3" '.occurrences[] | select(.itemId==$i) | .paid.amountCents==185000 and .paid.auto==false and .paid.source=="bank" and .paid.paidBy!=null' >/dev/null || fail "occurrence paid from bank: $(echo "$BODY" | jq -c --arg i "$RENT_V3" '.occurrences[]|select(.itemId==$i)')"
+  pass "Rent occurrence paid · source=bank"
+
+  request POST "/v1/inbox/$TX_PAYROLL/confirm" "$A_TOKEN" '{"as":"expense"}'; expect 400 "inflow as expense → 400"
+  request POST "/v1/inbox/$TX_KROGER/confirm" "$A_TOKEN" '{"as":"expense"}'; expect 200 "confirm Kroger as expense (suggested category)"
+  KROGER_EXP="$(echo "$BODY" | jq -r .confirmed.expenseId)"
+  [[ "$(echo "$BODY" | jq -r .confirmed.categoryName)" == "Groceries" ]] || fail "confirmed.categoryName"
+  request GET "/v1/expenses/$KROGER_EXP" "$A_TOKEN"; expect 200 "expense exists"
+  echo "$BODY" | jq -e --arg c "$GROCERIES" --arg a "$ACC" --arg d "$TODAY_UTC" '.deducted==false and .categoryId==$c and .accountId==$a and .amountCents==1249 and .name=="Kroger" and .spentOn==$d' >/dev/null || fail "expense from inbox: $BODY"
+  request GET "/v1/accounts/$ACC" "$A_TOKEN"
+  [[ "$(echo "$BODY" | jq -r .balanceCents)" == "245050" ]] || fail "deduct=false must not touch the balance"
+  pass "expense created with deduct=false"
+
+  request POST "/v1/inbox/$TX_COFFEE/ignore" "$A_TOKEN"; expect 200 "ignore coffee"
+  [[ "$(echo "$BODY" | jq -r .status)" == "ignored" ]] || fail "ignored status"
+  request POST "/v1/inbox/$TX_COFFEE/ignore" "$A_TOKEN"; expect 400 "ignore twice → 400"
+  request GET "/v1/inbox?status=ignored" "$A_TOKEN"; [[ "$(echo "$BODY" | jq '.items|length')" == "1" ]] || fail "ignored filter"
+  request POST "/v1/inbox/$TX_COFFEE/restore" "$A_TOKEN"; expect 200 "restore coffee"
+  [[ "$(echo "$BODY" | jq -r .status)" == "pending" && "$(echo "$BODY" | jq -r .confirmed)" == "null" ]] || fail "restored → pending"
+
+  request POST /v1/imports/csv "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg d "$TODAY_UTC" '{accountId:$a,filename:"statement.csv",rows:[{postedOn:$d,amountCents:-3010,description:"KROGER #456"},{postedOn:$d,amountCents:-3010,description:"KROGER #456"},{postedOn:$d,amountCents:-4000,description:"SHELL OIL 12345",memo:"fuel"}]}')"; expect 201 "CSV import (3 rows, 1 duplicate)"
+  echo "$BODY" | jq -e '.rowCount==3 and .imported==2 and .duplicates==1 and .skipped==0 and .inboxPending==5' >/dev/null || fail "csv result: $BODY"
+  request GET "/v1/inbox?status=pending" "$A_TOKEN"
+  echo "$BODY" | jq -e '.items[] | select(.description=="KROGER #456") | .source=="csv" and .suggestion.kind=="category" and .suggestion.categoryName=="Groceries" and .suggestion.confidence==71' >/dev/null || fail "learned Kroger rule should suggest Groceries at 71: $(echo "$BODY" | jq -c '.items[]|select(.description=="KROGER #456")')"
+  echo "$BODY" | jq -e '.items[] | select(.description|startswith("SHELL")) | .suggestion.categoryName=="Transportation" and .memo=="fuel"' >/dev/null || fail "shell → Transportation"
+  pass "payee rule learned from the Kroger confirmation applies to the CSV row"
+  request GET /v1/imports/csv "$A_TOKEN"; expect 200 "CSV import history"
+  echo "$BODY" | jq -e 'length==1 and .[0].filename=="statement.csv" and .[0].imported==2 and .[0].duplicates==1 and .[0].createdByName=="Alex"' >/dev/null || fail "history: $BODY"
+
+  request POST /v1/inbox/bulk "$A_TOKEN" '{"action":"confirm-suggested"}'; expect 200 "bulk confirm-suggested"
+  echo "$BODY" | jq -e '.confirmed==1 and .ignored==0 and .skipped==4' >/dev/null || fail "bulk: expected 1 confirmed (Kroger #456 @71), 4 skipped (<70), got $BODY"
+  request GET /v1/inbox/summary "$A_TOKEN"; [[ "$(echo "$BODY" | jq -r .pending)" == "4" ]] || fail "4 pending after bulk"
+  request POST /v1/inbox/bulk "$A_TOKEN" "$(jq -nc --arg a "$TX_PAYROLL" '{action:"ignore",ids:[$a]}')"; expect 200 "bulk ignore by id"
+  echo "$BODY" | jq -e '.ignored==1' >/dev/null || fail "bulk ignore: $BODY"
+
+  request POST "/v1/banks/$LINK/sync" "$A_TOKEN"; expect 200 "manual sync (allowed right after linking)"
+  echo "$BODY" | jq -e --arg l "$LINK" '.linkId==$l and .newTransactions==0 and .autoMatched==0 and (.errors|length==0)' >/dev/null || fail "second sync dedupes everything: $BODY"
+  request POST "/v1/banks/$LINK/sync" "$A_TOKEN"; expect 429 "manual sync again inside the cooldown → 429"
+  RETRY_AFTER="$(curl -s -o /dev/null -D - -X POST "$BASE/v1/banks/$LINK/sync" -H "Authorization: Bearer $A_TOKEN" | tr -d '\r' | awk 'tolower($1)=="retry-after:" {print $2}')"
+  [[ "$RETRY_AFTER" =~ ^[0-9]+$ && "$RETRY_AFTER" -ge 1 ]] || fail "Retry-After header missing: '$RETRY_AFTER'"
+  pass "Retry-After: ${RETRY_AFTER}s"
+
+  if [[ "${SMOKE_SCHEDULER_WAIT:-0}" -gt 0 ]]; then
+    echo "--- v3: scheduler auto-match (phase 2: a second RENT PAYMENT posted $RENT_ANCHOR; waiting up to ${SMOKE_SCHEDULER_WAIT}s)"
+    curl -fs -X POST "$FAKE/__phase/2" >/dev/null || fail "could not switch the fake Bridge to phase 2"
+    AUTO="null"
+    for _ in $(seq 1 "$SMOKE_SCHEDULER_WAIT"); do
+      request GET "/v1/calendar?from=$RENT_ANCHOR&to=$RENT_ANCHOR" "$A_TOKEN"
+      AUTO="$(echo "$BODY" | jq -r --arg i "$RENT_V3" '.occurrences[] | select(.itemId==$i) | .paid.auto')"
+      [[ "$AUTO" == "true" ]] && break
+      sleep 1
+    done
+    [[ "$AUTO" == "true" ]] || fail "scheduler did not auto-match the second rent payment within ${SMOKE_SCHEDULER_WAIT}s (needs Sync__IntervalHours=0, Scheduler__IntervalSeconds=5)"
+    echo "$BODY" | jq -e --arg i "$RENT_V3" '.occurrences[] | select(.itemId==$i) | .paid.paidBy==null and .paid.source=="bank" and .paid.amountCents==185000' >/dev/null || fail "auto-matched payment shape"
+    pass "auto-matched: paidBy=null, auto=true, source=bank"
+    request GET "/v1/inbox?status=confirmed" "$A_TOKEN"
+    TX_RENT2="$(echo "$BODY" | jq -r --arg d "$RENT_ANCHOR" '.items[] | select(.description=="RENT PAYMENT" and .postedOn==$d) | .id')"
+    echo "$BODY" | jq -e --arg id "$TX_RENT2" '.items[] | select(.id==$id) | .confirmed.auto==true and .confirmed.by==null and .confirmed.itemName=="Rent (weekly test)"' >/dev/null || fail "inbox row confirmed with auto"
+    request GET "/v1/activity?limit=50" "$A_TOKEN"
+    [[ "$(echo "$BODY" | jq -r '[.events[] | select(.kind=="transaction.automatched")] | length')" -ge 1 ]] || fail "transaction.automatched activity"
+    [[ "$(echo "$BODY" | jq -r '[.events[] | select(.kind=="bank.synced")] | length')" -ge 1 ]] || fail "bank.synced activity"
+    request DELETE "/v1/recurring/$RENT_V3/occurrences/$RENT_ANCHOR/paid" "$A_TOKEN"; expect 200 "undo the auto-matched occurrence"
+    request GET "/v1/inbox/$TX_RENT2" "$A_TOKEN" 2>/dev/null || true
+    request GET "/v1/inbox?status=pending" "$A_TOKEN"
+    echo "$BODY" | jq -e --arg id "$TX_RENT2" '.items[] | select(.id==$id) | .status=="pending" and .confirmed==null' >/dev/null || fail "undo should restore the inbox row to pending"
+    pass "undo restored the auto-matched row to pending"
+    sleep 6
+    request GET "/v1/calendar?from=$RENT_ANCHOR&to=$RENT_ANCHOR" "$A_TOKEN"
+    [[ "$(echo "$BODY" | jq -r --arg i "$RENT_V3" '.occurrences[] | select(.itemId==$i) | .paid')" == "null" ]] || fail "a later sync must not re-match the undone row (fingerprint dedupe)"
+    pass "later syncs leave the undone occurrence alone"
+  fi
+
+  request DELETE "/v1/recurring/$RENT_V3/occurrences/$TODAY_UTC/paid" "$A_TOKEN"; expect 200 "unpay the Rent occurrence confirmed from the inbox"
+  request GET "/v1/inbox?status=pending" "$A_TOKEN"
+  echo "$BODY" | jq -e --arg id "$TX_RENT" '.items[] | select(.id==$id) | .status=="pending" and .confirmed==null and .suggestion.kind=="occurrence"' >/dev/null || fail "unpaying restores the inbox row (suggestion kept)"
+  pass "unpay → inbox row pending again"
+  request POST "/v1/inbox/$TX_KROGER/restore" "$A_TOKEN"; expect 200 "restore the confirmed Kroger expense"
+  request GET "/v1/expenses/$KROGER_EXP" "$A_TOKEN"; expect 404 "restored expense is gone"
+
+  BIG="$(jq -nc --arg a "$ACC" '{accountId:$a,filename:"big.csv",rows:[range(1500) | {postedOn:"2024-01-15",amountCents:(-(100+.)),description:("BULK STATEMENT ROW NUMBER " + tostring + " WITH A LONG DESCRIPTION TO MAKE THE BODY LARGE")}]}')"
+  [[ "${#BIG}" -gt 70000 ]] || fail "big CSV body should exceed the 64 KB global limit (is ${#BIG} bytes)"
+  request POST /v1/imports/csv "$A_TOKEN" "$BIG"; expect 201 "CSV body > 64 KB accepted on the import route (2 MB limit)"
+  [[ "$(echo "$BODY" | jq -r .imported)" == "1500" ]] || fail "1500 imported"
+  request POST /v1/imports/csv "$A_TOKEN" "$(jq -nc --arg a "$ACC" '{accountId:$a,filename:"huge.csv",rows:[range(5001) | {postedOn:"2024-01-15",amountCents:-1,description:"x"}]}')"; expect 400 "> 5000 rows → 400"
+
+  request PATCH "/v1/banks/$LINK" "$A_TOKEN" '{"syncEnabled":false}'; expect 200 "pause sync"
+  [[ "$(echo "$BODY" | jq -r .syncEnabled)" == "false" ]] || fail "syncEnabled false"
+  request PATCH "/v1/banks/$LINK" "$A_TOKEN" '{}'; expect 400 "empty patch → 400"
+  request DELETE "/v1/banks/$LINK" "$B_TOKEN"; expect 204 "Sam unlinks the bank (shared household)"
+  request GET /v1/banks "$A_TOKEN"; [[ "$(echo "$BODY" | jq length)" == "0" ]] || fail "link removed"
+  request GET /v1/inbox/summary "$A_TOKEN"
+  echo "$BODY" | jq -e '.linkCount==0 and .pending>0' >/dev/null || fail "inbox rows survive unlinking: $BODY"
+  request GET "/v1/accounts/$VISA_ACC" "$A_TOKEN"; expect 200 "mapped account survives unlinking"
+  request DELETE "/v1/banks/$LINK" "$A_TOKEN"; expect 404 "deleted link → 404"
+  request DELETE "/v1/recurring/$RENT_V3" "$A_TOKEN"; expect 204 "archive the test Rent"
+  kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null || true
+  trap 'rm -f "$TMP_BODY" "$TMP_REQ"' EXIT
+else
+  request POST /v1/banks/simplefin/claim "$A_TOKEN" '{"setupToken":"aHR0cHM6Ly9iZXRhLWJyaWRnZS5zaW1wbGVmaW4ub3JnL3NpbXBsZWZpbi9jbGFpbS9ub3BlLW5vcGU"}'
+  case "$STATUS" in
+    503) [[ "$(echo "$BODY" | jq -r .type)" == *bank_sync_not_configured ]] || fail "503 type"; pass "claim → 503 bank_sync_not_configured (no Security__DataKey)" ;;
+    400|502) pass "claim against the real Bridge with a bogus token → $STATUS (Security__DataKey is set)" ;;
+    *) fail "claim: unexpected $STATUS $BODY" ;;
+  esac
 fi
 
 request POST /v1/auth/password "$A_TOKEN" "$(jq -nc --arg p "$PASSWORD" '{currentPassword:$p,newPassword:"a brand new passphrase"}')"; expect 204 "change password"

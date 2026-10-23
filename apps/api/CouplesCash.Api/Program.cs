@@ -7,7 +7,9 @@ using CouplesCash.Api.Endpoints;
 using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Push;
 using CouplesCash.Api.Scheduler;
+using CouplesCash.Api.Security;
 using CouplesCash.Api.Services;
+using CouplesCash.Api.SimpleFin;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.DataProtection;
@@ -58,7 +60,8 @@ using var startupLoggerFactory = LoggerFactory.Create(logging => logging.AddCons
 var startupLogger = startupLoggerFactory.CreateLogger("Startup");
 
 // ---------------------------------------------------------------------------------------------
-// Kestrel: listen on 8080 unless told otherwise; 64 KB request bodies are plenty for this API.
+// Kestrel: listen on 8080 unless told otherwise; 64 KB request bodies are plenty for this API
+// (POST /v1/imports/csv raises its own limit to 2 MB via RequestSizeLimit metadata).
 // ---------------------------------------------------------------------------------------------
 if (string.IsNullOrWhiteSpace(configuration["urls"]) && string.IsNullOrWhiteSpace(configuration["ASPNETCORE_HTTP_PORTS"]) && string.IsNullOrWhiteSpace(configuration["http_ports"]))
 {
@@ -84,12 +87,19 @@ var database = configuration.GetSection(DatabaseOptions.SectionName).Get<Databas
 var scheduler = configuration.GetSection(SchedulerOptions.SectionName).Get<SchedulerOptions>() ?? new SchedulerOptions();
 var push = PushOptions.Read(configuration);
 var webAuthn = WebAuthnOptions.Resolve(configuration);
+var security = SecurityOptions.Read(configuration);
+var simpleFin = SimpleFinOptions.Read(configuration);
+var sync = configuration.GetSection(SyncOptions.SectionName).Get<SyncOptions>() ?? new SyncOptions();
+var dataProtector = new DataProtector(security); // throws on a malformed key: refuse to start rather than store credentials unencrypted
 
 builder.Services.AddSingleton(Options.Create(jwt));
 builder.Services.AddSingleton(apiOptions);
 builder.Services.AddSingleton(scheduler);
 builder.Services.AddSingleton(push);
 builder.Services.AddSingleton(webAuthn);
+builder.Services.AddSingleton(sync);
+builder.Services.AddSingleton(simpleFin);
+builder.Services.AddSingleton(dataProtector);
 builder.Services.AddSingleton(TimeProvider.System);
 
 // ---------------------------------------------------------------------------------------------
@@ -119,6 +129,10 @@ builder.Services.AddSingleton<BudgetService>();
 builder.Services.AddSingleton<GoalService>();
 builder.Services.AddSingleton<ActivityService>();
 builder.Services.AddSingleton<PasskeyService>();
+builder.Services.AddSingleton<InboxService>();
+builder.Services.AddSingleton<BankSyncService>();
+builder.Services.AddHttpClient(SimpleFinClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddSingleton<ISimpleFinClient, SimpleFinClient>();
 builder.Services.AddCouplesCashValidators();
 
 // Web Push: a bounded queue drained by a hosted service so requests never wait on the push service.
@@ -177,6 +191,9 @@ if (docsEnabled)
 var app = builder.Build();
 
 app.Logger.LogInformation("Web Push {State}", push.Enabled ? "enabled" : "disabled (set Push__VapidPublicKey / Push__VapidPrivateKey; generate with --vapid)");
+app.Logger.LogInformation("Bank sync {State}", dataProtector.IsConfigured
+    ? $"enabled (every {sync.IntervalHours}h, manual cooldown {sync.ManualCooldownMinutes} min{(simpleFin.BaseUrl is null ? "" : $", Bridge override {simpleFin.BaseUrl}")})"
+    : "disabled (set Security__DataKey, base64 of 32 random bytes)");
 app.Logger.LogInformation("Passkeys {State}", webAuthn.Enabled ? $"enabled for rpId {webAuthn.RelyingPartyId} (origin {webAuthn.Origin})" : $"disabled ({webAuthn.DisabledReason})");
 
 // ---------------------------------------------------------------------------------------------

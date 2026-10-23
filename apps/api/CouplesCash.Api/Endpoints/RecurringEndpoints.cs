@@ -175,7 +175,7 @@ public static class RecurringEndpoints
         var amount = request?.AmountCents ?? item.AmountCents;
 
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
-        var payment = await items.UpsertPaymentAsync(uow.Connection, item.Id, date, userId, amount, time.Now(), auto: false, ct);
+        var payment = await items.UpsertPaymentAsync(uow.Connection, item.Id, date, userId, amount, time.Now(), auto: false, PaymentSource.Manual, ct);
         await activity.RecordAsync(uow, householdId, userId, "occurrence.paid", "occurrence", item.Id,
             ActivitySummaries.OccurrencePaid(item.Name, amount, currency), new { itemId = item.Id, dueDate = date, amountCents = amount }, ct, principal.GetDisplayName());
         await uow.CommitAsync(ct);
@@ -189,6 +189,7 @@ public static class RecurringEndpoints
         ClaimsPrincipal principal,
         NpgsqlDataSource db,
         RecurringRepository items,
+        InboxService inbox,
         ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
@@ -205,14 +206,18 @@ public static class RecurringEndpoints
         var removed = await items.DeletePaymentAsync(uow.Connection, item.Id, date, ct);
         if (removed is not null)
         {
-            // Undo guard: once a user un-marks an autopay occurrence the scheduler must leave it alone.
-            if (removed.Auto || item.AutoPay)
+            // v3: a payment that came from the inbox (confirmed or auto-matched) puts its transaction back to pending.
+            var restored = await inbox.RestoreForOccurrenceAsync(uow.Connection, householdId, item.Id, date, ct);
+
+            // Undo guard: once a user un-marks an autopay occurrence the scheduler must leave it alone. An auto-matched
+            // (bank) payment is not autopay, so it only needs the skip when the item itself is autoPay.
+            if (item.AutoPay || (removed.Auto && restored is null))
             {
                 await items.InsertAutopaySkipAsync(uow.Connection, item.Id, date, userId, time.Now(), ct);
             }
 
             await activity.RecordAsync(uow, householdId, userId, "occurrence.unpaid", "occurrence", item.Id,
-                ActivitySummaries.OccurrenceUnpaid(item.Name), new { itemId = item.Id, dueDate = date, wasAuto = removed.Auto }, ct, principal.GetDisplayName());
+                ActivitySummaries.OccurrenceUnpaid(item.Name), new { itemId = item.Id, dueDate = date, wasAuto = removed.Auto, restoredTransactionId = restored?.Id }, ct, principal.GetDisplayName());
         }
 
         await uow.CommitAsync(ct);

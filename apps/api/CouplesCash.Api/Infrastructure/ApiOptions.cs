@@ -61,3 +61,20 @@ public sealed class SchedulerOptions
     /// <summary>How many days back autopay still marks a missed due date (the Pi may have been off).</summary>
     public int AutopayLookbackDays { get; set; } = 3;
 }
+
+/// <summary>Bank sync timing (v3). <c>Sync__IntervalHours</c> ≤ 0 means "every scheduler tick" (tests only).</summary>
+public sealed class SyncOptions
+{
+    public const string SectionName = "Sync";
+
+    public double IntervalHours { get; set; } = 6;
+
+    public int ManualCooldownMinutes { get; set; } = 15;
+
+    /// <summary>How long the inline first sync during <c>POST /banks/simplefin/claim</c> may take before the link is returned without it.</summary>
+    public int ClaimSyncBudgetSeconds { get; set; } = 20;
+
+    public TimeSpan Interval => TimeSpan.FromHours(Math.Max(0, IntervalHours));
+
+    public TimeSpan ManualCooldown => TimeSpan.FromMinutes(Math.Max(0, ManualCooldownMinutes));
+}

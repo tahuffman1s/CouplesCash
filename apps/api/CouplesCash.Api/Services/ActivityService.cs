@@ -75,6 +75,9 @@ public sealed class ActivityService(ActivityRepository activity, PushNotifier no
         ("goal", _) => "/goals",
         ("household", _) => "/couple",
         ("category", _) => "/insights",
+        ("bank", _) => "/settings/banks",
+        ("transaction", _) => "/inbox",
+        ("import", _) => "/inbox",
         _ => "/activity",
     };
 

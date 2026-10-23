@@ -13,7 +13,7 @@ namespace CouplesCash.Api.Endpoints;
 
 public static class AccountEndpoints
 {
-    private const string DefaultColor = "#3b82f6";
+    internal const string DefaultColor = "#3b82f6";
 
     public static RouteGroupBuilder MapAccounts(this RouteGroupBuilder v1)
     {
@@ -168,7 +168,7 @@ public static class AccountEndpoints
             string.IsNullOrWhiteSpace(r.Note) ? null : r.Note.Trim());
     }
 
-    private static string DefaultIcon(AccountType type) => type switch
+    internal static string DefaultIcon(AccountType type) => type switch
     {
         AccountType.Checking => "landmark",
         AccountType.Savings => "piggy-bank",

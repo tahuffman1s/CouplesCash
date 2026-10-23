@@ -30,7 +30,7 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
         LEFT JOIN accounts a ON a.id = i.account_id
         """;
 
-    private const string PaymentColumns = "recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto";
+    private const string PaymentColumns = "recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto, source";
 
     public async Task<IReadOnlyList<RecurringItemRow>> ListAsync(Guid householdId, Kind? kind, CancellationToken ct)
     {
@@ -142,7 +142,7 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
         await using var conn = await db.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<PaymentRow>(Cmd(
             """
-            SELECT p.recurring_item_id, p.due_date, p.paid_at, p.paid_by, p.amount_cents, p.auto
+            SELECT p.recurring_item_id, p.due_date, p.paid_at, p.paid_by, p.amount_cents, p.auto, p.source
             FROM occurrence_payments p
             JOIN recurring_items i ON i.id = p.recurring_item_id
             WHERE i.household_id = @HouseholdId AND p.due_date BETWEEN @From AND @To
@@ -156,18 +156,18 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
             $"SELECT {PaymentColumns} FROM occurrence_payments WHERE recurring_item_id = @ItemId AND due_date = @DueDate",
             new { ItemId = itemId, DueDate = dueDate }, ct));
 
-    /// <summary>Marks an occurrence paid (replacing any earlier payment). A manual payment also clears an autopay skip.</summary>
-    public async Task<PaymentRow> UpsertPaymentAsync(NpgsqlConnection conn, Guid itemId, DateOnly dueDate, Guid? userId, long amountCents, DateTime now, bool auto, CancellationToken ct)
+    /// <summary>Marks an occurrence paid (replacing any earlier payment). A manual payment also clears an autopay skip. <paramref name="source"/>: manual | autopay | bank.</summary>
+    public async Task<PaymentRow> UpsertPaymentAsync(NpgsqlConnection conn, Guid itemId, DateOnly dueDate, Guid? userId, long amountCents, DateTime now, bool auto, string source, CancellationToken ct)
     {
         var row = await conn.QuerySingleAsync<PaymentRow>(Cmd(
             $"""
-            INSERT INTO occurrence_payments (recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto)
-            VALUES (@ItemId, @DueDate, @Now, @UserId, @AmountCents, @Auto)
+            INSERT INTO occurrence_payments (recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto, source)
+            VALUES (@ItemId, @DueDate, @Now, @UserId, @AmountCents, @Auto, @Source)
             ON CONFLICT (recurring_item_id, due_date)
-            DO UPDATE SET paid_at = EXCLUDED.paid_at, paid_by = EXCLUDED.paid_by, amount_cents = EXCLUDED.amount_cents, auto = EXCLUDED.auto
+            DO UPDATE SET paid_at = EXCLUDED.paid_at, paid_by = EXCLUDED.paid_by, amount_cents = EXCLUDED.amount_cents, auto = EXCLUDED.auto, source = EXCLUDED.source
             RETURNING {PaymentColumns}
             """,
-            new { ItemId = itemId, DueDate = dueDate, Now = now, UserId = userId, AmountCents = amountCents, Auto = auto }, ct));
+            new { ItemId = itemId, DueDate = dueDate, Now = now, UserId = userId, AmountCents = amountCents, Auto = auto, Source = source }, ct));
 
         if (!auto)
         {
@@ -183,9 +183,20 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
     public Task<PaymentRow?> InsertAutoPaymentAsync(NpgsqlConnection conn, Guid itemId, DateOnly dueDate, long amountCents, DateTime now, CancellationToken ct) =>
         conn.QuerySingleOrDefaultAsync<PaymentRow>(Cmd(
             $"""
-            INSERT INTO occurrence_payments (recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto)
-            SELECT @ItemId, @DueDate, @Now, NULL, @AmountCents, true
+            INSERT INTO occurrence_payments (recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto, source)
+            SELECT @ItemId, @DueDate, @Now, NULL, @AmountCents, true, 'autopay'
             WHERE NOT EXISTS (SELECT 1 FROM autopay_skips WHERE recurring_item_id = @ItemId AND due_date = @DueDate)
+            ON CONFLICT (recurring_item_id, due_date) DO NOTHING
+            RETURNING {PaymentColumns}
+            """,
+            new { ItemId = itemId, DueDate = dueDate, Now = now, AmountCents = amountCents }, ct));
+
+    /// <summary>Inbox auto-match: inserts an automatic payment only when the occurrence is unpaid (a bank transaction proves the money moved, so autopay skips do not apply).</summary>
+    public Task<PaymentRow?> InsertPaymentIfUnpaidAsync(NpgsqlConnection conn, Guid itemId, DateOnly dueDate, long amountCents, DateTime now, CancellationToken ct) =>
+        conn.QuerySingleOrDefaultAsync<PaymentRow>(Cmd(
+            $"""
+            INSERT INTO occurrence_payments (recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto, source)
+            VALUES (@ItemId, @DueDate, @Now, NULL, @AmountCents, true, 'bank')
             ON CONFLICT (recurring_item_id, due_date) DO NOTHING
             RETURNING {PaymentColumns}
             """,

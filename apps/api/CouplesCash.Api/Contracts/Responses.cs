@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using CouplesCash.Api.Domain;
 
 namespace CouplesCash.Api.Contracts;
@@ -65,7 +66,8 @@ public sealed record RecurringItemDto(
     DateTime CreatedAt,
     DateTime UpdatedAt);
 
-public sealed record PaidInfo(DateTime PaidAt, Guid? PaidBy, long AmountCents, bool Auto);
+/// <summary><paramref name="Source"/>: manual (user tap) | autopay (scheduler) | bank (inbox confirm or auto-match). <paramref name="Auto"/> stays true for autopay and auto-match.</summary>
+public sealed record PaidInfo(DateTime PaidAt, Guid? PaidBy, long AmountCents, bool Auto, string Source);
 
 public sealed record OccurrenceDto(
     Guid ItemId,
@@ -225,3 +227,74 @@ public sealed record MonthReportDto(
     int PaidCount,
     int UnpaidCount,
     DateTime GeneratedAt);
+
+// ---------------------------------------------------------------------------------------------
+// v3
+// ---------------------------------------------------------------------------------------------
+
+public sealed record ExternalAccountDto(
+    Guid Id,
+    string ExternalId,
+    string OrgName,
+    string Name,
+    string Currency,
+    long BalanceCents,
+    long? AvailableCents,
+    DateTime BalanceAt,
+    Guid? AccountId,
+    string? AccountName,
+    DateTime UpdatedAt);
+
+public sealed record BankLinkDto(
+    Guid Id,
+    string Provider,
+    string Name,
+    DateTime CreatedAt,
+    DateTime? LastSyncedAt,
+    string? LastError,
+    bool SyncEnabled,
+    IReadOnlyList<string> BridgeErrors,
+    IReadOnlyList<ExternalAccountDto> Accounts);
+
+public sealed record SyncResultDto(Guid LinkId, int NewTransactions, int UpdatedAccounts, int AutoMatched, IReadOnlyList<string> Errors, DateTime SyncedAt);
+
+/// <summary>Discriminated on <c>kind</c>: category | occurrence | transfer (null = no suggestion).</summary>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
+[JsonDerivedType(typeof(CategorySuggestionDto), "category")]
+[JsonDerivedType(typeof(OccurrenceSuggestionDto), "occurrence")]
+[JsonDerivedType(typeof(TransferSuggestionDto), "transfer")]
+public abstract record SuggestionDto(int Confidence);
+
+public sealed record CategorySuggestionDto(Guid CategoryId, string CategoryName, int Confidence) : SuggestionDto(Confidence);
+
+public sealed record OccurrenceSuggestionDto(Guid ItemId, string ItemName, Kind ItemKind, DateOnly DueDate, int Confidence) : SuggestionDto(Confidence);
+
+public sealed record TransferSuggestionDto(int Confidence) : SuggestionDto(Confidence);
+
+public sealed record InboxConfirmedDto(Guid? ExpenseId, Guid? ItemId, DateOnly? DueDate, Guid? By, string? ByName, DateTime? At, bool Auto, string? CategoryName, string? ItemName);
+
+public sealed record InboxItemDto(
+    Guid Id,
+    string Source,
+    Guid? AccountId,
+    string? AccountName,
+    DateOnly PostedOn,
+    long AmountCents,
+    string Description,
+    string? Payee,
+    string? Memo,
+    bool Pending,
+    string Status,
+    SuggestionDto? Suggestion,
+    InboxConfirmedDto? Confirmed,
+    DateTime CreatedAt);
+
+public sealed record InboxPage(IReadOnlyList<InboxItemDto> Items, string? NextBefore);
+
+public sealed record InboxSummaryDto(int Pending, int Suggested, DateTime? LastSyncedAt, int LinkCount);
+
+public sealed record BulkResultDto(int Confirmed, int Ignored, int Skipped);
+
+public sealed record CsvImportResultDto(Guid Id, int RowCount, int Imported, int Duplicates, int Skipped, int InboxPending);
+
+public sealed record CsvImportHistoryDto(Guid Id, string Filename, int RowCount, int Imported, int Duplicates, DateTime CreatedAt, string CreatedByName);
