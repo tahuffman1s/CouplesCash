@@ -1,0 +1,188 @@
+# CouplesCash — production stack for a Raspberry Pi 4 (or any Docker host).
+#
+#   make up          → db + migrate + api + web
+#   make tunnel-up   → the same plus cloudflared (profile "tunnel")
+#
+# Only `web` publishes a port, and only on 127.0.0.1 (set WEB_BIND=0.0.0.0 in
+# .env to expose it on the LAN). The API and Postgres are reachable solely on
+# the internal compose network; the Cloudflare tunnel reaches `web` by service
+# name over that same network.
+
+name: couplescash
+
+# ---------------------------------------------------------------------------
+# Shared hardening / housekeeping applied to every service.
+# ---------------------------------------------------------------------------
+x-common: &common
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# Environment shared by `migrate` and `api` (same image, same config).
+# Variable names on the left are what the .NET host reads (IConfiguration
+# double-underscore syntax); the ${...} values come from ./.env.
+x-api-env: &api-env
+  ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+  ASPNETCORE_URLS: http://+:8080
+  ConnectionStrings__Default: Host=db;Port=5432;Database=couplescash;Username=couplescash;Password=${POSTGRES_PASSWORD}
+  Jwt__Secret: ${JWT_SECRET}
+  Api__EnableDocs: ${API_ENABLE_DOCS:-false}
+  # Keep the .NET GC under the container limit: 0x8000000 = 128 MiB heap hard
+  # limit inside a 192 MiB container. Workstation GC + tiered PGO for a Pi.
+  DOTNET_GCHeapHardLimit: "0x8000000"
+  DOTNET_gcServer: "0"
+  DOTNET_TieredPGO: "1"
+  TZ: ${TZ:-UTC}
+
+services:
+  # -------------------------------------------------------------------------
+  # db — PostgreSQL 16 (alpine, arm64 + amd64)
+  # -------------------------------------------------------------------------
+  db:
+    <<: *common
+    image: postgres:16-alpine
+    # Load the Pi-tuned config instead of the image default. pg_hba.conf and
+    # friends still live in PGDATA; only postgresql.conf is replaced.
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_DB: couplescash
+      POSTGRES_USER: couplescash
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is empty — run `make secrets`}
+      TZ: ${TZ:-UTC}
+      PGTZ: ${TZ:-UTC}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    # Read-only root FS works for the official image as long as the socket
+    # dir and /tmp are writable (the data dir is a volume). If a future image
+    # version trips over it, drop `read_only` + `tmpfs` here — the data volume
+    # is the only thing that actually persists anyway.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    shm_size: 128m           # parallel workers use /dev/shm; Docker's default 64m is tight
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U couplescash -d couplescash -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # -------------------------------------------------------------------------
+  # migrate — one-shot DbUp runner (same image as api), exits 0 when done
+  # -------------------------------------------------------------------------
+  migrate:
+    <<: *common
+    image: ${IMAGE_PREFIX:-ghcr.io/tahuffman1s}/couplescash-api:${IMAGE_TAG:-latest}
+    build: ./apps/api
+    restart: "no"
+    command: ["dotnet", "CouplesCash.Api.dll", "--migrate"]
+    environment:
+      <<: *api-env
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 192m
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # -------------------------------------------------------------------------
+  # api — .NET 10 Minimal API on :8080 (internal network only, no `ports:`)
+  # -------------------------------------------------------------------------
+  api:
+    <<: *common
+    image: ${IMAGE_PREFIX:-ghcr.io/tahuffman1s}/couplescash-api:${IMAGE_TAG:-latest}
+    build: ./apps/api
+    environment:
+      <<: *api-env
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 192m
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # The aspnet base image ships neither curl nor wget, so instead of an HTTP
+    # probe we check that Kestrel is listening on 8080. In /proc/net/tcp{,6}
+    # the local port is hex (8080 = 0x1F90) and state 0A = LISTEN.
+    # Requires /bin/sh + grep in the image (Debian/Alpine aspnet images have
+    # them; a *chiseled* image does not — see docs/RASPBERRY-PI.md).
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qE ':1F90 [0-9A-F]+:0000 0A ' /proc/net/tcp /proc/net/tcp6 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # -------------------------------------------------------------------------
+  # web — SvelteKit (adapter-node) on :3000, the only thing the tunnel sees
+  # -------------------------------------------------------------------------
+  web:
+    <<: *common
+    image: ${IMAGE_PREFIX:-ghcr.io/tahuffman1s}/couplescash-web:${IMAGE_TAG:-latest}
+    build: ./apps/web
+    ports:
+      # Loopback only by default: handy for `curl localhost:3000` on the Pi
+      # without exposing the app to the LAN. The tunnel does not need this.
+      - "${WEB_BIND:-127.0.0.1}:3000:3000"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+      API_URL: http://api:8080
+      # Must match the public URL *exactly* (scheme + host, no trailing slash)
+      # or SvelteKit rejects form POSTs with 403 (CSRF origin check).
+      ORIGIN: ${PUBLIC_URL:?PUBLIC_URL is empty — set it in .env, e.g. https://cash.example.com}
+      BODY_SIZE_LIMIT: 512K
+      TZ: ${TZ:-UTC}
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 160m
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # -------------------------------------------------------------------------
+  # cloudflared — outbound-only tunnel to Cloudflare (profile "tunnel")
+  # -------------------------------------------------------------------------
+  cloudflared:
+    <<: *common
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN is empty — see infra/cloudflared/README.md}
+      TZ: ${TZ:-UTC}
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 64m
+    depends_on:
+      - web
+
+volumes:
+  # Postgres data. To put it on an SSD instead of the SD card, move Docker's
+  # data-root (docs/RASPBERRY-PI.md) rather than bind-mounting here.
+  pgdata:

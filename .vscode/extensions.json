@@ -1,0 +1,15 @@
+{
+	"recommendations": [
+		"svelte.svelte-vscode",
+		"bradlc.vscode-tailwindcss",
+		"ms-dotnettools.csdevkit",
+		"ms-dotnettools.csharp",
+		"ms-playwright.playwright",
+		"ms-azuretools.vscode-docker",
+		"dbaeumer.vscode-eslint",
+		"esbenp.prettier-vscode",
+		"humao.rest-client",
+		"editorconfig.editorconfig",
+		"ms-vscode-remote.remote-containers"
+	]
+}

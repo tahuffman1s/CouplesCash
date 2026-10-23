@@ -1,0 +1,43 @@
+# --- secrets & local state ---------------------------------------------------
+.env
+.env.*
+!.env.example
+backups/
+*.sql.gz
+
+# --- .NET --------------------------------------------------------------------
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+*.trx
+artifacts/
+
+# --- Node / SvelteKit ---------------------------------------------------------
+node_modules/
+.svelte-kit/
+build/
+dist/
+.vite/
+coverage/
+playwright-report/
+test-results/
+blob-report/
+.pnpm-store/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+
+# --- editors & OS -------------------------------------------------------------
+.vscode/*.local.json
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# --- misc ---------------------------------------------------------------------
+*.log
+.cache/

@@ -1,0 +1,47 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /apps/web
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      web-dev:
+        dependency-type: development
+    open-pull-requests-limit: 5
+    labels: [dependencies, web]
+
+  - package-ecosystem: nuget
+    directory: /apps/api
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      api:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+    labels: [dependencies, api]
+
+  - package-ecosystem: docker
+    directory: /apps/api
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /apps/web
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies, ci]

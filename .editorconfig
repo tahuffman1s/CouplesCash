@@ -1,0 +1,37 @@
+# https://editorconfig.org — honoured by VS Code (editorconfig.editorconfig),
+# dotnet format and Prettier.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{cs,csx}]
+indent_size = 4
+dotnet_sort_system_directives_first = true
+csharp_style_namespace_declarations = file_scoped:warning
+csharp_prefer_braces = true:suggestion
+dotnet_diagnostic.CA2007.severity = none
+
+[*.{csproj,props,targets,slnx}]
+indent_size = 2
+
+[*.{js,ts,svelte,json,css,html}]
+indent_style = tab
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.sh]
+indent_size = 2

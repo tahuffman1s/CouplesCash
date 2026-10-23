@@ -1,0 +1,30 @@
+{
+	"folders": [
+		{ "name": "CouplesCash (root)", "path": "." },
+		{ "name": "api (.NET 10)", "path": "apps/api" },
+		{ "name": "web (SvelteKit)", "path": "apps/web" }
+	],
+	"settings": {
+		"files.eol": "\n",
+		"editor.formatOnSave": true,
+		"dotnet.defaultSolution": "apps/api/CouplesCash.slnx",
+		"svelte.enable-ts-plugin": true,
+		"eslint.workingDirectories": ["apps/web"],
+		"playwright.reuseBrowser": true
+	},
+	"extensions": {
+		"recommendations": [
+			"svelte.svelte-vscode",
+			"bradlc.vscode-tailwindcss",
+			"ms-dotnettools.csdevkit",
+			"ms-dotnettools.csharp",
+			"ms-playwright.playwright",
+			"ms-azuretools.vscode-docker",
+			"dbaeumer.vscode-eslint",
+			"esbenp.prettier-vscode",
+			"humao.rest-client",
+			"editorconfig.editorconfig",
+			"ms-vscode-remote.remote-containers"
+		]
+	}
+}

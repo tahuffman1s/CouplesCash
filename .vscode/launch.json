@@ -1,0 +1,56 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": ".NET API",
+			"type": "coreclr",
+			"request": "launch",
+			"preLaunchTask": "api: build",
+			"program": "${workspaceFolder}/apps/api/CouplesCash.Api/bin/Debug/net10.0/CouplesCash.Api.dll",
+			"args": [],
+			"cwd": "${workspaceFolder}/apps/api/CouplesCash.Api",
+			"stopAtEntry": false,
+			"console": "integratedTerminal",
+			"envFile": "${workspaceFolder}/.env.dev",
+			"env": {
+				"ASPNETCORE_ENVIRONMENT": "Development",
+				"ASPNETCORE_URLS": "http://localhost:8080"
+			},
+			"serverReadyAction": {
+				"action": "openExternally",
+				"pattern": "\\bNow listening on:\\s+(https?://\\S+)",
+				"uriFormat": "%s/scalar"
+			},
+			"sourceFileMap": {
+				"/Views": "${workspaceFolder}/Views"
+			}
+		},
+		{
+			"name": "Web (Chrome)",
+			"type": "pwa-chrome",
+			"request": "launch",
+			"url": "http://localhost:5173",
+			"webRoot": "${workspaceFolder}/apps/web",
+			"sourceMapPathOverrides": {
+				"/@fs/*": "/*",
+				"/src/*": "${webRoot}/src/*"
+			}
+		},
+		{
+			"name": "Web: dev server",
+			"type": "node-terminal",
+			"request": "launch",
+			"command": "pnpm dev --host",
+			"cwd": "${workspaceFolder}/apps/web",
+			"envFile": "${workspaceFolder}/.env.dev"
+		}
+	],
+	"compounds": [
+		{
+			"name": "Full stack",
+			"configurations": [".NET API", "Web: dev server"],
+			"preLaunchTask": "compose: up db",
+			"stopAll": true
+		}
+	]
+}

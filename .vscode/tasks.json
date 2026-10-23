@@ -1,0 +1,101 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "dev: write env",
+			"type": "shell",
+			"command": "make dev-env",
+			"presentation": { "reveal": "silent", "panel": "shared" },
+			"problemMatcher": []
+		},
+		{
+			"label": "api: build",
+			"type": "process",
+			"command": "dotnet",
+			"args": ["build", "${workspaceFolder}/apps/api/CouplesCash.slnx", "/property:GenerateFullPaths=true", "/consoleloggerparameters:NoSummary"],
+			"dependsOn": ["dev: write env"],
+			"group": { "kind": "build", "isDefault": true },
+			"presentation": { "reveal": "silent", "panel": "shared" },
+			"problemMatcher": "$msCompile"
+		},
+		{
+			"label": "api: watch",
+			"type": "shell",
+			"command": "make dev-api",
+			"isBackground": true,
+			"presentation": { "panel": "dedicated", "group": "dev" },
+			"problemMatcher": {
+				"owner": "csharp",
+				"pattern": { "regexp": "^(.*)\\((\\d+),(\\d+)\\): (error|warning) (\\w+): (.*)$", "file": 1, "line": 2, "column": 3, "severity": 4, "code": 5, "message": 6 },
+				"background": { "activeOnStart": true, "beginsPattern": "dotnet watch", "endsPattern": "Now listening on" }
+			}
+		},
+		{
+			"label": "api: test",
+			"type": "process",
+			"command": "dotnet",
+			"args": ["test", "${workspaceFolder}/apps/api/CouplesCash.slnx"],
+			"group": "test",
+			"presentation": { "panel": "shared" },
+			"problemMatcher": "$msCompile"
+		},
+		{
+			"label": "web: dev",
+			"type": "shell",
+			"command": "make dev-web",
+			"isBackground": true,
+			"presentation": { "panel": "dedicated", "group": "dev" },
+			"problemMatcher": {
+				"owner": "vite",
+				"pattern": { "regexp": "^\\s*(.*):(\\d+):(\\d+):\\s*(.*)$", "file": 1, "line": 2, "column": 3, "message": 4 },
+				"background": { "activeOnStart": true, "beginsPattern": "VITE", "endsPattern": "Local:" }
+			}
+		},
+		{
+			"label": "web: check",
+			"type": "shell",
+			"command": "pnpm check",
+			"options": { "cwd": "${workspaceFolder}/apps/web" },
+			"group": "test",
+			"presentation": { "panel": "shared" },
+			"problemMatcher": []
+		},
+		{
+			"label": "web: lint",
+			"type": "shell",
+			"command": "pnpm lint",
+			"options": { "cwd": "${workspaceFolder}/apps/web" },
+			"presentation": { "panel": "shared" },
+			"problemMatcher": ["$eslint-stylish"]
+		},
+		{
+			"label": "web: test:e2e",
+			"type": "shell",
+			"command": "pnpm test:e2e",
+			"options": { "cwd": "${workspaceFolder}/apps/web" },
+			"group": "test",
+			"presentation": { "panel": "shared" },
+			"problemMatcher": []
+		},
+		{
+			"label": "compose: up db",
+			"type": "shell",
+			"command": "make dev-db",
+			"presentation": { "reveal": "silent", "panel": "shared" },
+			"problemMatcher": []
+		},
+		{
+			"label": "compose: up (full stack in Docker)",
+			"type": "shell",
+			"command": "make up",
+			"presentation": { "panel": "shared" },
+			"problemMatcher": []
+		},
+		{
+			"label": "dev: all (db + api + web)",
+			"dependsOn": ["compose: up db", "api: watch", "web: dev"],
+			"dependsOrder": "sequence",
+			"problemMatcher": []
+		}
+	]
+}

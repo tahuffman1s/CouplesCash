@@ -1,0 +1,10 @@
+# Development override: `docker compose -f compose.yml -f compose.dev.yml up -d db`
+# (that is what `make dev-db` / `make dev` run).
+#
+# In development only Postgres runs in Docker; the API (`dotnet watch`) and the
+# web app (`vite dev`) run natively for hot reload. This file therefore only
+# publishes the database on loopback so the native processes can reach it.
+services:
+  db:
+    ports:
+      - "127.0.0.1:5432:5432"
