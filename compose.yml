@@ -149,7 +149,7 @@ services:
     ports:
       # Loopback only by default: handy for `curl localhost:3000` on the Pi
       # without exposing the app to the LAN. The tunnel does not need this.
-      - "${WEB_BIND:-127.0.0.1}:3000:3000"
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0

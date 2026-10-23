@@ -60,7 +60,7 @@ explicitly to force Pi mode (for example in a VM). What `install.sh` does (it wo
 6. Clones the repo to `~/couplescash` (or `git pull`s it if present).
 7. Creates `.env`, generates `JWT_SECRET` and `POSTGRES_PASSWORD`, asks whether you want a
    **Cloudflare Tunnel** (enter `PUBLIC_URL` + `TUNNEL_TOKEN`) or **LAN-only** mode
-   (`http://<pi-ip>:3000`, web bound to the whole LAN), and sets the push contact
+   (`http://<pi-ip>:3000`, web bound to the whole LAN; `--port N` or `WEB_PORT` in `.env` changes the port), and sets the push contact
    `VAPID_SUBJECT=mailto:<--email or admin@your-host>`.
 8. Pulls the images (falls back to building locally).
 9. Generates the **Web Push (VAPID) key pair** with the api image

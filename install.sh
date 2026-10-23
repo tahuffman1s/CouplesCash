@@ -22,7 +22,8 @@
 #   --pi                 COUPLESCASH_PI=1     Raspberry Pi mode: require arm64, set up zram swap, check NTP,
 #                                             and refuse to build images locally (pull only). Auto-detected
 #                                             on real Pi hardware; the flag forces it (e.g. in a VM/container).
-#   --lan                COUPLESCASH_LAN=1    skip the tunnel; serve http://<this-host>:3000 on the LAN
+#   --lan                COUPLESCASH_LAN=1    skip the tunnel; serve http://<this-host>:<port> on the LAN
+#   --port N             WEB_PORT             host port for the web app (default 3000; LAN mode URL uses it)
 #   --no-start           COUPLESCASH_NO_START=1   install and configure, but don't start containers
 #   --build              COUPLESCASH_BUILD=1  build images locally instead of pulling (slow on a Pi)
 #   -y, --yes            NONINTERACTIVE=1     never prompt; use flags/env/defaults
@@ -37,6 +38,7 @@ TUNNEL_TOKEN="${TUNNEL_TOKEN:-}"
 VAPID_EMAIL="${VAPID_EMAIL:-}"
 PI_MODE="${COUPLESCASH_PI:-0}"
 LAN_MODE="${COUPLESCASH_LAN:-0}"
+WEB_PORT="${WEB_PORT:-}"
 NO_START="${COUPLESCASH_NO_START:-0}"
 BUILD_LOCAL="${COUPLESCASH_BUILD:-0}"
 NONINTERACTIVE="${NONINTERACTIVE:-0}"
@@ -55,6 +57,7 @@ while (( $# )); do
     --email) VAPID_EMAIL="$2"; shift 2 ;;
     --pi) PI_MODE=1; shift ;;
     --lan) LAN_MODE=1; shift ;;
+    --port) WEB_PORT="$2"; shift 2 ;;
     --no-start) NO_START=1; shift ;;
     --build) BUILD_LOCAL=1; shift ;;
     -y|--yes) NONINTERACTIVE=1; shift ;;
@@ -321,6 +324,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 [[ -n "$(get_env JWT_SECRET)" ]]        || { set_env JWT_SECRET "$(openssl rand -base64 48 | tr -d '\n')"; ok "generated JWT_SECRET"; }
 [[ -n "$(get_env POSTGRES_PASSWORD)" ]] || { set_env POSTGRES_PASSWORD "$(openssl rand -hex 24)"; ok "generated POSTGRES_PASSWORD"; }
+if [[ -n "$WEB_PORT" ]]; then
+  if ! [[ "$WEB_PORT" =~ ^[0-9]+$ ]] || (( WEB_PORT < 1 || WEB_PORT > 65535 )); then
+    die "--port must be a number between 1 and 65535 (got '$WEB_PORT')"
+  fi
+  set_env WEB_PORT "$WEB_PORT"; ok "web port: $WEB_PORT"
+fi
 
 # the first non-loopback IPv4 of this host, for LAN mode
 host_ip() { hostname -I 2>/dev/null | awk '{print $1}' || ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}'; }
@@ -332,7 +341,7 @@ if [[ "$LAN_MODE" != 1 && -z "$TUNNEL_TOKEN" && -z "$existing_tok" ]]; then
   if can_prompt; then
     printf '\n%sHow will you reach CouplesCash?%s\n' "$BOLD" "$RESET" >/dev/tty
     printf '  1) Through a Cloudflare Tunnel (recommended: works from anywhere, no port forwarding)\n' >/dev/tty
-    printf '  2) On my home network only (http://%s:3000)\n' "$(host_ip)" >/dev/tty
+    printf '  2) On my home network only (http://%s:%s)\n' "$(host_ip)" "${WEB_PORT:-3000}" >/dev/tty
     choice=""; ask choice "Choose" "1"
     [[ "$choice" == 2 ]] && LAN_MODE=1
   else
@@ -342,7 +351,7 @@ if [[ "$LAN_MODE" != 1 && -z "$TUNNEL_TOKEN" && -z "$existing_tok" ]]; then
 fi
 
 if [[ "$LAN_MODE" == 1 ]]; then
-  PUBLIC_URL="${PUBLIC_URL:-${existing_url:-http://$(host_ip):3000}}"
+  PUBLIC_URL="${PUBLIC_URL:-${existing_url:-http://$(host_ip):${WEB_PORT:-3000}}}"
   set_env PUBLIC_URL "$PUBLIC_URL"
   set_env WEB_BIND "0.0.0.0"
   sed -i 's|^COMPOSE_PROFILES=.*|# COMPOSE_PROFILES=tunnel|' "$ENV_FILE"
