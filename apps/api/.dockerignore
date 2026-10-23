@@ -1,0 +1,16 @@
+**/bin/
+**/obj/
+**/TestResults/
+**/.vs/
+**/.idea/
+**/*.user
+**/*.swp
+CouplesCash.Api.Tests/
+scripts/
+*.md
+*.http
+.editorconfig
+Dockerfile
+.dockerignore
+.git
+.gitignore

@@ -1,0 +1,173 @@
+# CouplesCash API — sample requests for the VS Code REST Client extension.
+# Run the API (dotnet run --project CouplesCash.Api), then send the requests top to bottom.
+# Variables captured from responses are reused automatically.
+
+@host = http://localhost:8080
+@email = alex@example.com
+@password = correct horse battery staple
+@partnerEmail = sam@example.com
+
+### Health (no auth)
+GET {{host}}/health
+
+### Register
+# @name register
+POST {{host}}/v1/auth/register
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "{{password}}",
+  "displayName": "Alex"
+}
+
+### Login
+# @name login
+POST {{host}}/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "{{password}}"
+}
+
+@accessToken = {{login.response.body.accessToken}}
+@refreshToken = {{login.response.body.refreshToken}}
+
+### Me
+GET {{host}}/v1/auth/me
+Authorization: Bearer {{accessToken}}
+
+### Update display name
+PATCH {{host}}/v1/auth/me
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "displayName": "Alex J." }
+
+### Create a Couple Code (also creates the household on first call)
+# @name code
+POST {{host}}/v1/couple/code
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Alex & Sam" }
+
+### Refresh so the access token carries the new hh claim
+# @name refresh
+POST {{host}}/v1/auth/refresh
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
+
+@accessToken = {{refresh.response.body.accessToken}}
+@refreshToken = {{refresh.response.body.refreshToken}}
+
+### Partner registers
+# @name partner
+POST {{host}}/v1/auth/register
+Content-Type: application/json
+
+{
+  "email": "{{partnerEmail}}",
+  "password": "{{password}}",
+  "displayName": "Sam"
+}
+
+@partnerToken = {{partner.response.body.accessToken}}
+
+### Partner joins with the typed code (dashes/case ignored; the cc1. payload works too)
+# @name join
+POST {{host}}/v1/couple/join
+Authorization: Bearer {{partnerToken}}
+Content-Type: application/json
+
+{ "code": "{{code.response.body.code}}" }
+
+@partnerToken = {{join.response.body.accessToken}}
+
+### Household
+GET {{host}}/v1/couple
+Authorization: Bearer {{accessToken}}
+
+### Categories (12 defaults seeded)
+# @name categories
+GET {{host}}/v1/categories
+Authorization: Bearer {{accessToken}}
+
+### Create an account
+# @name account
+POST {{host}}/v1/accounts
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "Joint checking",
+  "institution": "Credit Union",
+  "type": "checking",
+  "balanceCents": 254000,
+  "color": "#3b82f6",
+  "icon": "landmark"
+}
+
+### Update balance (appends a snapshot)
+POST {{host}}/v1/accounts/{{account.response.body.id}}/balance
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "balanceCents": 249000 }
+
+### Balance history
+GET {{host}}/v1/accounts/{{account.response.body.id}}/history?limit=10
+Authorization: Bearer {{accessToken}}
+
+### Create a monthly bill anchored on the 31st (clamps to month end)
+# @name rent
+POST {{host}}/v1/recurring
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "Rent",
+  "kind": "bill",
+  "amountCents": 185000,
+  "categoryId": "{{categories.response.body.0.id}}",
+  "accountId": "{{account.response.body.id}}",
+  "frequency": "monthly",
+  "anchorDate": "2024-01-31",
+  "autoPay": false,
+  "notes": "Due last day of month"
+}
+
+### Calendar: Feb 2024 (expects Rent on 2024-02-29)
+GET {{host}}/v1/calendar?from=2024-02-01&to=2024-02-29
+Authorization: Bearer {{accessToken}}
+
+### Mark the Feb 29 occurrence paid
+PUT {{host}}/v1/recurring/{{rent.response.body.id}}/occurrences/2024-02-29/paid
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "amountCents": 185000 }
+
+### Not a real occurrence → 404
+PUT {{host}}/v1/recurring/{{rent.response.body.id}}/occurrences/2024-02-28/paid
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{}
+
+### Un-mark
+DELETE {{host}}/v1/recurring/{{rent.response.body.id}}/occurrences/2024-02-29/paid
+Authorization: Bearer {{accessToken}}
+
+### Summary for a month
+GET {{host}}/v1/summary?month=2024-02
+Authorization: Bearer {{accessToken}}
+
+### Logout (revokes the refresh token)
+POST {{host}}/v1/auth/logout
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }

@@ -123,3 +123,12 @@ Defaults seeded when a household is created: Housing, Utilities, Insurance, Tran
 ## Web (BFF) surface — what the browser talks to
 
 The SvelteKit server exposes the API to the browser only through `/api/[...path]` (same paths as above minus `/v1`), requiring header `X-Requested-With: CouplesCash`. Server `load` functions and form actions call the API directly via `$lib/server/api.ts`. Cookies: `cc_access` (15 min), `cc_refresh` (30 d), `theme` (1 y, not httpOnly). The BFF never exposes refresh tokens to client JS.
+
+## Implementation notes (resolved during build)
+
+- Validation failures return **400** with `errors: { field: [msg] }`. A wrong current password on `POST /v1/auth/password` is a 400 field error (`errors.currentPassword`), not a 401, so the BFF never confuses it with an expired token. A `categoryId`/`accountId` from another household is a 400 field error; 404 is reserved for the route `{id}`.
+- The strict 10/min rate limit covers register, login, refresh, logout, password and `/v1/couple/join`. `GET/PATCH /v1/auth/me` only fall under the global limit because the BFF calls them on navigation.
+- `/v1/couple/*` reads membership from the database (the caller's token is stale right after creating a household); every data route uses the `hh` claim. After join/leave, use the returned `AuthResult` cookies.
+- Typed codes normalise Crockford aliases (`O→0`, `I/L→1`), case and dashes.
+- Summary: `monthly*`, `byKind` and `byCategory` are monthly equivalents of non-archived items active in the month; `byCategory` covers bills + subscriptions only, with a grey "Uncategorized" bucket. `dueThisMonth` = outflow occurrences in the month, `paidThisMonth` = recorded payments, `remainingThisMonth` = unpaid occurrences.
+- Accounts record a balance snapshot on create, on PUT when the balance changes, and on `/balance`. `GET /health` returns 503 `{ status: "degraded", db: "error" }` when the database is unreachable.
