@@ -21,6 +21,9 @@ test('create an account: it appears in the list and in net worth', async ({ page
 	await page.getByLabel('New balance').fill('1300');
 	await page.getByRole('button', { name: 'Update' }).click();
 	await expect(page.getByTestId('balance')).toHaveText('$1,300.00');
+	// the balance text is optimistic; wait for the server to confirm before navigating away
+	await expect(page.getByText('Balance updated')).toBeVisible();
+	await expect(page.getByLabel('New balance')).toHaveValue('');
 
 	await page.goto('/accounts');
 	await expect(page.getByRole('link', { name: /Everyday checking/ })).toBeVisible();
