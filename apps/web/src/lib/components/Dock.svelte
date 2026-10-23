@@ -33,7 +33,9 @@
 				p.startsWith('/couple') ||
 				p.startsWith('/activity') ||
 				p.startsWith('/todos') ||
-				p.startsWith('/payperiod')
+				p.startsWith('/payperiod') ||
+				p.startsWith('/inbox') ||
+				p.startsWith('/imports')
 		}
 	];
 </script>

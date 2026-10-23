@@ -1,6 +1,13 @@
 import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
-import type { ActivityEvent, Category, PayPeriodView, Summary, Todo } from '#lib/types.ts';
+import type {
+	ActivityEvent,
+	Category,
+	InboxSummary,
+	PayPeriodView,
+	Summary,
+	Todo
+} from '#lib/types.ts';
 import { api, endpoints, isApiError } from '#lib/server/api.ts';
 import { echo, parseExpenseForm } from '#lib/server/forms.ts';
 
@@ -9,7 +16,9 @@ const empty = {
 	payperiod: null as PayPeriodView | null,
 	todos: [] as Todo[],
 	activity: [] as ActivityEvent[],
-	categories: [] as Category[]
+	categories: [] as Category[],
+	inbox: null as InboxSummary | null,
+	csvImports: 0
 };
 
 export const load: PageServerLoad = async (event) => {
@@ -18,7 +27,7 @@ export const load: PageServerLoad = async (event) => {
 	const v2 = endpoints(event);
 	// The summary is essential; the v2 widgets degrade to "hidden" if their call fails.
 	const quiet = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
-	const [summary, payperiod, todos, activity, categories] = await Promise.all([
+	const [summary, payperiod, todos, activity, categories, inbox, csvImports] = await Promise.all([
 		client.get<Summary>('/summary'),
 		quiet(v2.payperiod.view(), null),
 		quiet(v2.todos.list(false), [] as Todo[]),
@@ -26,9 +35,14 @@ export const load: PageServerLoad = async (event) => {
 			v2.activity.list({ limit: 5 }).then((p) => p.events),
 			[] as ActivityEvent[]
 		),
-		quiet(client.get<Category[]>('/categories'), [] as Category[])
+		quiet(client.get<Category[]>('/categories'), [] as Category[]),
+		quiet(v2.inbox.summary(), null as InboxSummary | null),
+		quiet(
+			v2.imports.listCsv().then((l) => l.length),
+			0
+		)
 	]);
-	return { summary, payperiod, todos, activity, categories };
+	return { summary, payperiod, todos, activity, categories, inbox, csvImports };
 };
 
 export const actions: Actions = {

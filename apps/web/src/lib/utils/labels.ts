@@ -110,11 +110,61 @@ export const GOAL_ICONS = [
 
 /** Activity kinds that the scheduler (not a person) produces. */
 export function isSystemActivity(kind: string): boolean {
-	return kind === 'occurrence.autopaid';
+	return (
+		kind === 'occurrence.autopaid' ||
+		kind === 'bank.synced' ||
+		kind === 'bank.error' ||
+		kind === 'transaction.automatched'
+	);
 }
 
-/** Human label for an activity actor: the person's name, or "Autopay" for scheduler events. */
+/** Who the "system" is for a scheduler event: the autopay job or the bank sync. */
+export function systemActorLabel(kind: string): string {
+	return kind.startsWith('bank.') || kind.startsWith('transaction.') ? 'Bank sync' : 'Autopay';
+}
+
+/** Human label for an activity actor: the person's name, or the system job for scheduler events. */
 export function activityActor(actorName: string | null, kind: string): string {
 	if (actorName) return actorName;
-	return isSystemActivity(kind) ? 'Autopay' : 'Someone';
+	return isSystemActivity(kind) ? systemActorLabel(kind) : 'Someone';
+}
+
+/** Icon for v3 activity kinds (bank sync, CSV import, inbox review); null keeps the actor avatar. */
+export function activityKindIcon(kind: string): string | null {
+	if (kind.startsWith('bank.')) return kind === 'bank.error' ? 'triangle-alert' : 'landmark';
+	if (kind === 'import.csv') return 'file-spreadsheet';
+	switch (kind) {
+		case 'transaction.confirmed':
+			return 'circle-check';
+		case 'transaction.ignored':
+			return 'circle-minus';
+		case 'transaction.restored':
+			return 'undo-2';
+		case 'transaction.automatched':
+			return 'sparkles';
+		default:
+			return null;
+	}
+}
+
+/** Icon per recurring kind, for suggestion chips and compact rows. */
+export const KIND_ICON: Record<Kind, string> = {
+	bill: 'receipt',
+	subscription: 'repeat',
+	income: 'banknote'
+};
+
+/** Guesses an account type from a bank's own account name ("Freedom Visa" → credit). */
+export function guessAccountType(name: string): AccountType {
+	const n = name.toLowerCase();
+	if (/credit|card|visa|mastercard|amex|discover/.test(n)) return 'credit';
+	if (/saving|sav\b|money market|cd\b/.test(n)) return 'savings';
+	if (/loan|mortgage|auto fin|student/.test(n)) return 'loan';
+	if (/invest|brokerage|401|ira|roth/.test(n)) return 'investment';
+	return 'checking';
+}
+
+/** "−$12.49" / "+$3,200.00" for signed transaction amounts (U+2212 minus). */
+export function signedAmount(cents: number, format: (c: number) => string): string {
+	return `${cents < 0 ? '\u2212' : '+'}${format(Math.abs(cents))}`;
 }

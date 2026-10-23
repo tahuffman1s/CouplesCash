@@ -84,7 +84,17 @@ export type Occurrence = {
 	accountName: string | null;
 	paid: Paid | null;
 };
-export type Paid = { paidAt: string; paidBy: string | null; amountCents: number; auto: boolean };
+export type Paid = {
+	paidAt: string;
+	paidBy: string | null;
+	amountCents: number;
+	auto: boolean;
+	/**
+	 * v3 (assumed, optional): where the payment came from. `bank` = confirmed/auto-matched from the
+	 * review inbox. Older API builds omit it; the UI then falls back to `auto` alone.
+	 */
+	source?: 'manual' | 'autopay' | 'bank' | null;
+};
 
 export type Summary = {
 	month: string; // YYYY-MM
@@ -306,3 +316,112 @@ export const COMMON_CURRENCIES: readonly { code: string; name: string }[] = [
 	{ code: 'ZAR', name: 'South African rand' },
 	{ code: 'SGD', name: 'Singapore dollar' }
 ];
+
+// ---- v3 ----------------------------------------------------------------------------------
+
+export type BankLink = {
+	id: string;
+	provider: 'simplefin';
+	name: string;
+	createdAt: string;
+	lastSyncedAt: string | null;
+	lastError: string | null;
+	syncEnabled: boolean;
+	bridgeErrors: string[];
+	accounts: ExternalAccount[];
+};
+export type ExternalAccount = {
+	id: string;
+	externalId: string;
+	orgName: string;
+	name: string;
+	currency: string;
+	balanceCents: number;
+	availableCents: number | null;
+	balanceAt: string;
+	accountId: string | null;
+	accountName: string | null;
+	updatedAt: string;
+};
+export type SyncResult = {
+	linkId: string;
+	newTransactions: number;
+	updatedAccounts: number;
+	autoMatched: number;
+	errors: string[];
+	syncedAt: string;
+};
+export type InboxStatus = 'pending' | 'confirmed' | 'ignored';
+export type Suggestion =
+	| { kind: 'category'; categoryId: string; categoryName: string; confidence: number }
+	| {
+			kind: 'occurrence';
+			itemId: string;
+			itemName: string;
+			itemKind: Kind;
+			dueDate: string;
+			confidence: number;
+	  }
+	| { kind: 'transfer'; confidence: number }
+	| null;
+export type InboxConfirmed = {
+	expenseId: string | null;
+	itemId: string | null;
+	dueDate: string | null;
+	by: string | null;
+	byName: string | null;
+	at: string | null;
+	auto: boolean;
+	/** Assumed optional extras so confirmed rows can say "Expense in Groceries" / "Paid Rent". */
+	categoryName?: string | null;
+	itemName?: string | null;
+};
+export type InboxItem = {
+	id: string;
+	source: 'simplefin' | 'csv';
+	accountId: string | null;
+	accountName: string | null;
+	postedOn: string;
+	amountCents: number /* signed */;
+	description: string;
+	payee: string | null;
+	memo: string | null;
+	pending: boolean;
+	status: InboxStatus;
+	suggestion: Suggestion;
+	confirmed: InboxConfirmed | null;
+	createdAt: string;
+};
+export type InboxPage = { items: InboxItem[]; nextBefore: string | null };
+export type InboxSummary = {
+	pending: number;
+	suggested: number /* pending with confidence ≥ 70 */;
+	lastSyncedAt: string | null;
+	linkCount: number;
+};
+export type BulkResult = { confirmed: number; ignored: number; skipped: number };
+export type CsvImportRow = {
+	postedOn: string;
+	amountCents: number;
+	description: string;
+	payee?: string;
+	memo?: string;
+};
+export type CsvImportResult = {
+	id: string;
+	rowCount: number;
+	imported: number;
+	duplicates: number;
+	skipped: number;
+	inboxPending: number;
+};
+export type CsvImportRecord = {
+	id: string;
+	filename: string;
+	rowCount: number;
+	imported: number;
+	duplicates: number;
+	createdAt: string;
+	createdByName: string;
+};
+export const INBOX_STATUSES: readonly InboxStatus[] = ['pending', 'confirmed', 'ignored'];

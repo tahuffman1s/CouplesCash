@@ -1,13 +1,24 @@
 import { API_URL } from '$app/env/private';
 import { redirect, type RequestEvent } from '@sveltejs/kit';
 import type {
+	AccountType,
 	ActivityPage,
 	AuthResult,
+	BankLink,
 	BudgetRow,
 	BudgetsResponse,
+	BulkResult,
+	CsvImportResult,
+	CsvImportRecord,
+	CsvImportRow,
 	Expense,
+	ExternalAccount,
 	Goal,
 	Household,
+	InboxItem,
+	InboxPage,
+	InboxStatus,
+	InboxSummary,
 	MonthReport,
 	Passkey,
 	PasskeyConfig,
@@ -15,6 +26,7 @@ import type {
 	PayPeriodView,
 	Problem,
 	PushPrefs,
+	SyncResult,
 	Todo
 } from '#lib/types.ts';
 import { ACCESS_COOKIE, REFRESH_COOKIE, clearAuthCookies, setAuthCookies } from './cookies';
@@ -193,6 +205,12 @@ export type GoalBody = {
 	icon: string;
 };
 export type PushPrefsBody = Omit<PushPrefs, 'subscriptions'>;
+export type ExternalAccountMapping =
+	| { accountId: string | null }
+	| { create: { name: string; type: AccountType; institution?: string } };
+export type InboxConfirmBody =
+	| { as: 'expense'; categoryId?: string | null; name?: string }
+	| { as: 'occurrence'; itemId: string; dueDate: string };
 
 /**
  * Typed v2 endpoints (docs/API-CONTRACT.md § v2 additions) on top of the generic client.
@@ -284,6 +302,48 @@ export function endpoints(event: RequestEvent) {
 		},
 		reports: {
 			month: (m?: string | null) => c.get<MonthReport>(`/reports/month${month(m)}`)
+		},
+		// ---- v3 (docs/API-CONTRACT.md § v3 additions)
+		banks: {
+			/** Resolves to null when bank sync is not configured on the server (503). */
+			list: async (): Promise<BankLink[] | null> => {
+				try {
+					return await c.get<BankLink[]>('/banks');
+				} catch (e) {
+					if (isApiError(e, 503)) return null;
+					throw e;
+				}
+			},
+			claim: (setupToken: string, name?: string) =>
+				c.post<BankLink>('/banks/simplefin/claim', name ? { setupToken, name } : { setupToken }),
+			update: (id: string, patch: { name?: string; syncEnabled?: boolean }) =>
+				c.patch<BankLink>(`/banks/${id}`, patch),
+			remove: (id: string) => c.del(`/banks/${id}`),
+			sync: (id: string) => c.post<SyncResult>(`/banks/${id}/sync`),
+			map: (externalAccountId: string, body: ExternalAccountMapping) =>
+				c.put<ExternalAccount>(`/banks/accounts/${externalAccountId}`, body)
+		},
+		inbox: {
+			summary: () => c.get<InboxSummary>('/inbox/summary'),
+			list: (opts: { status?: InboxStatus; before?: string | null; limit?: number } = {}) => {
+				const q = new URLSearchParams();
+				if (opts.status) q.set('status', opts.status);
+				if (opts.before) q.set('before', opts.before);
+				if (opts.limit) q.set('limit', String(opts.limit));
+				const qs = q.toString();
+				return c.get<InboxPage>(`/inbox${qs ? `?${qs}` : ''}`);
+			},
+			confirm: (id: string, body: InboxConfirmBody) =>
+				c.post<InboxItem>(`/inbox/${id}/confirm`, body),
+			ignore: (id: string) => c.post<InboxItem>(`/inbox/${id}/ignore`),
+			restore: (id: string) => c.post<InboxItem>(`/inbox/${id}/restore`),
+			bulk: (action: 'confirm-suggested' | 'ignore', ids?: string[]) =>
+				c.post<BulkResult>('/inbox/bulk', ids ? { action, ids } : { action })
+		},
+		imports: {
+			csv: (body: { accountId: string; filename: string; rows: CsvImportRow[] }) =>
+				c.post<CsvImportResult>('/imports/csv', body),
+			listCsv: () => c.get<CsvImportRecord[]>('/imports/csv')
 		}
 	};
 }

@@ -77,6 +77,22 @@
 			</a>
 		</li>
 		<li>
+			<a href="/settings/banks" class="flex min-h-14 items-center gap-3 px-4 py-3">
+				<span
+					class="flex h-10 w-10 items-center justify-center rounded-xl bg-base-200 text-primary"
+				>
+					<Icon name="landmark" size={20} />
+				</span>
+				<span class="flex-1">
+					<span class="block font-medium">Linked banks</span>
+					<span class="block text-xs text-base-content/60"
+						>Sync balances and transactions with SimpleFIN</span
+					>
+				</span>
+				<Icon name="chevron-right" size={18} class="text-base-content/40" />
+			</a>
+		</li>
+		<li>
 			<a href="/settings/passkeys" class="flex min-h-14 items-center gap-3 px-4 py-3">
 				<span
 					class="flex h-10 w-10 items-center justify-center rounded-xl bg-base-200 text-primary"

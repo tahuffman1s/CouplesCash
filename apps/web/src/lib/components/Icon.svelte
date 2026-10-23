@@ -93,6 +93,16 @@
 	import Globe from '@lucide/svelte/icons/globe';
 	import CircleMinus from '@lucide/svelte/icons/circle-minus';
 	import Send from '@lucide/svelte/icons/send';
+	import Inbox from '@lucide/svelte/icons/inbox';
+	import Upload from '@lucide/svelte/icons/upload';
+	import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
+	import Tag from '@lucide/svelte/icons/tag';
+	import Pause from '@lucide/svelte/icons/pause';
+	import Play from '@lucide/svelte/icons/play';
+	import Unlink from '@lucide/svelte/icons/unlink';
+	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
+	import FileSpreadsheet from '@lucide/svelte/icons/file-spreadsheet';
+	import CheckCheck from '@lucide/svelte/icons/check-check';
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const ICONS: Record<string, Component<any>> = {
@@ -192,7 +202,17 @@
 		'file-text': FileText,
 		globe: Globe,
 		'circle-minus': CircleMinus,
-		send: Send
+		send: Send,
+		inbox: Inbox,
+		upload: Upload,
+		'arrow-left-right': ArrowLeftRight,
+		tag: Tag,
+		pause: Pause,
+		play: Play,
+		unlink: Unlink,
+		'ellipsis-vertical': EllipsisVertical,
+		'file-spreadsheet': FileSpreadsheet,
+		'check-check': CheckCheck
 	};
 
 	export const ICON_NAMES = Object.keys(ICONS);

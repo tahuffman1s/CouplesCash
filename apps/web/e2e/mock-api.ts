@@ -5,7 +5,13 @@
  * Test-only helpers (never in the real API):
  *   POST /__reset                 wipe everything
  *   POST /__mock/autopay?date=    run the autopay scheduler for that day (default: today)
+ *   POST /__mock/bank-sync        run the bank-sync scheduler phase for every link (ignores cooldown)
  * Env: MOCK_PUSH=1 serves a fake VAPID key (default: 503 push_not_configured).
+ *      MOCK_BANKS_DISABLED=1 → POST /v1/banks/simplefin/claim answers 503 bank_sync_not_configured
+ *      (the setup token `demo-not-configured` does the same per request, so one e2e can cover it).
+ *
+ * v3: a fake SimpleFIN Bridge lives in memory. The setup token `demo-token` claims a link with two
+ * accounts (checking + credit card) and a handful of transactions; anything else is 400.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -75,7 +81,13 @@ type Item = {
 	updatedAt: string;
 	archived: boolean;
 };
-type Payment = { paidAt: string; paidBy: string | null; amountCents: number; auto: boolean };
+type Payment = {
+	paidAt: string;
+	paidBy: string | null;
+	amountCents: number;
+	auto: boolean;
+	source: 'manual' | 'autopay' | 'bank';
+};
 type Code = {
 	bytesHash: string;
 	codeHash: string;
@@ -154,6 +166,115 @@ type Prefs = {
 	activityEnabled: boolean;
 };
 
+// ---- v3 types -----------------------------------------------------------------------------
+type BankLinkRec = {
+	id: string;
+	householdId: string;
+	provider: 'simplefin';
+	name: string;
+	createdBy: string;
+	createdAt: string;
+	lastSyncedAt: string | null;
+	lastManualSyncAt: string | null;
+	lastError: string | null;
+	syncEnabled: boolean;
+	bridgeErrors: string[];
+};
+type ExtAccount = {
+	id: string;
+	bankLinkId: string;
+	householdId: string;
+	externalId: string;
+	orgName: string;
+	name: string;
+	currency: string;
+	balanceCents: number;
+	availableCents: number | null;
+	balanceAt: string;
+	accountId: string | null;
+	createdAt: string;
+	updatedAt: string;
+};
+type Suggestion =
+	| { kind: 'category'; categoryId: string; categoryName: string; confidence: number }
+	| {
+			kind: 'occurrence';
+			itemId: string;
+			itemName: string;
+			itemKind: string;
+			dueDate: string;
+			confidence: number;
+	  }
+	| { kind: 'transfer'; confidence: number }
+	| null;
+type Confirmed = {
+	expenseId: string | null;
+	itemId: string | null;
+	dueDate: string | null;
+	by: string | null;
+	at: string | null;
+	auto: boolean;
+	categoryName: string | null;
+	itemName: string | null;
+};
+type Tx = {
+	id: string;
+	householdId: string;
+	source: 'simplefin' | 'csv';
+	externalAccountId: string | null;
+	accountId: string | null;
+	externalId: string | null;
+	fingerprint: string;
+	postedOn: string;
+	amountCents: number;
+	description: string;
+	payee: string | null;
+	memo: string | null;
+	pending: boolean;
+	status: 'pending' | 'confirmed' | 'ignored';
+	suggestion: Suggestion;
+	confidence: number;
+	confirmed: Confirmed | null;
+	createdAt: string;
+};
+type PayeeRule = {
+	householdId: string;
+	payeeNorm: string;
+	categoryId: string | null;
+	itemId: string | null;
+	hits: number;
+};
+type CsvImportRec = {
+	id: string;
+	householdId: string;
+	accountId: string;
+	filename: string;
+	rowCount: number;
+	imported: number;
+	duplicates: number;
+	createdBy: string;
+	createdAt: string;
+};
+/** What the fake Bridge serves: protocol-shaped but already in cents / ISO dates. */
+type BridgeTx = {
+	id: string;
+	posted: string;
+	amount: number;
+	description: string;
+	payee?: string;
+	memo?: string;
+	pending?: boolean;
+};
+type BridgeAccount = {
+	id: string;
+	org: string;
+	name: string;
+	currency: string;
+	balance: number;
+	available: number | null;
+	transactions: BridgeTx[];
+};
+
 const users = new Map<string, User>();
 const households = new Map<string, Household>();
 const accounts = new Map<string, Account>();
@@ -170,10 +291,18 @@ const todos = new Map<string, Todo>();
 const goals = new Map<string, Goal>();
 const pushSubs = new Map<string, PushSub>(); // by endpoint
 const prefs = new Map<string, Prefs>(); // by userId
+const bankLinks = new Map<string, BankLinkRec>();
+const extAccounts = new Map<string, ExtAccount>();
+const txs = new Map<string, Tx>();
+const payeeRules = new Map<string, PayeeRule>(); // `${hh}:${payeeNorm}`
+const csvImports = new Map<string, CsvImportRec>();
+const bridge = new Map<string, BridgeAccount[]>(); // by bank link id
 
 const PORT = Number(process.env.MOCK_API_PORT ?? 8099);
 const ACCESS_TTL = Number(process.env.MOCK_ACCESS_TTL ?? 900);
 const PUSH_ENABLED = process.env.MOCK_PUSH === '1';
+const BANKS_DISABLED = process.env.MOCK_BANKS_DISABLED === '1';
+const SYNC_COOLDOWN_MS = 15 * 60_000;
 
 const b64url = (buf: Buffer | string) => Buffer.from(buf).toString('base64url');
 const sha = (s: string | Buffer) => createHash('sha256').update(s).digest();
@@ -701,7 +830,13 @@ function runAutopay(date: string) {
 		if (!expand(i, date, date).includes(date)) continue;
 		const key = `${i.id}:${date}`;
 		if (payments.has(key)) continue;
-		payments.set(key, { paidAt: nowIso(), paidBy: null, amountCents: i.amountCents, auto: true });
+		payments.set(key, {
+			paidAt: nowIso(),
+			paidBy: null,
+			amountCents: i.amountCents,
+			auto: true,
+			source: 'autopay'
+		});
 		record(
 			i.householdId,
 			null,
@@ -718,6 +853,559 @@ function runAutopay(date: string) {
 		n++;
 	}
 	return n;
+}
+
+// ---- v3: fake SimpleFIN Bridge, matcher, inbox ----------------------------------------------
+const daysAgo = (n: number) => toIso(new Date(Date.now() - n * 86400_000));
+
+/** The dataset `demo-token` claims: a checking account and a credit card at "Demo Bank". */
+function demoBridge(): BridgeAccount[] {
+	const first = `${todayIso().slice(0, 7)}-01`;
+	return [
+		{
+			id: 'demo-checking',
+			org: 'Demo Bank',
+			name: 'Everyday Checking',
+			currency: 'USD',
+			balance: 234567,
+			available: 234567,
+			transactions: [
+				{ id: 'tx-rent', posted: first, amount: -185000, description: 'RENT PAYMENT' },
+				{ id: 'tx-kroger', posted: daysAgo(3), amount: -1249, description: 'KROGER #123' },
+				{
+					id: 'tx-payroll',
+					posted: daysAgo(2),
+					amount: 320000,
+					description: 'ACME PAYROLL',
+					payee: 'Acme Corp'
+				},
+				{ id: 'tx-coffee', posted: todayIso(), amount: -450, description: 'COFFEE', pending: true }
+			]
+		},
+		{
+			id: 'demo-visa',
+			org: 'Demo Bank',
+			name: 'Freedom Visa',
+			currency: 'USD',
+			balance: -54000,
+			available: null,
+			transactions: [
+				{ id: 'tx-netflix', posted: daysAgo(5), amount: -1549, description: 'NETFLIX.COM' }
+			]
+		}
+	];
+}
+
+/** payee_norm: lower-cased, digits/punctuation/noise removed. */
+function normPayee(desc: string): string {
+	return desc
+		.toLowerCase()
+		.replace(/\d+/g, ' ')
+		.replace(/[^a-z\s]/g, ' ')
+		.replace(
+			/\b(pos|debit|credit|card|ach|chk|ck|web|online|purchase|pending|txn|ref|payment)\b/g,
+			' '
+		)
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+const KEYWORDS: [RegExp, string][] = [
+	[/kroger|safeway|aldi|walmart|trader joe|whole foods|costco|publix|wegmans|heb\b/i, 'Groceries'],
+	[/netflix|spotify|hulu|disney|hbo|apple\.com|prime video|youtube/i, 'Subscriptions'],
+	[/shell|chevron|exxon|\bbp\b|uber|lyft|transit|parking/i, 'Transportation'],
+	[/electric|water|gas co|power|comcast|xfinity|verizon|at&t|t-mobile|internet/i, 'Utilities'],
+	[/insurance|geico|allstate|state farm|progressive/i, 'Insurance'],
+	[/cvs|walgreens|pharmacy|dental|clinic/i, 'Health'],
+	[/restaurant|cafe|coffee|starbucks|mcdonald|chipotle|pizza|grill|bar\b/i, 'Fun'],
+	[/payroll|direct dep|salary/i, 'Income']
+];
+function categoryByName(hh: string, name: string): Category | undefined {
+	return [...categories.values()].find((c) => c.householdId === hh && c.name === name);
+}
+function fingerprintFor(
+	source: 'simplefin' | 'csv',
+	externalId: string | null,
+	accountId: string | null,
+	postedOn: string,
+	amountCents: number,
+	description: string
+): string {
+	return externalId
+		? sha(`${source}|${externalId}`).toString('hex')
+		: sha(`${accountId ?? ''}|${postedOn}|${amountCents}|${normPayee(description)}`).toString(
+				'hex'
+			);
+}
+
+/** Suggestion engine per PLAN-V3 (recurring → payee rule → keywords). */
+function suggest(
+	hh: string,
+	tx: Pick<Tx, 'postedOn' | 'amountCents' | 'description' | 'payee'>
+): {
+	suggestion: Suggestion;
+	confidence: number;
+} {
+	const abs = Math.abs(tx.amountCents);
+	const outflow = tx.amountCents < 0;
+	const norm = normPayee(tx.payee ?? tx.description);
+	const rule = payeeRules.get(`${hh}:${norm}`);
+	// 1. recurring occurrence within ±5 days, amount within max(2 %, $1), kind matches sign
+	const from = toIso(new Date(parse(tx.postedOn).getTime() - 5 * 86400_000));
+	const to = toIso(new Date(parse(tx.postedOn).getTime() + 5 * 86400_000));
+	let best: { item: Item; date: string; distance: number } | null = null;
+	for (const i of items.values()) {
+		if (i.householdId !== hh || i.archived) continue;
+		if ((i.kind === 'income') === outflow) continue;
+		if (Math.abs(i.amountCents - abs) > Math.max(Math.round(i.amountCents * 0.02), 100)) continue;
+		for (const d of expand(i, from, to)) {
+			if (payments.has(`${i.id}:${d}`)) continue;
+			const distance = Math.abs(parse(d).getTime() - parse(tx.postedOn).getTime());
+			if (!best || distance < best.distance) best = { item: i, date: d, distance };
+		}
+	}
+	if (best) {
+		const confidence = 90 + (rule && rule.itemId === best.item.id ? 5 : 0);
+		return {
+			suggestion: {
+				kind: 'occurrence',
+				itemId: best.item.id,
+				itemName: best.item.name,
+				itemKind: best.item.kind,
+				dueDate: best.date,
+				confidence
+			},
+			confidence
+		};
+	}
+	// 2. learned payee rule
+	if (rule?.categoryId) {
+		const c = categories.get(rule.categoryId);
+		if (c) {
+			const confidence = 70 + Math.min(rule.hits, 20);
+			return {
+				suggestion: { kind: 'category', categoryId: c.id, categoryName: c.name, confidence },
+				confidence
+			};
+		}
+	}
+	// 3. keyword defaults
+	for (const [re, name] of KEYWORDS) {
+		if (!re.test(tx.description) && !(tx.payee && re.test(tx.payee))) continue;
+		if ((name === 'Income') === outflow) continue;
+		const c = categoryByName(hh, name);
+		if (c)
+			return {
+				suggestion: { kind: 'category', categoryId: c.id, categoryName: c.name, confidence: 40 },
+				confidence: 40
+			};
+	}
+	return { suggestion: null, confidence: 0 };
+}
+
+/** Both sides of a transfer between two mapped accounts are suggested as ignore ("transfer"). */
+function detectTransfers(hh: string, fresh: Tx[]) {
+	const all = [...txs.values()].filter((t) => t.householdId === hh && t.status === 'pending');
+	for (const a of fresh) {
+		if (!a.accountId) continue;
+		const b = all.find(
+			(o) =>
+				o.id !== a.id &&
+				o.accountId &&
+				o.accountId !== a.accountId &&
+				o.amountCents === -a.amountCents &&
+				Math.abs(parse(o.postedOn).getTime() - parse(a.postedOn).getTime()) <= 3 * 86400_000
+		);
+		if (!b) continue;
+		for (const t of [a, b]) {
+			t.suggestion = { kind: 'transfer', confidence: 80 };
+			t.confidence = 80;
+		}
+	}
+}
+
+function insertTx(
+	hh: string,
+	input: Omit<
+		Tx,
+		| 'id'
+		| 'householdId'
+		| 'fingerprint'
+		| 'status'
+		| 'suggestion'
+		| 'confidence'
+		| 'confirmed'
+		| 'createdAt'
+	>
+): Tx | null {
+	const fingerprint = fingerprintFor(
+		input.source,
+		input.externalId,
+		input.accountId,
+		input.postedOn,
+		input.amountCents,
+		input.description
+	);
+	if ([...txs.values()].some((t) => t.householdId === hh && t.fingerprint === fingerprint))
+		return null;
+	const { suggestion, confidence } = suggest(hh, input);
+	const tx: Tx = {
+		...input,
+		id: randomUUID(),
+		householdId: hh,
+		fingerprint,
+		status: 'pending',
+		suggestion,
+		confidence,
+		confirmed: null,
+		createdAt: nowIso()
+	};
+	txs.set(tx.id, tx);
+	return tx;
+}
+
+/** Mapping an external account pushes its balance into the CouplesCash account (+ snapshot). */
+function applyMapping(ext: ExtAccount, account: Account | null, by: string) {
+	ext.accountId = account?.id ?? null;
+	ext.updatedAt = nowIso();
+	for (const t of txs.values())
+		if (t.externalAccountId === ext.id && t.status === 'pending') t.accountId = ext.accountId;
+	if (!account) return;
+	const owed = account.type === 'credit' || account.type === 'loan';
+	const cents = owed ? Math.abs(ext.balanceCents) : ext.balanceCents;
+	if (cents !== account.balanceCents) setBalance(account, cents, by);
+}
+
+type SyncResult = {
+	linkId: string;
+	newTransactions: number;
+	updatedAccounts: number;
+	autoMatched: number;
+	errors: string[];
+	syncedAt: string;
+};
+function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
+	const hh = link.householdId;
+	const data = bridge.get(link.id) ?? [];
+	const fresh: Tx[] = [];
+	let updatedAccounts = 0;
+	let autoMatched = 0;
+	for (const ba of data) {
+		let ext = [...extAccounts.values()].find(
+			(x) => x.bankLinkId === link.id && x.externalId === ba.id
+		);
+		if (!ext) {
+			ext = {
+				id: randomUUID(),
+				bankLinkId: link.id,
+				householdId: hh,
+				externalId: ba.id,
+				orgName: ba.org,
+				name: ba.name,
+				currency: ba.currency,
+				balanceCents: ba.balance,
+				availableCents: ba.available,
+				balanceAt: nowIso(),
+				accountId: null,
+				createdAt: nowIso(),
+				updatedAt: nowIso()
+			};
+			extAccounts.set(ext.id, ext);
+		} else {
+			ext.balanceCents = ba.balance;
+			ext.availableCents = ba.available;
+			ext.balanceAt = nowIso();
+			ext.updatedAt = nowIso();
+		}
+		updatedAccounts++;
+		const account = ext.accountId ? accounts.get(ext.accountId) : undefined;
+		if (account) applyMapping(ext, account, actor?.id ?? 'scheduler');
+		for (const bt of ba.transactions) {
+			const tx = insertTx(hh, {
+				source: 'simplefin',
+				externalAccountId: ext.id,
+				accountId: ext.accountId,
+				externalId: bt.id,
+				postedOn: bt.posted,
+				amountCents: bt.amount,
+				description: bt.description,
+				payee: bt.payee ?? null,
+				memo: bt.memo ?? null,
+				pending: !!bt.pending
+			});
+			if (tx) fresh.push(tx);
+		}
+	}
+	detectTransfers(hh, fresh);
+	// auto-mark: recurring match ≥ 90 whose item already has a learned payee rule
+	for (const tx of fresh) {
+		const s = tx.suggestion;
+		if (!s || s.kind !== 'occurrence' || s.confidence < 90) continue;
+		const norm = normPayee(tx.payee ?? tx.description);
+		const rule = payeeRules.get(`${hh}:${norm}`);
+		if (!rule || rule.itemId !== s.itemId) continue;
+		const item = items.get(s.itemId);
+		if (!item || payments.has(`${item.id}:${s.dueDate}`)) continue;
+		payments.set(`${item.id}:${s.dueDate}`, {
+			paidAt: nowIso(),
+			paidBy: null,
+			amountCents: Math.abs(tx.amountCents),
+			auto: true,
+			source: 'bank'
+		});
+		tx.status = 'confirmed';
+		tx.confirmed = {
+			expenseId: null,
+			itemId: item.id,
+			dueDate: s.dueDate,
+			by: null,
+			at: nowIso(),
+			auto: true,
+			categoryName: null,
+			itemName: item.name
+		};
+		record(
+			hh,
+			null,
+			'transaction.automatched',
+			'transaction',
+			tx.id,
+			`matched ${item.name} · ${money(hh, Math.abs(tx.amountCents))} (auto)`,
+			{ itemId: item.id, dueDate: s.dueDate }
+		);
+		autoMatched++;
+	}
+	link.lastSyncedAt = nowIso();
+	link.lastError = null;
+	record(
+		hh,
+		actor,
+		'bank.synced',
+		'bank_link',
+		link.id,
+		`synced ${link.name} · ${fresh.length} to review`,
+		{ newTransactions: fresh.length, updatedAccounts, autoMatched }
+	);
+	return {
+		linkId: link.id,
+		newTransactions: fresh.length,
+		updatedAccounts,
+		autoMatched,
+		errors: link.bridgeErrors,
+		syncedAt: link.lastSyncedAt
+	};
+}
+
+function extView(x: ExtAccount) {
+	const a = x.accountId ? accounts.get(x.accountId) : undefined;
+	return {
+		id: x.id,
+		externalId: x.externalId,
+		orgName: x.orgName,
+		name: x.name,
+		currency: x.currency,
+		balanceCents: x.balanceCents,
+		availableCents: x.availableCents,
+		balanceAt: x.balanceAt,
+		accountId: a && !a.archived ? a.id : null,
+		accountName: a && !a.archived ? a.name : null,
+		updatedAt: x.updatedAt
+	};
+}
+function linkView(l: BankLinkRec) {
+	return {
+		id: l.id,
+		provider: l.provider,
+		name: l.name,
+		createdAt: l.createdAt,
+		lastSyncedAt: l.lastSyncedAt,
+		lastError: l.lastError,
+		syncEnabled: l.syncEnabled,
+		bridgeErrors: l.bridgeErrors,
+		accounts: [...extAccounts.values()]
+			.filter((x) => x.bankLinkId === l.id)
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map(extView)
+	};
+}
+function txView(t: Tx) {
+	const a = t.accountId ? accounts.get(t.accountId) : undefined;
+	const by = t.confirmed?.by ? users.get(t.confirmed.by) : undefined;
+	return {
+		id: t.id,
+		source: t.source,
+		accountId: a?.id ?? null,
+		accountName: a?.name ?? null,
+		postedOn: t.postedOn,
+		amountCents: t.amountCents,
+		description: t.description,
+		payee: t.payee,
+		memo: t.memo,
+		pending: t.pending,
+		status: t.status,
+		suggestion: t.suggestion,
+		confirmed: t.confirmed ? { ...t.confirmed, byName: by?.displayName ?? null } : null,
+		createdAt: t.createdAt
+	};
+}
+function learnRule(
+	hh: string,
+	tx: Tx,
+	patch: { categoryId?: string | null; itemId?: string | null }
+) {
+	const norm = normPayee(tx.payee ?? tx.description);
+	if (!norm) return;
+	const key = `${hh}:${norm}`;
+	const rule = payeeRules.get(key) ?? {
+		householdId: hh,
+		payeeNorm: norm,
+		categoryId: null,
+		itemId: null,
+		hits: 0
+	};
+	if ('categoryId' in patch) {
+		rule.categoryId = patch.categoryId ?? null;
+		rule.itemId = null;
+	}
+	if ('itemId' in patch) {
+		rule.itemId = patch.itemId ?? null;
+		rule.categoryId = null;
+	}
+	rule.hits++;
+	payeeRules.set(key, rule);
+}
+type ConfirmError = { status: number; detail: string };
+function confirmTx(
+	hh: string,
+	user: User,
+	tx: Tx,
+	body: Record<string, unknown>
+): ConfirmError | null {
+	if (tx.status !== 'pending') return { status: 400, detail: 'Not pending' };
+	if (body.as === 'expense') {
+		if (tx.amountCents >= 0) return { status: 400, detail: 'Money in cannot become an expense' };
+		const categoryId = (body.categoryId as string | null) || null;
+		const cat = categoryId ? categories.get(categoryId) : undefined;
+		if (categoryId && (!cat || cat.householdId !== hh))
+			return { status: 400, detail: 'Unknown category' };
+		const e: Expense = {
+			id: randomUUID(),
+			householdId: hh,
+			name: String(body.name ?? '') || tx.payee || tx.description,
+			amountCents: Math.abs(tx.amountCents),
+			categoryId: cat?.id ?? null,
+			accountId: tx.accountId,
+			spentOn: tx.postedOn,
+			note: tx.memo,
+			deducted: false,
+			createdBy: user.id,
+			createdAt: nowIso(),
+			updatedAt: nowIso()
+		};
+		expenses.set(e.id, e);
+		learnRule(hh, tx, { categoryId: cat?.id ?? null });
+		tx.status = 'confirmed';
+		tx.confirmed = {
+			expenseId: e.id,
+			itemId: null,
+			dueDate: null,
+			by: user.id,
+			at: nowIso(),
+			auto: false,
+			categoryName: cat?.name ?? null,
+			itemName: null
+		};
+		record(
+			hh,
+			user,
+			'transaction.confirmed',
+			'transaction',
+			tx.id,
+			`confirmed ${e.name} · ${money(hh, e.amountCents)}${cat ? ` in ${cat.name}` : ''}`,
+			{ expenseId: e.id }
+		);
+		return null;
+	}
+	if (body.as === 'occurrence') {
+		const item = items.get(String(body.itemId ?? ''));
+		const date = String(body.dueDate ?? '');
+		if (!item || item.householdId !== hh || item.archived)
+			return { status: 400, detail: 'Unknown bill' };
+		if ((item.kind === 'income') !== tx.amountCents > 0)
+			return { status: 400, detail: 'That bill does not match the direction of this transaction' };
+		if (!expand(item, date, date).includes(date))
+			return { status: 400, detail: 'Not an occurrence' };
+		if (payments.has(`${item.id}:${date}`))
+			return { status: 400, detail: 'That occurrence is already paid' };
+		payments.set(`${item.id}:${date}`, {
+			paidAt: nowIso(),
+			paidBy: user.id,
+			amountCents: Math.abs(tx.amountCents),
+			auto: false,
+			source: 'bank'
+		});
+		learnRule(hh, tx, { itemId: item.id });
+		tx.status = 'confirmed';
+		tx.confirmed = {
+			expenseId: null,
+			itemId: item.id,
+			dueDate: date,
+			by: user.id,
+			at: nowIso(),
+			auto: false,
+			categoryName: null,
+			itemName: item.name
+		};
+		record(
+			hh,
+			user,
+			'transaction.confirmed',
+			'transaction',
+			tx.id,
+			`matched ${item.name} · ${money(hh, Math.abs(tx.amountCents))}`,
+			{ itemId: item.id, dueDate: date }
+		);
+		return null;
+	}
+	return { status: 400, detail: 'Unknown confirm mode' };
+}
+function restoreTx(hh: string, user: User | null, tx: Tx) {
+	const c = tx.confirmed;
+	if (c?.expenseId) expenses.delete(c.expenseId); // deducted = false, so no balance to put back
+	if (c?.itemId && c.dueDate) payments.delete(`${c.itemId}:${c.dueDate}`);
+	tx.status = 'pending';
+	tx.confirmed = null;
+	record(
+		hh,
+		user,
+		'transaction.restored',
+		'transaction',
+		tx.id,
+		`put ${tx.payee ?? tx.description} back in the inbox`
+	);
+}
+function restoreTxForOccurrence(hh: string, itemId: string, date: string) {
+	for (const t of txs.values()) {
+		if (t.householdId !== hh || t.status !== 'confirmed') continue;
+		if (t.confirmed?.itemId === itemId && t.confirmed.dueDate === date) {
+			t.status = 'pending';
+			t.confirmed = null;
+		}
+	}
+}
+function inboxSummary(hh: string) {
+	const mine = [...txs.values()].filter((t) => t.householdId === hh);
+	const links = [...bankLinks.values()].filter((l) => l.householdId === hh);
+	return {
+		pending: mine.filter((t) => t.status === 'pending').length,
+		suggested: mine.filter(
+			(t) => t.status === 'pending' && t.confidence >= 70 && t.suggestion?.kind !== 'transfer'
+		).length,
+		lastSyncedAt: links.reduce<string | null>(
+			(acc, l) => (l.lastSyncedAt && (!acc || l.lastSyncedAt > acc) ? l.lastSyncedAt : acc),
+			null
+		),
+		linkCount: links.length
+	};
 }
 
 // ---- http -------------------------------------------------------------------------------
@@ -786,12 +1474,27 @@ const server = createServer(async (req, res) => {
 				todos,
 				goals,
 				pushSubs,
-				prefs
+				prefs,
+				bankLinks,
+				extAccounts,
+				txs,
+				payeeRules,
+				csvImports,
+				bridge
 			])
 				map.clear();
 			codes.length = 0;
 			activity.length = 0;
 			return send(res, 204);
+		}
+		if (p === '/__mock/bank-sync' && m === 'POST') {
+			let synced = 0;
+			for (const link of bankLinks.values()) {
+				if (!link.syncEnabled) continue;
+				syncLink(link, null);
+				synced++;
+			}
+			return send(res, 200, { synced });
 		}
 		if (p === '/__mock/autopay' && m === 'POST') {
 			const date = url.searchParams.get('date') ?? todayIso();
@@ -1290,7 +1993,8 @@ const server = createServer(async (req, res) => {
 						paidAt: nowIso(),
 						paidBy: user.id,
 						amountCents: amount,
-						auto: false
+						auto: false,
+						source: 'manual'
 					});
 					record(
 						hh,
@@ -1304,7 +2008,10 @@ const server = createServer(async (req, res) => {
 					return send(res, 200, occurrence(i, date));
 				}
 				if (m === 'DELETE') {
+					const prev = payments.get(`${i.id}:${date}`);
 					payments.delete(`${i.id}:${date}`);
+					// v3: unpaying a payment that came from the inbox puts the row back in review
+					if (prev?.source === 'bank') restoreTxForOccurrence(hh, i.id, date);
 					record(hh, user, 'occurrence.unpaid', 'occurrence', i.id, `marked ${i.name} unpaid`, {
 						itemId: i.id,
 						dueDate: date
@@ -1705,6 +2412,335 @@ const server = createServer(async (req, res) => {
 				record(hh, user, 'goal.deleted', 'goal', null, `removed goal ${g.name}`);
 				return send(res, 204);
 			}
+		}
+
+		// --- v3: linked banks
+		if (p === '/v1/banks' && m === 'GET')
+			return send(
+				res,
+				200,
+				[...bankLinks.values()]
+					.filter((l) => l.householdId === hh)
+					.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+					.map(linkView)
+			);
+		if (p === '/v1/banks/simplefin/claim' && m === 'POST') {
+			const b = await readJson(req);
+			const token = String(b.setupToken ?? '').trim();
+			if (BANKS_DISABLED || token === 'demo-not-configured')
+				return problem(
+					res,
+					503,
+					'Bank sync not configured',
+					'Security__DataKey is not set',
+					'https://couplescash.app/problems/bank_sync_not_configured'
+				);
+			if (token !== 'demo-token')
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { setupToken: ['That setup token is invalid or has expired'] }
+				});
+			const link: BankLinkRec = {
+				id: randomUUID(),
+				householdId: hh,
+				provider: 'simplefin',
+				name: String(b.name ?? '').trim() || 'My bank',
+				createdBy: user.id,
+				createdAt: nowIso(),
+				lastSyncedAt: null,
+				lastManualSyncAt: null,
+				lastError: null,
+				syncEnabled: true,
+				bridgeErrors: []
+			};
+			bankLinks.set(link.id, link);
+			bridge.set(link.id, demoBridge());
+			record(hh, user, 'bank.linked', 'bank_link', link.id, `linked bank ${link.name}`);
+			syncLink(link, user); // first sync inline
+			return send(res, 201, linkView(link));
+		}
+		mm = /^\/v1\/banks\/accounts\/([^/]+)$/.exec(p);
+		if (mm && m === 'PUT') {
+			const ext = extAccounts.get(mm[1]);
+			if (!ext || ext.householdId !== hh) return problem(res, 404, 'Not found');
+			const b = await readJson(req);
+			let account: Account | null = null;
+			if (b.create && typeof b.create === 'object') {
+				const c = b.create as { name?: string; type?: string; institution?: string };
+				if (!c.name || !c.type) return problem(res, 400, 'Validation failed');
+				const owed = c.type === 'credit' || c.type === 'loan';
+				account = {
+					id: randomUUID(),
+					householdId: hh,
+					name: String(c.name),
+					institution: String(c.institution ?? ext.orgName),
+					type: String(c.type),
+					balanceCents: owed ? Math.abs(ext.balanceCents) : ext.balanceCents,
+					color: '#2a78d6',
+					icon: owed ? 'credit-card' : 'landmark',
+					note: null,
+					createdAt: nowIso(),
+					updatedAt: nowIso(),
+					archived: false
+				};
+				accounts.set(account.id, account);
+				snapshots.set(account.id, [
+					{ balanceCents: account.balanceCents, recordedAt: account.createdAt, recordedBy: user.id }
+				]);
+				record(
+					hh,
+					user,
+					'account.created',
+					'account',
+					account.id,
+					`added account ${account.name} · ${$(account.balanceCents)}`
+				);
+			} else if ('accountId' in b) {
+				const id = (b.accountId as string | null) || null;
+				if (id) {
+					const a = accounts.get(id);
+					if (!a || a.householdId !== hh || a.archived)
+						return send(res, 400, {
+							title: 'Validation failed',
+							status: 400,
+							errors: { accountId: ['Unknown account'] }
+						});
+					account = a;
+				}
+			} else return problem(res, 400, 'Validation failed');
+			applyMapping(ext, account, user.id);
+			if (account)
+				record(
+					hh,
+					user,
+					'account.balance',
+					'account',
+					account.id,
+					`mapped ${ext.name} to ${account.name} · ${$(account.balanceCents)}`
+				);
+			return send(res, 200, extView(ext));
+		}
+		mm = /^\/v1\/banks\/([^/]+)(\/sync)?$/.exec(p);
+		if (mm) {
+			const link = bankLinks.get(mm[1]);
+			if (!link || link.householdId !== hh) return problem(res, 404, 'Not found');
+			if (mm[2] && m === 'POST') {
+				const force = url.searchParams.has('force');
+				const last = link.lastManualSyncAt ? new Date(link.lastManualSyncAt).getTime() : 0;
+				const wait = last + SYNC_COOLDOWN_MS - Date.now();
+				if (!force && wait > 0) {
+					res.writeHead(429, {
+						'content-type': 'application/problem+json',
+						'retry-after': String(Math.ceil(wait / 1000))
+					});
+					res.end(
+						JSON.stringify({
+							title: 'Synced recently',
+							status: 429,
+							detail: `Try again in ${Math.ceil(wait / 60_000)} min`
+						})
+					);
+					return;
+				}
+				link.lastManualSyncAt = nowIso();
+				return send(res, 200, syncLink(link, user));
+			}
+			if (!mm[2] && m === 'PATCH') {
+				const b = await readJson(req);
+				if (typeof b.name === 'string' && b.name.trim()) link.name = b.name.trim().slice(0, 40);
+				if (typeof b.syncEnabled === 'boolean') link.syncEnabled = b.syncEnabled;
+				return send(res, 200, linkView(link));
+			}
+			if (!mm[2] && m === 'DELETE') {
+				for (const [id, x] of extAccounts) if (x.bankLinkId === link.id) extAccounts.delete(id);
+				bankLinks.delete(link.id);
+				bridge.delete(link.id);
+				record(hh, user, 'bank.unlinked', 'bank_link', null, `unlinked bank ${link.name}`);
+				return send(res, 204);
+			}
+		}
+
+		// --- v3: inbox
+		if (p === '/v1/inbox/summary' && m === 'GET') return send(res, 200, inboxSummary(hh));
+		if (p === '/v1/inbox' && m === 'GET') {
+			const status = url.searchParams.get('status') ?? 'pending';
+			const before = url.searchParams.get('before');
+			const limit = Math.min(100, Number(url.searchParams.get('limit') ?? 50));
+			const cursor = (t: Tx) => `${t.postedOn}|${t.createdAt}|${t.id}`;
+			const all = [...txs.values()]
+				.filter(
+					(t) => t.householdId === hh && t.status === status && (!before || cursor(t) < before)
+				)
+				.sort((a, b) => cursor(b).localeCompare(cursor(a)));
+			const page = all.slice(0, limit);
+			return send(res, 200, {
+				items: page.map(txView),
+				nextBefore: all.length > limit ? cursor(page[page.length - 1]) : null
+			});
+		}
+		if (p === '/v1/inbox/bulk' && m === 'POST') {
+			const b = await readJson(req);
+			const ids = Array.isArray(b.ids) ? new Set(b.ids as string[]) : null;
+			const targets = [...txs.values()].filter(
+				(t) => t.householdId === hh && t.status === 'pending' && (!ids || ids.has(t.id))
+			);
+			let confirmed = 0;
+			let ignored = 0;
+			let skipped = 0;
+			for (const t of targets) {
+				if (b.action === 'ignore') {
+					t.status = 'ignored';
+					ignored++;
+					continue;
+				}
+				const s = t.suggestion;
+				if (!s || s.kind === 'transfer' || t.confidence < 70) {
+					skipped++;
+					continue;
+				}
+				const err = confirmTx(
+					hh,
+					user,
+					t,
+					s.kind === 'category'
+						? { as: 'expense', categoryId: s.categoryId }
+						: { as: 'occurrence', itemId: s.itemId, dueDate: s.dueDate }
+				);
+				if (err) skipped++;
+				else confirmed++;
+			}
+			if (b.action === 'ignore' && ignored)
+				record(
+					hh,
+					user,
+					'transaction.ignored',
+					'transaction',
+					null,
+					`ignored ${ignored} transactions`
+				);
+			return send(res, 200, { confirmed, ignored, skipped });
+		}
+		mm = /^\/v1\/inbox\/([^/]+)\/(confirm|ignore|restore)$/.exec(p);
+		if (mm && m === 'POST') {
+			const tx = txs.get(mm[1]);
+			if (!tx || tx.householdId !== hh) return problem(res, 404, 'Not found');
+			if (mm[2] === 'confirm') {
+				const err = confirmTx(hh, user, tx, await readJson(req));
+				if (err) return problem(res, err.status, 'Cannot confirm', err.detail);
+			} else if (mm[2] === 'ignore') {
+				if (tx.status !== 'pending') return problem(res, 400, 'Not pending');
+				tx.status = 'ignored';
+				record(
+					hh,
+					user,
+					'transaction.ignored',
+					'transaction',
+					tx.id,
+					`ignored ${tx.payee ?? tx.description}`
+				);
+			} else {
+				if (tx.status === 'pending') return problem(res, 400, 'Already pending');
+				restoreTx(hh, user, tx);
+			}
+			return send(res, 200, txView(tx));
+		}
+
+		// --- v3: CSV import
+		if (p === '/v1/imports/csv' && m === 'GET')
+			return send(
+				res,
+				200,
+				[...csvImports.values()]
+					.filter((c) => c.householdId === hh)
+					.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+					.slice(0, 20)
+					.map((c) => ({
+						id: c.id,
+						filename: c.filename,
+						rowCount: c.rowCount,
+						imported: c.imported,
+						duplicates: c.duplicates,
+						createdAt: c.createdAt,
+						createdByName: users.get(c.createdBy)?.displayName ?? 'Someone'
+					}))
+			);
+		if (p === '/v1/imports/csv' && m === 'POST') {
+			const b = await readJson(req);
+			const account = accounts.get(String(b.accountId ?? ''));
+			if (!account || account.householdId !== hh || account.archived)
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { accountId: ['Unknown account'] }
+				});
+			const rows = Array.isArray(b.rows) ? (b.rows as Record<string, unknown>[]) : [];
+			if (rows.length > 5000) return problem(res, 400, 'Validation failed', 'Too many rows');
+			let imported = 0;
+			let duplicates = 0;
+			let skipped = 0;
+			const fresh: Tx[] = [];
+			for (const r of rows) {
+				const postedOn = String(r.postedOn ?? '');
+				const amountCents = r.amountCents;
+				const description = String(r.description ?? '').trim();
+				if (
+					!/^\d{4}-\d{2}-\d{2}$/.test(postedOn) ||
+					typeof amountCents !== 'number' ||
+					!Number.isInteger(amountCents) ||
+					amountCents === 0 ||
+					!description
+				) {
+					skipped++;
+					continue;
+				}
+				const tx = insertTx(hh, {
+					source: 'csv',
+					externalAccountId: null,
+					accountId: account.id,
+					externalId: null,
+					postedOn,
+					amountCents,
+					description,
+					payee: (r.payee as string | undefined)?.trim() || null,
+					memo: (r.memo as string | undefined)?.trim() || null,
+					pending: false
+				});
+				if (tx) {
+					fresh.push(tx);
+					imported++;
+				} else duplicates++;
+			}
+			detectTransfers(hh, fresh);
+			const rec: CsvImportRec = {
+				id: randomUUID(),
+				householdId: hh,
+				accountId: account.id,
+				filename: String(b.filename ?? 'import.csv').slice(0, 120),
+				rowCount: rows.length,
+				imported,
+				duplicates,
+				createdBy: user.id,
+				createdAt: nowIso()
+			};
+			csvImports.set(rec.id, rec);
+			record(
+				hh,
+				user,
+				'import.csv',
+				'csv_import',
+				rec.id,
+				`imported ${rec.filename} into ${account.name} · ${imported} new`,
+				{ imported, duplicates, skipped }
+			);
+			return send(res, 201, {
+				id: rec.id,
+				rowCount: rows.length,
+				imported,
+				duplicates,
+				skipped,
+				inboxPending: inboxSummary(hh).pending
+			});
 		}
 
 		// --- month report

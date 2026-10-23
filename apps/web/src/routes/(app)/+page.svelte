@@ -15,7 +15,7 @@
 	import PaydayCard from '#lib/components/PaydayCard.svelte';
 	import Donut from '#lib/charts/Donut.svelte';
 	import { currencySymbol, formatMoney } from '#lib/utils/money.ts';
-	import { formatMonth, today } from '#lib/utils/dates.ts';
+	import { formatMonth, relativeTime, today } from '#lib/utils/dates.ts';
 	import { occurrenceKey, optimisticToggle, togglePaid } from '#lib/utils/occurrences.ts';
 	import { apiFetch } from '#lib/utils/client.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
@@ -139,6 +139,11 @@
 			.map((t) => t.id)
 	);
 	const openTodos = $derived(todos.filter((t) => shownTodoIds.includes(t.id)));
+	// inbox card: hidden until there is something to review or a source that could produce rows
+	const inbox = $derived(data.inbox);
+	const showInbox = $derived(
+		!!inbox && (inbox.pending > 0 || inbox.linkCount > 0 || data.csvImports > 0)
+	);
 </script>
 
 <svelte:head><title>Home · CouplesCash</title></svelte:head>
@@ -199,6 +204,46 @@
 					<Icon name="x" size={18} />
 				</button>
 			</div>
+		{/if}
+
+		<!-- Inbox -->
+		{#if showInbox && inbox}
+			<a
+				href="/inbox"
+				class="card border border-base-300/60 bg-base-100 shadow-sm"
+				data-testid="inbox-card"
+			>
+				<div class="card-body flex-row items-center gap-3 p-4">
+					<span
+						class="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl {inbox.pending >
+						0
+							? 'bg-primary/10 text-primary'
+							: 'bg-base-200 text-base-content/60'}"
+					>
+						<Icon name="inbox" size={22} />
+					</span>
+					<span class="min-w-0 flex-1">
+						<span class="block font-semibold">
+							{#if inbox.pending === 0}
+								Inbox is clear
+							{:else}
+								{inbox.pending} transaction{inbox.pending === 1 ? '' : 's'} to review
+							{/if}
+						</span>
+						<span class="block text-xs text-base-content/60">
+							{#if inbox.suggested > 0}
+								{inbox.suggested} suggested
+								{#if inbox.lastSyncedAt}·
+								{/if}
+							{/if}
+							{#if inbox.lastSyncedAt}Synced {relativeTime(
+									inbox.lastSyncedAt
+								)}{:else if inbox.pending === 0}Nothing waiting from your banks or imports{/if}
+						</span>
+					</span>
+					<Icon name="chevron-right" size={18} class="text-base-content/40" />
+				</div>
+			</a>
 		{/if}
 
 		<!-- Until payday -->

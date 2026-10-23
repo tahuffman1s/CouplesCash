@@ -6,6 +6,13 @@
 	let { data }: PageProps = $props();
 	const links = $derived([
 		{
+			href: '/inbox',
+			icon: 'inbox',
+			label: 'Inbox',
+			body: 'Review transactions from your bank or a CSV',
+			badge: data.inboxPending > 0 ? data.inboxPending : 0
+		},
+		{
 			href: '/insights',
 			icon: 'chart-pie',
 			label: 'Insights',
@@ -34,6 +41,18 @@
 			icon: 'heart-handshake',
 			label: 'Couple',
 			body: data.hasHousehold ? 'Your household and partner' : 'Link with your partner'
+		},
+		{
+			href: '/settings/banks',
+			icon: 'landmark',
+			label: 'Linked banks',
+			body: 'Pull balances and transactions with SimpleFIN'
+		},
+		{
+			href: '/imports/csv',
+			icon: 'file-spreadsheet',
+			label: 'Import CSV',
+			body: 'Upload a statement export from your bank'
 		},
 		{
 			href: '/settings/household',
@@ -81,6 +100,11 @@
 						<span class="block font-medium">{l.label}</span>
 						<span class="block text-xs text-base-content/60">{l.body}</span>
 					</span>
+					{#if 'badge' in l && l.badge}
+						<span class="badge badge-sm tabular badge-primary" data-testid="inbox-badge"
+							>{l.badge}</span
+						>
+					{/if}
 					<Icon name="chevron-right" size={18} class="text-base-content/40" />
 				</a>
 			</li>

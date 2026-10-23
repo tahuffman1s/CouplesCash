@@ -3,10 +3,13 @@ import type { Problem } from '#lib/types.ts';
 export class ClientApiError extends Error {
 	readonly status: number;
 	readonly problem: Problem;
-	constructor(status: number, problem: Problem) {
+	/** Seconds from a `Retry-After` header (429), when the server sent one. */
+	readonly retryAfterSeconds: number | null;
+	constructor(status: number, problem: Problem, retryAfterSeconds: number | null = null) {
 		super(problem.detail || problem.title);
 		this.status = status;
 		this.problem = problem;
+		this.retryAfterSeconds = retryAfterSeconds;
 	}
 }
 
@@ -38,7 +41,9 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 		} catch {
 			// not json
 		}
-		throw new ClientApiError(res.status, problem);
+		const retry = res.headers.get('retry-after');
+		const seconds = retry && /^\d+$/.test(retry) ? Number(retry) : null;
+		throw new ClientApiError(res.status, problem, seconds);
 	}
 	if (res.status === 204) return undefined as T;
 	return (await res.json()) as T;

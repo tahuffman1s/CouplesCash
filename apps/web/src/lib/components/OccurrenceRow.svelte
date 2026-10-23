@@ -18,6 +18,7 @@
 
 	const overdue = $derived(!occ.paid && occ.kind !== 'income' && occ.dueDate < today());
 	const colour = $derived(occ.categoryColor ?? 'var(--color-base-300)');
+	const fromBank = $derived(occ.paid?.source === 'bank');
 	const autoPaid = $derived(!!occ.paid?.auto);
 </script>
 
@@ -36,11 +37,20 @@
 					<Icon name="zap" size={10} strokeWidth={2.5} /> Autopay
 				</span>
 			{/if}
+			{#if fromBank}
+				<span
+					class="badge shrink-0 gap-0.5 border-0 bg-info/15 px-1.5 badge-xs text-[0.65rem] font-medium text-info"
+					data-testid="from-bank"
+				>
+					<Icon name="landmark" size={10} strokeWidth={2.5} /> From bank
+				</span>
+			{/if}
 		</p>
 		<p class="truncate text-xs text-base-content/60">
 			{#if autoPaid}
 				<span class="inline-flex items-center gap-1 font-medium text-secondary">
-					<Icon name="bot" size={12} /> Auto-paid
+					<Icon name="bot" size={12} />
+					{fromBank ? 'Matched from bank' : 'Auto-paid'}
 				</span>
 				{#if showDate}<span aria-hidden="true"> · </span><span>{formatDate(occ.dueDate)}</span>{/if}
 			{:else if showDate}
@@ -66,7 +76,7 @@
 			<button
 				type="button"
 				class="btn min-h-11 rounded-full border border-base-300 btn-ghost px-3 btn-sm"
-				aria-label="Undo auto-pay for {occ.name}"
+				aria-label="{fromBank ? 'Undo bank match for' : 'Undo auto-pay for'} {occ.name}"
 				disabled={busy}
 				onclick={() => onToggle(occ)}
 			>

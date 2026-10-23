@@ -5,18 +5,18 @@ this app; the SvelteKit server (BFF) holds the auth cookies and proxies to the .
 
 ## Scripts
 
-| Command          | What it does                                                                               |
-| ---------------- | ------------------------------------------------------------------------------------------ |
-| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                         |
-| `pnpm build`     | Production build with `adapter-node` into `build/`                                         |
-| `pnpm preview`   | Serve the production build on http://localhost:4173                                        |
-| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                            |
-| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                       |
-| `pnpm lint`      | Prettier check + ESLint                                                                    |
-| `pnpm format`    | Prettier write                                                                             |
-| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money/currency, dates, pay period, push key, codes) |
-| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                             |
-| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                         |
+| Command          | What it does                                                                                    |
+| ---------------- | ----------------------------------------------------------------------------------------------- |
+| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                              |
+| `pnpm build`     | Production build with `adapter-node` into `build/`                                              |
+| `pnpm preview`   | Serve the production build on http://localhost:4173                                             |
+| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                                 |
+| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                            |
+| `pnpm lint`      | Prettier check + ESLint                                                                         |
+| `pnpm format`    | Prettier write                                                                                  |
+| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money/currency, dates, pay period, push key, codes, CSV) |
+| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                                  |
+| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                              |
 
 ## Environment variables
 
@@ -69,6 +69,22 @@ Declared in `src/env.ts` (`defineEnvVars`). Copy `.env.example` to `.env` for lo
   `GET /auth/passkeys/config` says `enabled: false`, when the context is not secure, or when the
   browser lacks WebAuthn. iPhone browsers that are not installed to the Home Screen get an
   "Add to Home Screen first" explainer instead of the push toggle.
+- **v3 screens**: `/settings/banks` (SimpleFIN explainer, paste-a-setup-token form action, per-link
+  card with inline rename / pause / **Sync now** (proxy `POST /banks/{id}/sync`, 429 → "Synced
+  recently, try again in N min" from `Retry-After`) / unlink confirm sheet; per external account a
+  mapping select with "Create account…" mini-form prefilled from the bank's name), `/inbox`
+  (dashboard card "N transactions to review", status chips via `?status=`, day groups, suggestion
+  chip → bottom sheet to pick a category or match a bill/income within ±10 days, Confirm / Ignore /
+  Restore optimistic through the proxy, **Confirm all suggested (N)** + "Ignore all pending" bulk,
+  keyset "Load more"), `/imports/csv` (3-step: account + file → papaparse in the browser
+  (dynamic import), header detection, column auto-mapping incl. debit/credit pairs, sign convention,
+  date-format detection with a live sample → `POST /imports/csv` → result card → "Review in
+  inbox"). Helpers in `src/lib/utils/csv.ts` are unit-tested. Occurrence rows paid from the inbox
+  carry a **From bank** badge (`paid.source === 'bank'`); the activity feed has icons for
+  `bank.*`, `import.csv` and `transaction.*` kinds and labels system rows "Bank sync".
+- **Graceful hiding (v3)**: `/settings/banks` shows a "not configured (DATA_KEY missing)" note
+  when `GET /banks` or the claim answers 503 `bank_sync_not_configured`; the dashboard inbox card
+  stays hidden until there is a link, a CSV import or something pending.
 - **Service worker**: also handles `push` (`{ title, body, url, tag, icon }` → notification) and
   `notificationclick` (focus an open window and navigate to `url`, else open one).
 
@@ -79,9 +95,17 @@ implementation of the API contract on port 8099) and `pnpm build && pnpm preview
 `API_URL=http://127.0.0.1:8099`. Chromium is used for both device projects. The mock covers v1 and
 v2 (activity recording, expenses with deduction, budgets, pay-period math shared with the app via
 `src/lib/utils/payperiod.ts`, todos, goals + projection, month report, autopay flags). Test-only
-helpers: `POST /__reset` and `POST /__mock/autopay?date=YYYY-MM-DD` (runs the autopay scheduler so
-the Undo UI can be exercised). Push is reported as not configured unless the mock runs with
-`MOCK_PUSH=1`; passkeys are always disabled in the mock. If a Chromium is
+helpers: `POST /__reset`, `POST /__mock/autopay?date=YYYY-MM-DD` (runs the autopay scheduler so
+the Undo UI can be exercised) and `POST /__mock/bank-sync` (bank-sync scheduler phase for every
+link). Push is reported as not configured unless the mock runs with `MOCK_PUSH=1`; passkeys are
+always disabled in the mock. **v3**: the mock embeds a fake SimpleFIN Bridge — the setup token
+`demo-token` links "Demo Bank" with a checking account (RENT PAYMENT on the 1st, KROGER, ACME
+PAYROLL, a pending COFFEE) and a credit card (NETFLIX.COM); any other token is a 400 on
+`setupToken`, and `demo-not-configured` answers 503 `bank_sync_not_configured` so one e2e covers
+that path without a second server (`MOCK_BANKS_DISABLED=1` does it for every claim). It runs a
+simplified matcher (recurring ±5 days / 2 %, learned payee rules, keyword table, transfer
+detection), dedupes by fingerprint, maps balances into accounts, and the manual sync has the 15-min
+cooldown (`?force` skips it). If a Chromium is
 preinstalled under `PLAYWRIGHT_BROWSERS_PATH` (as in CI containers) the config uses it even when
 its revision differs from the one Playwright expects; set `CHROMIUM_PATH` to point at a specific
 binary, or run `pnpm exec playwright install chromium` locally.
