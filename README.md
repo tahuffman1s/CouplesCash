@@ -8,7 +8,13 @@ goes. It runs on a Raspberry Pi in your closet, reachable from anywhere through
 a Cloudflare Tunnel — no port forwarding, no app store, no third-party service
 ever sees your numbers.
 
-> Screenshots coming soon — `docs/screenshots/{dashboard,calendar,couple-code}.png`
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" width="19%" alt="Dashboard, light" />
+  <img src="docs/screenshots/couple-code.png" width="19%" alt="Couple Code QR" />
+  <img src="docs/screenshots/calendar.png" width="19%" alt="Calendar" />
+  <img src="docs/screenshots/accounts.png" width="19%" alt="Accounts" />
+  <img src="docs/screenshots/insights-dark.png" width="19%" alt="Insights, dark" />
+</p>
 
 ## Features
 
