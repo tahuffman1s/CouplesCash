@@ -43,8 +43,11 @@ Push__Subject=${VAPID_SUBJECT:-mailto:dev@localhost}
 # Passkeys: http://localhost is a secure context, so they work in dev without TLS.
 WebAuthn__Origin=http://localhost:${WEB_PORT}
 WebAuthn__RelyingPartyName=CouplesCash
-# Background job (autopay, reminders, hygiene). Set SCHEDULER_ENABLED=false in .env to pause it.
+# Background job (autopay, reminders, hygiene, bank sync). Set SCHEDULER_ENABLED=false in .env to pause it.
 Scheduler__Enabled=${SCHEDULER_ENABLED:-true}
+# Bank sync (SimpleFIN): empty key = disabled (503 bank_sync_not_configured). Fill it with \`make secrets\`.
+Security__DataKey=${DATA_KEY:-}
+Sync__IntervalHours=${SYNC_INTERVAL_HOURS:-6}
 # ---- SvelteKit (apps/web) ----
 API_URL=http://localhost:${API_PORT}
 ORIGIN=http://localhost:${WEB_PORT}

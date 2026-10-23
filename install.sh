@@ -9,7 +9,8 @@
 #   2. installs curl, git, openssl (+ ca-certificates) if missing
 #   3. installs Docker Engine + the compose plugin, starts it, adds you to the docker group
 #   4. clones (or updates) the repo into ~/couplescash
-#   5. writes .env with fresh secrets and asks for your public URL + Cloudflare tunnel token
+#   5. writes .env with fresh secrets (JWT, Postgres, DATA_KEY for bank sync) and asks for your
+#      public URL + Cloudflare tunnel token
 #   6. pulls the arm64/amd64 images (or builds them if none are published)
 #   7. generates the Web Push (VAPID) key pair with the api image, then starts the stack
 #
@@ -339,6 +340,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 [[ -n "$(get_env JWT_SECRET)" ]]        || { set_env JWT_SECRET "$(openssl rand -base64 48 | tr -d '\n')"; ok "generated JWT_SECRET"; }
 [[ -n "$(get_env POSTGRES_PASSWORD)" ]] || { set_env POSTGRES_PASSWORD "$(openssl rand -hex 24)"; ok "generated POSTGRES_PASSWORD"; }
+# AES-256-GCM key for bank-sync credentials (SimpleFIN access URLs). Never regenerated on
+# re-runs: a new key would make every linked bank unreadable (docs/BANK-SYNC.md).
+[[ -n "$(get_env DATA_KEY)" ]]          || { set_env DATA_KEY "$(openssl rand -base64 32 | tr -d '\n')"; ok "generated DATA_KEY (bank sync; back up .env — losing it means re-linking banks)"; }
 if [[ -n "$WEB_PORT" ]]; then
   if ! [[ "$WEB_PORT" =~ ^[0-9]+$ ]] || (( WEB_PORT < 1 || WEB_PORT > 65535 )); then
     die "--port must be a number between 1 and 65535 (got '$WEB_PORT')"
@@ -493,11 +497,13 @@ if [[ "$NO_START" != 1 ]]; then
     printf '  Then Settings → "Notifications" for bill reminders (iOS: only from the installed app)\n'
     printf '  and Settings → "Passkeys" to sign in with Face ID / fingerprint.\n'
   fi
+  printf '  Settings → "Linked banks" pulls balances + transactions automatically via SimpleFIN Bridge\n'
+  printf '  (%s/month, read-only; docs/BANK-SYNC.md). Prefer not to? Import CSV statements instead.\n' "\$1.50"
   printf '\n'
 fi
 (( RELOGIN )) && printf '  Log out and back in (or run: newgrp docker) to use docker without sudo.\n\n'
 (( NEEDS_REBOOT )) && printf '  %sReboot once%s (sudo reboot) so the memory cgroup takes effect — until then Docker prints\n  "Your kernel does not support memory limit capabilities" and runs without memory limits.\n\n' "$YELLOW" "$RESET"
 printf '  Update:   curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/%s/install.sh | bash\n' "$BRANCH"
 printf '  Status:   cd %s && make ps        Logs: make logs\n' "$INSTALL_DIR"
-printf '  Backup:   make backup                 Stop: make down\n'
-printf '  Docs:     docs/RASPBERRY-PI.md, docs/NOTIFICATIONS.md, docs/PASSKEYS.md, infra/cloudflared/README.md\n\n'
+printf '  Backup:   make backup  (DB dump + .env: .env holds DATA_KEY for linked banks)   Stop: make down\n'
+printf '  Docs:     docs/RASPBERRY-PI.md, docs/BANK-SYNC.md, docs/NOTIFICATIONS.md, docs/PASSKEYS.md, infra/cloudflared/README.md\n\n'

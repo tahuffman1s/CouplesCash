@@ -58,7 +58,8 @@ explicitly to force Pi mode (for example in a VM). What `install.sh` does (it wo
 5. In Pi mode: requires arm64, makes sure NTP is on, enables **zram swap** (zstd, 25 % of RAM)
    if there is no swap, and refuses to fall back to a slow local image build unless `--build` is given.
 6. Clones the repo to `~/couplescash` (or `git pull`s it if present).
-7. Creates `.env`, generates `JWT_SECRET` and `POSTGRES_PASSWORD`, asks whether you want a
+7. Creates `.env`, generates `JWT_SECRET`, `POSTGRES_PASSWORD` and `DATA_KEY` (the key that
+   encrypts bank-sync credentials — `docs/BANK-SYNC.md`), asks whether you want a
    **Cloudflare Tunnel** (enter `PUBLIC_URL` + `TUNNEL_TOKEN`) or **LAN-only** mode
    (`http://<pi-ip>:3000`, web bound to the whole LAN; `--port N` or `WEB_PORT` in `.env` changes the port), and sets the push contact
    `VAPID_SUBJECT=mailto:<--email or admin@your-host>`.
@@ -100,7 +101,19 @@ Optional, for push reminders and passkeys (v2):
   `PUBLIC_URL`. **Keep the hostname stable** — changing it invalidates every passkey
   (`docs/PASSKEYS.md`).
 - Both need `https://`, i.e. the tunnel. They are hidden in LAN mode.
-- `SCHEDULER_ENABLED=false` pauses the in-api background job (autopay, reminders).
+- `SCHEDULER_ENABLED=false` pauses the in-api background job (autopay, reminders, bank sync).
+
+Optional, for bank sync (v3, `docs/BANK-SYNC.md`):
+
+- `DATA_KEY` — base64, 32 random bytes; AES-256-GCM key for the SimpleFIN access URLs stored
+  in the database. `install.sh` and `make secrets` fill it (`openssl rand -base64 32`). Empty =
+  bank sync hidden in the app (API `503 bank_sync_not_configured`); CSV import still works.
+  **Losing or changing it means re-linking every bank** — keep `.env` in your backups
+  (`make backup` copies it next to the dump).
+- `SYNC_INTERVAL_HOURS=6` — how often linked banks are pulled. The Bridge caches, so lower
+  values gain nothing. "Sync now" in the app is limited to once per 15 minutes per link.
+- Bank sync does **not** need `https://`; it works in LAN mode. The Pi needs outbound HTTPS
+  to `beta-bridge.simplefin.org`.
 
 Leave `ASPNETCORE_ENVIRONMENT=Production` and `API_ENABLE_DOCS=false`.
 
@@ -145,6 +158,8 @@ Open `PUBLIC_URL` on each phone, register, link with the Couple Code, and use
 **installed** app, *Settings → Notifications → Enable on this device* (iOS only
 delivers push to Home Screen apps — `docs/NOTIFICATIONS.md`) and *Settings →
 Passkeys → Add passkey* for Face ID / fingerprint sign-in (`docs/PASSKEYS.md`).
+To stop typing balances in, *Settings → Linked banks* with a SimpleFIN Bridge setup token
+(`docs/BANK-SYNC.md`), or *More → Import CSV* for a statement.
 
 ## 5. Day-two operations
 
@@ -155,11 +170,12 @@ Passkeys → Add passkey* for Face ID / fingerprint sign-in (`docs/PASSKEYS.md`)
 | Logs (all / one service) | `make logs` / `make logs S=web` |
 | Stop everything | `make down` |
 | Start again | `make tunnel-up` (or `make up` without the tunnel) |
-| Backup | `make backup` → `backups/couplescash-YYYYmmdd-HHMMSS.sql.gz` (keeps 14) |
-| Restore | `make restore FILE=backups/couplescash-….sql.gz` |
-| Rotate the JWT secret (signs everyone out) | `make secrets FORCE=1` *(also rotates the DB password — see below)* or edit `JWT_SECRET` in `.env`, then `make up` |
+| Backup | `make backup` → `backups/couplescash-YYYYmmdd-HHMMSS.sql.gz` **+** `couplescash-YYYYmmdd-HHMMSS.env` (the `.env` copy carries `DATA_KEY`; keeps 14 pairs) |
+| Restore | `make restore FILE=backups/couplescash-….sql.gz`; if the current `.env` differs from the backup's copy it tells you — copy that `.env` over and `make up` so linked banks decrypt |
+| Rotate the JWT secret (signs everyone out) | edit `JWT_SECRET` in `.env`, then `make up`. `make secrets FORCE=1` rotates **all** secrets incl. the DB password and `DATA_KEY` (**breaks every bank link**) — see below and `docs/SECURITY.md` |
 | Generate / rotate Web Push keys | `make vapid` (fills empty keys) · `make vapid FORCE=1` (rotate; every phone re-enables notifications), then `make up` |
-| Watch the background job (autopay, reminders) | `make scheduler-logs` |
+| Enable bank sync on an older install | `make secrets` (fills an empty `DATA_KEY`, leaves set values alone) then `make up`; *Settings → Linked banks* appears |
+| Watch the background job (autopay, reminders, bank sync) | `make scheduler-logs` |
 
 ### Automatic nightly backups
 
@@ -169,7 +185,8 @@ Passkeys → Add passkey* for Face ID / fingerprint sign-in (`docs/PASSKEYS.md`)
 
 Copy the `backups/` folder somewhere else occasionally (`rsync` to a laptop, a
 NAS, or `rclone` to cloud storage). A backup on the same SD card as the
-database is not a backup.
+database is not a backup. The folder contains `.env` copies (secrets, incl.
+`DATA_KEY`), so the destination should be encrypted or private storage.
 
 ### Changing the database password
 
@@ -272,6 +289,19 @@ requirement: `docs/NOTIFICATIONS.md`, `docs/PASSKEYS.md`.
 so (1) check that time zone, (2) check the Pi's clock is NTP-synchronised
 (`timedatectl`; a Pi has no RTC), (3) `make scheduler-logs`. Reminders are not
 replayed for hours the stack was down.
+
+**No "Linked banks" in Settings / "Bank sync is not configured"** — `DATA_KEY`
+is empty in `.env` (installs from before v3): `make secrets && make up`. Only
+empty values are filled; nothing else changes. Full guide: `docs/BANK-SYNC.md`.
+
+**Linked banks shows "cannot decrypt" / every link errors after a restore or
+reinstall** — the database was written with a different `DATA_KEY` than the one
+in `.env`. Copy the `couplescash-<stamp>.env` that matches the dump over `.env`
+and `make up`. If that key is gone for good, unlink and re-link each bank.
+
+**A bank shows "connection needs attention"** — the SimpleFIN Bridge lost its
+link to that bank (password change, re-authorisation). Fix it on the Bridge's
+site; nothing to do on the Pi.
 
 **Passkeys stopped working after changing the domain** — passkeys are bound to
 the hostname in `PUBLIC_URL`. Sign in with the password and register new ones;

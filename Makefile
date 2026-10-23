@@ -47,7 +47,7 @@ setup: ## Check tools, create .env with fresh secrets, install deps (one-time)
 .env:
 	@[ -f .env ] || { cp .env.example .env && chmod 600 .env && echo "Created .env from .env.example"; }
 
-secrets: .env ## Fill empty JWT_SECRET / POSTGRES_PASSWORD in .env (FORCE=1 to regenerate)
+secrets: .env ## Fill empty JWT_SECRET / POSTGRES_PASSWORD / DATA_KEY in .env (FORCE=1 regenerates all three — breaks existing bank links)
 	@fill() { \
 	  key=$$1; val=$$2; \
 	  if [ -n "$${FORCE:-}" ] || grep -qE "^$$key=\s*$$" .env; then \
@@ -55,8 +55,13 @@ secrets: .env ## Fill empty JWT_SECRET / POSTGRES_PASSWORD in .env (FORCE=1 to r
 	    echo "  set  $$key"; \
 	  else echo "  keep $$key (already set; use FORCE=1 to rotate)"; fi; \
 	}; \
+	if [ -n "$${FORCE:-}" ] && grep -qE "^DATA_KEY=.+" .env; then \
+	  echo; echo '  !!! WARNING: FORCE=1 rotates DATA_KEY. Every linked bank becomes unreadable and must be'; \
+	  echo '  !!! re-linked in Settings → Linked banks (docs/BANK-SYNC.md). Back up .env first.'; echo; \
+	fi; \
 	fill JWT_SECRET        "$$(openssl rand -base64 48 | tr -d '\n')"; \
-	fill POSTGRES_PASSWORD "$$(openssl rand -hex 24)"
+	fill POSTGRES_PASSWORD "$$(openssl rand -hex 24)"; \
+	fill DATA_KEY          "$$(openssl rand -base64 32 | tr -d '\n')"
 	@$(MAKE) vapid
 	@$(MAKE) dev-env
 
@@ -148,10 +153,10 @@ pi: ## Raspberry Pi deploy/update: pull images, (re)start stack with tunnel
 
 ##@ Data
 
-backup: ## pg_dump → backups/couplescash-<timestamp>.sql.gz (KEEP=14 rotation)
+backup: ## pg_dump → backups/couplescash-<timestamp>.sql.gz + a copy of .env (holds DATA_KEY; KEEP=14 rotation)
 	@scripts/backup.sh
 
-restore: ## Restore a dump: make restore FILE=backups/couplescash-….sql.gz
+restore: ## Restore a dump: make restore FILE=backups/couplescash-….sql.gz (restore the matching .env copy too, or bank links are unreadable)
 	@[ -n "$(FILE)" ] || { echo 'Usage: make restore FILE=backups/couplescash-YYYYmmdd-HHMMSS.sql.gz'; exit 2; }
 	@[ -f "$(FILE)" ] || { echo "No such file: $(FILE)"; exit 2; }
 	@echo "About to restore $(FILE) into the live database (api + web will be stopped)."; \
@@ -160,6 +165,11 @@ restore: ## Restore a dump: make restore FILE=backups/couplescash-….sql.gz
 	gunzip -c "$(FILE)" | $(COMPOSE) exec -T $(DB_SERVICE) psql -v ON_ERROR_STOP=1 -q -U $(DB_USER) -d $(DB_NAME)
 	$(COMPOSE) start api web
 	@echo 'Restore complete.'
+	@env_copy="$${FILE%.sql.gz}.env"; \
+	if [ -f "$$env_copy" ] && ! cmp -s "$$env_copy" .env; then \
+	  echo "Note: $$env_copy differs from the current .env. Linked banks were encrypted with the DATA_KEY in that"; \
+	  echo "      backup — copy it over .env (and \`make up\`) if Settings → Linked banks shows decryption errors."; \
+	fi
 
 ##@ Quality
 

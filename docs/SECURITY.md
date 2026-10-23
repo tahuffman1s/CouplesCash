@@ -23,6 +23,10 @@ when something goes wrong.
 7. **The push and passkey plumbing** (v2) — a push service or a network observer
    reading reminders; someone replaying a captured passkey response; a leaked
    VAPID private key letting a stranger send notifications "from" your server.
+8. **The bank-sync credential** (v3) — a copy of the database (backup, stolen SD
+   card) or of `.env` that lets someone read your bank transactions through the
+   SimpleFIN Bridge; a sync error silently hiding a dead connection; an inbox
+   action that creates or marks something in the wrong household.
 
 **Out of scope**: a fully compromised Pi (root access), a compromised
 Cloudflare account, or malware on the phone itself. Keep the OS updated, use
@@ -56,6 +60,10 @@ strong passwords on the Pi and Cloudflare, and enable 2FA on Cloudflare.
 | Passkey phishing / replay | WebAuthn credentials are bound to the rpId = host of `PUBLIC_URL`, so another origin cannot use them; the browser also checks the origin. Challenges are random, **expire after 5 minutes and are single-use**; the sign counter is checked against clones. `userVerification: required` (biometric/PIN). Login routes share the `auth` rate limit (10/min/IP). Passkeys are refused (503) unless the origin is https or localhost. | API `Auth/` (Fido2NetLib), `webauthn_challenges`, `docs/PASSKEYS.md` |
 | Background job touching the wrong household | The scheduler iterates households and runs every statement with an explicit `household_id`, exactly like a request; it has no "all households" mutation. Autopay writes `paid_by = NULL`, `auto = true`, so system actions are distinguishable from human ones and undo-able. | API `Scheduler/` |
 | "Who changed this?" / tampering by a partner | Every mutation writes an `activity_events` row in the same transaction (actor, kind, entity, summary, data) — an append-only audit trail both partners see on `/activity`. System actions have `actor_id = NULL`. | API `Data/`, migration `0002_v2.sql` |
+| Bank access URL read from a stolen database / backup | The SimpleFIN access URL (a read-only credential) is stored only as **AES-256-GCM ciphertext** (`access_url_enc`: nonce + tag + ciphertext) under `DATA_KEY`, a 32-byte key that lives **only in `.env`** (`chmod 600`) and the api container environment — never in the database, images or logs. The plaintext is never logged (logs carry link names and counts) and no route returns it. Without the key the claim endpoint is disabled (`503 bank_sync_not_configured`). The setup token is single-use and claimed server-side, so the browser never holds the credential either. | API `Security/DataProtector.cs`, `SimpleFin/`, `.env.example` `DATA_KEY`, `compose.yml` `x-api-env` |
+| Lost or rotated `DATA_KEY` | Fail closed: links that cannot be decrypted are reported as errors on the link card and in the activity feed; nothing falls back to plaintext. `make secrets FORCE=1` prints a loud warning before rotating; `make backup` copies `.env` next to the dump so a restore can decrypt. Recovery is always *re-link*, never *recover the key*. | `Makefile` `secrets`, `scripts/backup.sh`, `docs/BANK-SYNC.md` |
+| Bank connection quietly broken | The Bridge's per-connection `errors` and any sync failure are surfaced, not swallowed: `last_error` on the link, a `bank.error` activity row, and the error text on *Settings → Linked banks*. The job continues with the next link. | API `Scheduler/` bank-sync phase, web `/settings/banks` |
+| Inbox action touching the wrong household / untraceable | Inbox rows, links, external accounts, payee rules and CSV imports carry `household_id` and every statement filters on the JWT `hh` claim (foreign ids → 404). Confirm / ignore / restore / bulk / auto-match each write an `activity_events` row (`transaction.*`, `bank.*`, `import.csv`); auto-matched payments are `paid_by NULL, auto = true` and undo-able like autopay. | API `Endpoints/InboxEndpoints.cs`, `Data/`, migration `0003_imports.sql` |
 
 ## If a phone is lost or stolen
 
@@ -76,6 +84,24 @@ strong passwords on the Pi and Cloudflare, and enable 2FA on Cloudflare.
 There is nothing to do on the Pi; no data is stored on the phone except the
 cached app shell (no financial data is precached by the service worker).
 
+## If the Pi (or a backup, or `.env`) is lost or stolen
+
+The database holds password hashes, hashed refresh tokens and the **encrypted**
+bank access URLs; `.env` holds the keys. Assume whoever has both can read your
+bank transactions through the Bridge until you act:
+
+1. **SimpleFIN Bridge → your app's access → Delete access.** This revokes the
+   token server-side at the Bridge; the stolen credential is now useless even
+   if decrypted. Do this first — it needs nothing from the Pi.
+2. On the replacement Pi, **rotate `DATA_KEY` and `JWT_SECRET`** (`make secrets
+   FORCE=1` does both, plus the DB password — fine on a fresh database), restore
+   the dump, then re-link each bank with a *new* setup token
+   (`docs/BANK-SYNC.md`).
+3. Both partners change their passwords (revokes refresh tokens) and delete the
+   passkeys registered from the old installation.
+4. If the Cloudflare tunnel token was in the stolen `.env`, delete that tunnel in
+   Zero Trust and create a new one.
+
 ## Rotating `JWT_SECRET`
 
 Rotate if the secret may have leaked (e.g. a copy of `.env` was shared) or as
@@ -93,10 +119,31 @@ To force everyone to log in again *as well*, change your passwords (revokes
 refresh tokens) or, drastically: `docker compose exec db psql -U couplescash
 -c "DELETE FROM refresh_tokens;"`.
 
-`make secrets FORCE=1` regenerates **both** secrets; only do that on a fresh
-database, because `POSTGRES_PASSWORD` is baked into the Postgres data
-directory on first start (see `docs/RASPBERRY-PI.md` → *Changing the database
-password*).
+`make secrets FORCE=1` regenerates **all three** secrets (`JWT_SECRET`,
+`POSTGRES_PASSWORD`, `DATA_KEY`); only do that on a fresh database, because
+`POSTGRES_PASSWORD` is baked into the Postgres data directory on first start
+(see `docs/RASPBERRY-PI.md` → *Changing the database password*) and a new
+`DATA_KEY` makes every linked bank unreadable (below).
+
+## Rotating `DATA_KEY`
+
+`DATA_KEY` encrypts the SimpleFIN access URLs. There is no re-encryption path
+on purpose: the ciphertext is tied to the key, so **rotating the key means
+re-linking every bank** with a fresh setup token. Rotate if `.env` or a backup
+leaked, and then also revoke the old tokens at the Bridge (*Delete access*),
+because the key only protects the copy on your disk — the Bridge would still
+honour a leaked plaintext URL.
+
+```bash
+cd ~/couplescash
+make backup                                            # dump + current .env, in case
+sed -i "s|^DATA_KEY=.*|DATA_KEY=$(openssl rand -base64 32 | tr -d '\n')|" .env
+make up                                                # api now reports every link as undecryptable
+# Settings → Linked banks: unlink each bank, then link it again with a new setup token
+```
+
+`make secrets FORCE=1` does the same (and warns), but also rotates the other
+two secrets. Never paste `DATA_KEY` anywhere; it is never logged or served.
 
 ## Rotating the VAPID keys
 
@@ -134,6 +181,9 @@ at `http://api:8080`. Consequences:
   `make pi` to pick up new images (Dependabot keeps base images fresh).
 - Back up (`make backup`) and store copies off the Pi; dumps contain all
   financial data — treat them like the database (`chmod 600`, encrypted disk).
+  The backup folder now also holds a copy of `.env` per dump (it carries
+  `DATA_KEY`, without which linked banks cannot be restored) — it is a secret
+  like the dump itself.
 - `.env` is `chmod 600`; never paste it into chats or issues.
 - Time sync matters for token validation, VAPID tokens and reminder timing
   (`timedatectl`); the scheduler uses the household time zone from Settings.

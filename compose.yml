@@ -43,8 +43,14 @@ x-api-env: &api-env
   # from its host. Self-disables (503) unless the origin is https://.
   WebAuthn__Origin: ${PUBLIC_URL:-}
   WebAuthn__RelyingPartyName: CouplesCash
-  # Background scheduler (autopay, reminders, hygiene) runs inside `api`.
+  # Background scheduler (autopay, reminders, hygiene, bank sync) runs inside `api`.
   Scheduler__Enabled: ${SCHEDULER_ENABLED:-true}
+  # Bank sync (SimpleFIN Bridge). DATA_KEY is the AES-256-GCM key that encrypts
+  # each link's access URL at rest; empty = bank sync disabled (claim answers
+  # 503 bank_sync_not_configured). `make secrets` fills it. Losing or rotating
+  # it means re-linking every bank (docs/BANK-SYNC.md).
+  Security__DataKey: ${DATA_KEY:-}
+  Sync__IntervalHours: ${SYNC_INTERVAL_HOURS:-6}
   # Keep the .NET GC under the container limit: 0x8000000 = 128 MiB heap hard
   # limit inside a 192 MiB container. Workstation GC + tiered PGO for a Pi.
   DOTNET_GCHeapHardLimit: "0x8000000"

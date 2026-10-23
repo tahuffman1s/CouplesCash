@@ -3,16 +3,17 @@
 Couples' shared-finance PWA. Two users per household; manual accounts, recurring
 bills/subscriptions/income, calendar, donut chart; v2 adds push reminders, autopay
 auto-marking, activity feed, expenses + budgets, pay-period view, savings goals,
-month report, to-pay checklist, household settings and passkeys. Runs on a Raspberry
-Pi 4 via Docker Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1) and
-`docs/PLAN-V2.md` (v2) for the why.
+month report, to-pay checklist, household settings and passkeys; v3 adds bank sync
+(SimpleFIN Bridge), CSV import and a review inbox. Runs on a Raspberry Pi 4 via Docker
+Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` (v2) and
+`docs/PLAN-V3.md` (v3) for the why.
 
 ## Source of truth
 - **`docs/API-CONTRACT.md` defines every route, shape and error** (v2 routes under
-  "# v2 additions"). Web and API are built against it independently. Change the
-  contract first, then both sides.
-- `docs/PLAN.md` §5 + `docs/PLAN-V2.md` "Data model additions" are the data model;
-  `docs/PLAN.md` §7 the security checklist (non-negotiable).
+  "# v2 additions", v3 under "# v3 additions"). Web and API are built against it
+  independently. Change the contract first, then both sides.
+- `docs/PLAN.md` §5 + `docs/PLAN-V2.md` "Data model additions" + `docs/PLAN-V3.md` "Data
+  model" are the data model; `docs/PLAN.md` §7 the security checklist (non-negotiable).
 
 ## Stack
 - `apps/web` — SvelteKit 3, **Svelte 5 runes only**, TypeScript, Tailwind 4 + daisyUI 5,
@@ -22,7 +23,8 @@ Pi 4 via Docker Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1) and
   migrations (`CouplesCash.Api/Migrations/000N_name.sql`, embedded), FluentValidation,
   JWT HS256 + rotating refresh tokens, Scalar at `/scalar` when `Api__EnableDocs=true`.
   v2: Web Push (VAPID) sender, WebAuthn via Fido2NetLib, `SchedulerService` hosted
-  service (60 s tick: autopay, reminders, hygiene) inside the api process — no extra container.
+  service (60 s tick: autopay, reminders, hygiene, v3 bank sync) inside the api process — no
+  extra container. v3: SimpleFIN client, AES-256-GCM `DataProtector`, `TransactionMatcher`.
 - Postgres 16. Compose/Make/CI/docs at repo root (`compose.yml`, `Makefile`, `infra/`, `.github/`).
 
 ## Where things live
@@ -31,15 +33,19 @@ Pi 4 via Docker Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1) and
 | Endpoints | `apps/api/CouplesCash.Api/Endpoints/*Endpoints.cs` (one file per resource, `MapXxx(this RouteGroupBuilder)`) |
 | SQL / repositories | `apps/api/CouplesCash.Api/Data/` |
 | Auth, tokens, Argon2, couple codes, **passkeys (Fido2)** | `apps/api/CouplesCash.Api/Auth/` |
-| Pure engines (unit-tested, no I/O) | `apps/api/CouplesCash.Api/Domain/` — `RecurrenceEngine`, `PayPeriodEngine`, `GoalProjection`, `SchedulerRules`, `BudgetMath` |
+| Pure engines (unit-tested, no I/O) | `apps/api/CouplesCash.Api/Domain/` — `RecurrenceEngine`, `PayPeriodEngine`, `GoalProjection`, `SchedulerRules`, `BudgetMath`, **`TransactionMatcher`** (+ `BankSyncRules`, `Fingerprint`: suggestions, dedupe fingerprints, payee normalisation) |
 | Web Push (VAPID keys, sender, payloads, `--vapid` CLI) | `apps/api/CouplesCash.Api/Push/` |
-| Background job (autopay, reminders, hygiene) | `apps/api/CouplesCash.Api/Scheduler/` (`SchedulerService` hosted service; selection logic lives in `Domain/SchedulerRules.cs`) |
-| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = all v2 tables) |
+| **SimpleFIN client** (claim token, fetch accounts; protocol-shaped DTOs) | `apps/api/CouplesCash.Api/SimpleFin/` |
+| **Encryption at rest** (AES-256-GCM, `Security__DataKey`) | `apps/api/CouplesCash.Api/Security/DataProtector.cs` |
+| **Banks / inbox / CSV endpoints** | `Endpoints/BankEndpoints.cs`, `Endpoints/InboxEndpoints.cs`, `Endpoints/ImportEndpoints.cs` |
+| Background job (autopay, reminders, hygiene, **bank sync + auto-match**) | `apps/api/CouplesCash.Api/Scheduler/` (`SchedulerService` hosted service; selection logic lives in `Domain/SchedulerRules.cs`) |
+| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = all v2 tables, `0003_imports.sql` = v3) |
 | API tests | `apps/api/CouplesCash.Api.Tests/` (xunit) |
 | Routes (pages + form actions) | `apps/web/src/routes/**/+page.svelte`, `+page.server.ts` |
 | API client + types | `apps/web/src/lib/server/api.ts`, `apps/web/src/lib/types.ts` |
 | Settings routes (profile, notifications, passkeys, household) | `apps/web/src/routes/(app)/settings/**`, `(app)/settings/household` |
 | v2 feature routes | `(app)/activity`, `expenses`, `todos`, `goals`, `payperiod`, `insights/report` |
+| **v3 routes** (linked banks, review inbox, CSV import) | `(app)/settings/banks`, `(app)/inbox`, `(app)/imports/csv`; client-side CSV parsing/mapping in `src/lib/utils/csv.ts` |
 | Service worker (push display + click → `url`) | `apps/web/src/service-worker/index.ts` |
 | Components | `apps/web/src/lib/components/` |
 | Browser proxy to API | `apps/web/src/routes/api/[...path]/+server.ts` (needs `X-Requested-With: CouplesCash`) |
@@ -53,6 +59,8 @@ make dev-db | dev-api | dev-web
 make up | down | logs S=api | ps        # full stack in Docker (prod-like)
 make scheduler-logs                      # api logs filtered to the background job
 make vapid                               # fill empty VAPID_* in .env (part of make secrets; FORCE=1 rotates)
+make secrets                             # fill empty JWT_SECRET / POSTGRES_PASSWORD / DATA_KEY (FORCE=1 rotates — breaks bank links)
+make backup                              # DB dump + .env copy (DATA_KEY) → backups/
 make test | lint | fmt                   # all languages
 make pi | backup | restore FILE=…        # Raspberry Pi ops
 cd apps/web && pnpm dev | check | lint | format | build | exec playwright test
@@ -67,7 +75,10 @@ Native dev env comes from `.env.dev` (generated by `scripts/dev-env.sh` from `.e
 `Push__VapidPrivateKey`, `Push__Subject` (mailto:; all empty → push endpoints 503
 `push_not_configured`) · `WebAuthn__Origin` (= `PUBLIC_URL`; passkeys 503 unless https or
 localhost), `WebAuthn__RelyingPartyId` (optional, derived from origin host),
-`WebAuthn__RelyingPartyName` (`CouplesCash`) · `Scheduler__Enabled` (default true).
+`WebAuthn__RelyingPartyName` (`CouplesCash`) · `Scheduler__Enabled` (default true) ·
+`Security__DataKey` (base64 32 bytes = `.env` `DATA_KEY`; empty → bank sync disabled, claim
+503 `bank_sync_not_configured`, existing links report decrypt errors) · `Sync__IntervalHours`
+(6, = `SYNC_INTERVAL_HOURS`) · `Sync__ManualCooldownMinutes` (15) · `SimpleFin__BaseUrl` (tests only).
 Compose maps `.env` → these in `compose.yml` `x-api-env`; `scripts/dev-env.sh` does the same
 for native dev. `--migrate` and `--vapid` must exit before any config validation.
 
@@ -98,6 +109,14 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
 - **Passkeys**: challenges 5-min TTL, single-use; rpId = host of `WebAuthn__Origin`.
 - **Activity**: every mutation writes `activity_events` in the same transaction (system
   actions `actor_id NULL`).
+- **Bank credentials** only via `Security/DataProtector.cs` (AES-256-GCM, `Security__DataKey`);
+  **never log or return an access URL** or a setup token — logs carry link names and counts.
+  Rotating the key = re-link; no re-encryption path. Bridge `errors` are surfaced (link
+  `last_error` + `bank.error` activity), never swallowed.
+- **Inbox**: confirm-as-expense creates the expense with **`deduct = false`** (the synced balance
+  already includes it); confirm-as-occurrence marks it paid with the bank amount; auto-match
+  writes `paid_by NULL, auto true` and unpaying restores the inbox row. Bulk confirm only takes
+  confidence ≥ 70. `credit`/`loan` balances from the Bridge are stored as positive owed.
 - Containers: non-root, read-only FS, listen on 8080 (api) / 3000 (web). Don't add `ports:` to api/db.
 - Commit messages: conventional (`feat(api): …`, `fix(web): …`, `chore(infra): …`).
 
@@ -118,6 +137,7 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
 - `cd apps/web && pnpm check && pnpm lint && pnpm build && pnpm exec playwright test` ✅
 - `docker compose config -q` ✅ if you touched compose/env; `bash -n` + `shellcheck -S style`
   for `install.sh scripts/*.sh`; `make -n <target>` for Makefile changes.
-- Push/passkey UI hidden when the API answers 503 (not configured / insecure context).
+- Push/passkey UI hidden when the API answers 503 (not configured / insecure context);
+  Linked banks shows a "not configured" state on 503 `bank_sync_not_configured`.
 - Contract updated if the API surface changed; `CLAUDE.md`/docs updated if commands or paths moved.
 - No secrets, no `console.log`/`Console.WriteLine` debugging left behind, no new `ports:` on api/db.

@@ -6,7 +6,9 @@ ritual with one private dashboard: every bank balance, every bill and
 subscription, a calendar of what is due, and a pie chart of where the money
 goes. It runs on a Raspberry Pi in your closet, reachable from anywhere through
 a Cloudflare Tunnel — no port forwarding, no app store, no third-party service
-ever sees your numbers.
+ever sees your numbers (the one optional exception is a $1.50/month
+[SimpleFIN Bridge](https://beta-bridge.simplefin.org) link, if you choose to
+have balances and transactions pulled in instead of typing them).
 
 <p align="center">
   <img src="docs/screenshots/dashboard.png" width="19%" alt="Dashboard, light" />
@@ -19,7 +21,7 @@ ever sees your numbers.
 ## Features
 
 - **Couple Code** linking: a styled QR with a heart in the middle (or an 8-character code to type); 10-minute expiry, single use.
-- **Accounts**: checking, savings, credit, cash, investment, loan — manual balances with history sparkline. No bank linking, by design.
+- **Accounts**: checking, savings, credit, cash, investment, loan — balances with history sparkline, typed in or synced from your bank.
 - **Bills, subscriptions, income** with real recurrence (weekly → yearly, month-end clamping), mark occurrences paid, monthly-equivalent totals.
 - **Calendar** of everything due, **Dashboard** with net worth and "due in the next 14 days", **Insights** donut by category.
 - **Push reminders** (v2): "Electric is due tomorrow · $142.50" on both phones N days before, at your hour, in your household's time zone; optional partner-activity pushes. Web Push with VAPID keys generated on your Pi — no third-party notification service. [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)
@@ -32,6 +34,9 @@ ever sees your numbers.
 - **To-pay checklist** (v2): shared list for the things that aren't bills — "Transfer $200 to savings".
 - **Household settings** (v2): currency, week start, default account, time zone, pay period.
 - **Passkeys** (v2): sign in with Face ID / fingerprint (WebAuthn, discoverable credentials); password stays as fallback. [docs/PASSKEYS.md](docs/PASSKEYS.md)
+- **Bank sync** (v3): link your banks through [SimpleFIN Bridge](https://beta-bridge.simplefin.org) — read-only, flat $1.50/month, built for self-hosters. Balances and transactions arrive every 6 hours (or *Sync now*); credentials stay encrypted on the Pi. [docs/BANK-SYNC.md](docs/BANK-SYNC.md)
+- **CSV import** (v3): for banks the Bridge can't reach — pick a file, map columns (signed amount or debit/credit), duplicates are skipped.
+- **Review inbox** (v3): every imported transaction gets a suggestion — a category, a bill it pays ("Rent · due Nov 1", marks it paid), or "transfer" — and you confirm, ignore or bulk-confirm. Payees you've confirmed once are matched automatically next time, with Undo.
 - **Installable PWA** on iOS Safari and Android Chrome; light/dark follows the device.
 - **Secure by default**: Argon2id, 15-minute JWTs with rotating refresh tokens, household-scoped SQL, rate limiting, strict headers, non-root read-only containers, API never exposed to the internet. See [docs/SECURITY.md](docs/SECURITY.md).
 - **Pi-sized**: the whole stack idles at ~300 MB RAM; prebuilt `arm64` images from GHCR.
@@ -59,7 +64,7 @@ ever sees your numbers.
 | Edge | cloudflared (tunnel) · optional Cloudflare Access |
 | Ops | Docker Compose · Makefile · GitHub Actions → multi-arch images on GHCR |
 
-The API contract between web and api is [docs/API-CONTRACT.md](docs/API-CONTRACT.md); the build plan is [docs/PLAN.md](docs/PLAN.md).
+The API contract between web and api is [docs/API-CONTRACT.md](docs/API-CONTRACT.md); the build plans are [docs/PLAN.md](docs/PLAN.md), [PLAN-V2](docs/PLAN-V2.md) and [PLAN-V3](docs/PLAN-V3.md). The only outbound connections the stack makes are to Cloudflare (tunnel), the push services (if enabled) and — only if you link a bank — the SimpleFIN Bridge.
 
 ## Quick start (development on Linux)
 
@@ -71,8 +76,10 @@ make setup      # checks tools, creates .env with fresh secrets, restores deps
 make dev        # Postgres in Docker; API (dotnet watch) + web (vite) natively
 ```
 
-`make setup` runs `make secrets`, which also generates the Web Push (VAPID) key pair
-(`make vapid`, via `dotnet run -- --vapid`); without the keys push is simply disabled.
+`make setup` runs `make secrets`, which generates `JWT_SECRET`, `POSTGRES_PASSWORD` and
+`DATA_KEY` (bank-sync encryption key) and the Web Push (VAPID) key pair (`make vapid`, via
+`dotnet run -- --vapid`); without the VAPID keys push is simply disabled, without `DATA_KEY`
+bank sync is.
 Passkeys work on `http://localhost` without TLS.
 
 Open <http://localhost:5173>. API docs at <http://localhost:8080/scalar>.
@@ -121,9 +128,9 @@ CouplesCash/
 ├─ infra/
 │  ├─ cloudflared/README.md  Tunnel + Access setup
 │  └─ postgres/postgresql.conf   Pi-tuned Postgres config
-├─ install.sh                one-line installer (any 64-bit Linux / Pi); generates VAPID keys
-├─ scripts/                  dev.sh · dev-env.sh · backup.sh
-├─ docs/                     PLAN · PLAN-V2 · API-CONTRACT · RASPBERRY-PI · SECURITY · NOTIFICATIONS · PASSKEYS
+├─ install.sh                one-line installer (any 64-bit Linux / Pi); generates secrets + VAPID keys
+├─ scripts/                  dev.sh · dev-env.sh · backup.sh (DB dump + .env copy)
+├─ docs/                     PLAN · PLAN-V2 · PLAN-V3 · API-CONTRACT · RASPBERRY-PI · SECURITY · NOTIFICATIONS · PASSKEYS · BANK-SYNC
 ├─ .vscode/ · .devcontainer/ · .github/
 ├─ compose.yml               db · migrate · api · web (· cloudflared via --profile tunnel)
 ├─ compose.dev.yml           publishes db on 127.0.0.1:5432 for native dev
@@ -134,9 +141,9 @@ CouplesCash/
 
 ## Documentation
 
-- [Build plan](docs/PLAN.md) · [v2 plan](docs/PLAN-V2.md) · [API contract](docs/API-CONTRACT.md)
+- [Build plan](docs/PLAN.md) · [v2 plan](docs/PLAN-V2.md) · [v3 plan](docs/PLAN-V3.md) · [API contract](docs/API-CONTRACT.md)
 - [Raspberry Pi guide](docs/RASPBERRY-PI.md) · [Cloudflare Tunnel](infra/cloudflared/README.md)
-- [Push notifications](docs/NOTIFICATIONS.md) · [Passkeys](docs/PASSKEYS.md)
+- [Bank sync, CSV import & inbox](docs/BANK-SYNC.md) · [Push notifications](docs/NOTIFICATIONS.md) · [Passkeys](docs/PASSKEYS.md)
 - [Security](docs/SECURITY.md)
 - [CLAUDE.md](CLAUDE.md) — conventions for humans and agents
 

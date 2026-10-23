@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# `make backup`: compressed pg_dump of the running db container into ./backups.
-# Usage: scripts/backup.sh [KEEP=14]   — keeps the newest $KEEP dumps.
+# `make backup`: compressed pg_dump of the running db container into ./backups,
+# plus a copy of .env next to it (couplescash-<stamp>.env, mode 600). The dump
+# alone cannot restore linked banks: their SimpleFIN credentials are encrypted
+# with DATA_KEY, which lives only in .env.
+# Usage: scripts/backup.sh [KEEP=14]   — keeps the newest $KEEP dump+env pairs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,6 +15,7 @@ DB_USER="${DB_USER:-couplescash}"
 DB_NAME="${DB_NAME:-couplescash}"
 stamp="$(date +%Y%m%d-%H%M%S)"
 out="${BACKUP_DIR}/couplescash-${stamp}.sql.gz"
+env_out="${BACKUP_DIR}/couplescash-${stamp}.env"
 
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
@@ -34,10 +38,23 @@ chmod 600 "$out"
 size="$(du -h "$out" | cut -f1)"
 echo "wrote $out ($size)"
 
-# Rotation: keep the newest $KEEP dumps.
+# .env holds DATA_KEY (bank credentials), JWT_SECRET, VAPID keys and the DB
+# password — without it a restored dump has unreadable bank links. Same
+# permissions as the dump; treat the folder as secret.
+if [[ -f .env ]]; then
+  install -m 600 .env "$env_out"
+  echo "wrote $env_out (DATA_KEY, JWT_SECRET, VAPID keys — keep it with the dump)"
+else
+  echo "backup.sh: no .env found — bank links cannot be restored from the dump alone" >&2
+fi
+
+# Rotation: keep the newest $KEEP dumps, then drop .env copies whose dump is gone.
 mapfile -t old < <(find "$BACKUP_DIR" -maxdepth 1 -name 'couplescash-*.sql.gz' -printf '%T@ %p\n' \
   | sort -rn | cut -d' ' -f2- | tail -n +"$((KEEP + 1))")
 if (( ${#old[@]} > 0 )); then
   rm -f "${old[@]}"
   echo "pruned ${#old[@]} old backup(s), keeping $KEEP"
 fi
+for env_copy in "$BACKUP_DIR"/couplescash-*.env; do
+  [[ -f "$env_copy" && ! -f "${env_copy%.env}.sql.gz" ]] && rm -f "$env_copy"
+done
