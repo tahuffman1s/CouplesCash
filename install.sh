@@ -384,7 +384,7 @@ else
     "${DOCKER[@]}" compose build
   elif ! "${DOCKER[@]}" compose --profile tunnel pull --ignore-buildable 2>/dev/null; then
     if [[ "${PI_PULL_ONLY:-0}" == 1 ]]; then
-      die "no published images found for IMAGE_PREFIX/IMAGE_TAG in .env. On a Pi, pull prebuilt images (check CI published them) or re-run with --build to compile locally (15–30 min)."
+      die "could not pull the images. Either CI has not published them yet, or the GHCR packages are private (GitHub → your profile → Packages → couplescash-api/web → Package settings → Change visibility → Public). Alternatively 'docker login ghcr.io' first, or re-run with --build to compile locally (15–30 min on a Pi)."
     fi
     warn "no published images found for this branch/arch — building locally"
     "${DOCKER[@]}" compose build

@@ -210,6 +210,13 @@ Check `docker stats`. The `DOTNET_GCHeapHardLimit` and `mem_limit` in
 added heavy features, raise `api`'s `mem_limit` to `256m`. Add zram
 (`install.sh --pi` sets this up automatically).
 
+**`docker compose pull` says `denied` / `unauthorized`** — the GHCR packages that
+CI publishes are **private by default**. One-time fix on GitHub: your profile →
+*Packages* → `couplescash-api` and `couplescash-web` → *Package settings* →
+*Change visibility* → Public. (Or `docker login ghcr.io` on the Pi with a
+read-only personal access token.) Images are published from the repository's
+default branch and from `v*` tags.
+
 **`migrate` exits non-zero** — `make logs S=migrate`. The usual cause is an
 unreachable database (wrong `POSTGRES_PASSWORD` after a manual change) or a
 broken migration script. The `api` service will not start until `migrate`
