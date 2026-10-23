@@ -69,21 +69,29 @@ VS Code: open `CouplesCash.code-workspace`, install the recommended
 extensions, press F5 → **Full stack** (debugs the API, runs the web dev server).
 A `.devcontainer` is included if you prefer a container.
 
-## Deploy to a Raspberry Pi 4
+## Deploy to a Raspberry Pi 4 (or any 64-bit Linux box)
 
-Full guide: [docs/RASPBERRY-PI.md](docs/RASPBERRY-PI.md). The short version:
+One line. It installs Docker and the compose plugin for your distro, clones the repo to
+`~/couplescash`, generates secrets, asks for your public URL and Cloudflare tunnel token,
+pulls the arm64/amd64 images and starts everything:
 
-1. Flash **Raspberry Pi OS Lite (64-bit)** with SSH enabled; boot; `ssh pi@…`.
-2. `curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/main/scripts/pi-install.sh | bash`
-   (installs Docker, clones to `~/couplescash`, generates secrets).
-3. Log out and back in so `docker` works without `sudo`.
-4. In Cloudflare Zero Trust create a tunnel and a public hostname `cash.yourdomain.com → http://web:3000` ([infra/cloudflared/README.md](infra/cloudflared/README.md)).
-5. `cd ~/couplescash && nano .env` → set `PUBLIC_URL=https://cash.yourdomain.com` and `TUNNEL_TOKEN=…`.
-6. `make pi` — pulls the arm64 images and starts db → migrate → api → web → cloudflared.
-7. `make ps` until everything is `healthy`.
-8. Open `https://cash.yourdomain.com` on phone 1 → **Register**.
-9. Phone 2 → Register → **Couple** → scan phone 1's Couple Code.
-10. Settings → **Install app** on both phones. Later: `make pi` to update, `make backup` nightly.
+```bash
+curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/main/install.sh | bash
+```
+
+Supported: Raspberry Pi OS (64-bit), Debian, Ubuntu, Fedora, RHEL/Rocky/Alma, Arch, Alpine,
+openSUSE. Re-run the same line later to update. Non-interactive example:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/main/install.sh \
+  | bash -s -- -y --public-url https://cash.example.com --tunnel-token "$TUNNEL_TOKEN"
+# home-network only, no tunnel:   | bash -s -- -y --lan
+# just install + configure:       | bash -s -- --no-start
+```
+
+Then: open your URL on phone 1 → **Register**; phone 2 → Register → **Couple** → scan phone 1's
+Couple Code; Settings → **Install app** on both. Full guide with troubleshooting:
+[docs/RASPBERRY-PI.md](docs/RASPBERRY-PI.md). Tunnel setup: [infra/cloudflared/README.md](infra/cloudflared/README.md).
 
 ## Project layout
 
@@ -95,7 +103,8 @@ CouplesCash/
 ├─ infra/
 │  ├─ cloudflared/README.md  Tunnel + Access setup
 │  └─ postgres/postgresql.conf   Pi-tuned Postgres config
-├─ scripts/                  dev.sh · dev-env.sh · backup.sh · pi-install.sh
+├─ install.sh                one-line installer (any 64-bit Linux / Pi)
+├─ scripts/                  dev.sh · dev-env.sh · backup.sh · pi-install.sh (→ install.sh)
 ├─ docs/                     PLAN · API-CONTRACT · RASPBERRY-PI · SECURITY
 ├─ .vscode/ · .devcontainer/ · .github/
 ├─ compose.yml               db · migrate · api · web (· cloudflared via --profile tunnel)
