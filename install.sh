@@ -17,6 +17,9 @@
 #   --branch NAME        COUPLESCASH_BRANCH   git branch to install     (default main)
 #   --public-url URL     PUBLIC_URL           e.g. https://cash.example.com
 #   --tunnel-token TOK   TUNNEL_TOKEN         Cloudflare tunnel token (omit for LAN-only mode)
+#   --pi                 COUPLESCASH_PI=1     Raspberry Pi mode: require arm64, set up zram swap, check NTP,
+#                                             and refuse to build images locally (pull only). Auto-detected
+#                                             on real Pi hardware; the flag forces it (e.g. in a VM/container).
 #   --lan                COUPLESCASH_LAN=1    skip the tunnel; serve http://<this-host>:3000 on the LAN
 #   --no-start           COUPLESCASH_NO_START=1   install and configure, but don't start containers
 #   --build              COUPLESCASH_BUILD=1  build images locally instead of pulling (slow on a Pi)
@@ -29,6 +32,7 @@ INSTALL_DIR="${COUPLESCASH_DIR:-$HOME/couplescash}"
 BRANCH="${COUPLESCASH_BRANCH:-main}"
 PUBLIC_URL="${PUBLIC_URL:-}"
 TUNNEL_TOKEN="${TUNNEL_TOKEN:-}"
+PI_MODE="${COUPLESCASH_PI:-0}"
 LAN_MODE="${COUPLESCASH_LAN:-0}"
 NO_START="${COUPLESCASH_NO_START:-0}"
 BUILD_LOCAL="${COUPLESCASH_BUILD:-0}"
@@ -36,7 +40,7 @@ NONINTERACTIVE="${NONINTERACTIVE:-0}"
 
 usage() {
   if [[ -f "$0" ]]; then sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
-  else printf 'CouplesCash installer. Options: --dir DIR --branch NAME --public-url URL --tunnel-token TOK --lan --no-start --build -y\n'; fi
+  else printf 'CouplesCash installer. Options: --pi --lan --dir DIR --branch NAME --public-url URL --tunnel-token TOK --no-start --build -y\n'; fi
 }
 
 while (( $# )); do
@@ -45,6 +49,7 @@ while (( $# )); do
     --branch) BRANCH="$2"; shift 2 ;;
     --public-url) PUBLIC_URL="$2"; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN="$2"; shift 2 ;;
+    --pi) PI_MODE=1; shift ;;
     --lan) LAN_MODE=1; shift ;;
     --no-start) NO_START=1; shift ;;
     --build) BUILD_LOCAL=1; shift ;;
@@ -139,9 +144,15 @@ else
 fi
 
 if grep -qi raspberry /proc/device-tree/model 2>/dev/null; then
-  IS_PI=1; ok "$(tr -d '\0' </proc/device-tree/model)"
-else
-  IS_PI=0
+  PI_MODE=1; ok "$(tr -d '\0' </proc/device-tree/model)"
+elif [[ "$PI_MODE" == 1 ]]; then
+  ok "Raspberry Pi mode forced with --pi"
+fi
+if [[ "$PI_MODE" == 1 ]]; then
+  [[ "$ARCH" == aarch64 || "$ARCH" == arm64 ]] || die "--pi needs a 64-bit ARM OS (got $ARCH). Flash Raspberry Pi OS (64-bit)."
+  if [[ "$BUILD_LOCAL" == 1 ]]; then
+    warn "--build on a Pi 4 takes 15–30 minutes and ~2 GB of RAM; pulling prebuilt images is strongly preferred"
+  fi
 fi
 
 # --- 2. base packages ---------------------------------------------------------
@@ -243,20 +254,31 @@ if [[ ! -s "$DAEMON_JSON" ]]; then
   ok "wrote $DAEMON_JSON (log rotation, live-restore)"
 fi
 
-# --- 4. Pi niceties -----------------------------------------------------------
-if (( IS_PI )); then
-  step "Raspberry Pi checks"
+# --- 4. Raspberry Pi mode -----------------------------------------------------
+if [[ "$PI_MODE" == 1 ]]; then
+  step "Raspberry Pi setup"
+  # Login tokens are time-based; a Pi has no RTC, so make sure NTP is on.
   if command -v timedatectl >/dev/null 2>&1; then
     if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qi yes; then
-      ok "clock synchronised (login tokens are time-based)"
+      ok "clock synchronised via NTP"
     else
       $SUDO timedatectl set-ntp true >/dev/null 2>&1 || true
       warn "clock not yet NTP-synchronised; check 'timedatectl' if logins fail"
     fi
   fi
-  if ! swapon --show --noheadings 2>/dev/null | grep -q .; then
-    warn "no swap configured. Optional: sudo apt-get install -y zram-tools"
+  # Compressed swap in RAM: cheap insurance against OOM on a 2 GB Pi, and no SD-card wear.
+  if swapon --show --noheadings 2>/dev/null | grep -q .; then
+    ok "swap active: $(swapon --show --noheadings --bytes 2>/dev/null | awk '{s+=$3} END {printf "%d MB", s/1024/1024}')"
+  elif [[ "$PKG" == apt ]]; then
+    pkg_install zram-tools >/dev/null
+    printf 'ALGO=zstd\nPERCENT=25\n' | $SUDO tee /etc/default/zramswap >/dev/null
+    $SUDO systemctl enable --now zramswap >/dev/null 2>&1 || $SUDO systemctl restart zramswap >/dev/null 2>&1 || true
+    ok "zram swap enabled (zstd, 25% of RAM)"
+  else
+    warn "no swap configured — consider enabling zram for your distro"
   fi
+  # Image pulls are much faster than local builds on a Pi 4; make the fallback explicit.
+  PI_PULL_ONLY=1
 fi
 
 # --- 5. repository ------------------------------------------------------------
@@ -361,7 +383,10 @@ else
     warn "building images locally — on a Pi 4 this takes 15–30 minutes"
     "${DOCKER[@]}" compose build
   elif ! "${DOCKER[@]}" compose --profile tunnel pull --ignore-buildable 2>/dev/null; then
-    warn "no published images found for this branch/arch — building locally (slow on a Pi)"
+    if [[ "${PI_PULL_ONLY:-0}" == 1 ]]; then
+      die "no published images found for IMAGE_PREFIX/IMAGE_TAG in .env. On a Pi, pull prebuilt images (check CI published them) or re-run with --build to compile locally (15–30 min)."
+    fi
+    warn "no published images found for this branch/arch — building locally"
     "${DOCKER[@]}" compose build
   else
     ok "images pulled"

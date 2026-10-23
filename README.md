@@ -85,6 +85,8 @@ openSUSE. Re-run the same line later to update. Non-interactive example:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/main/install.sh \
   | bash -s -- -y --public-url https://cash.example.com --tunnel-token "$TUNNEL_TOKEN"
+# force Raspberry Pi mode (auto-detected on real Pi hardware; adds zram swap, NTP check, pull-only):
+#                                  | bash -s -- --pi
 # home-network only, no tunnel:   | bash -s -- -y --lan
 # just install + configure:       | bash -s -- --no-start
 ```
@@ -104,7 +106,7 @@ CouplesCash/
 │  ├─ cloudflared/README.md  Tunnel + Access setup
 │  └─ postgres/postgresql.conf   Pi-tuned Postgres config
 ├─ install.sh                one-line installer (any 64-bit Linux / Pi)
-├─ scripts/                  dev.sh · dev-env.sh · backup.sh · pi-install.sh (→ install.sh)
+├─ scripts/                  dev.sh · dev-env.sh · backup.sh
 ├─ docs/                     PLAN · API-CONTRACT · RASPBERRY-PI · SECURITY
 ├─ .vscode/ · .devcontainer/ · .github/
 ├─ compose.yml               db · migrate · api · web (· cloudflared via --profile tunnel)

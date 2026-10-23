@@ -42,10 +42,12 @@ SSH in and run the installer. It is idempotent — re-running it is safe and is
 also how you update.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/main/install.sh | bash -s -- --pi
 ```
 
-What it does (`install.sh`, works on any 64-bit Linux, not just the Pi):
+`--pi` is auto-detected on real Pi hardware, so the plain one-liner works too; pass it
+explicitly to force Pi mode (for example in a VM). What `install.sh` does (it works on any
+64-bit Linux, not just the Pi):
 
 1. Verifies a 64-bit CPU, RAM, and detects the package manager (apt, dnf, pacman, apk, zypper).
 2. Installs `curl git openssl ca-certificates` if missing.
@@ -53,16 +55,17 @@ What it does (`install.sh`, works on any 64-bit Linux, not just the Pi):
    families, distro packages elsewhere), adds your user to the `docker` group, enables the service.
 4. Writes `/etc/docker/daemon.json` with log rotation (3 × 10 MB per
    container) and `live-restore` — only if the file does not already exist.
-5. On a Pi: checks NTP and prints a zram hint if there is no swap.
+5. In Pi mode: requires arm64, makes sure NTP is on, enables **zram swap** (zstd, 25 % of RAM)
+   if there is no swap, and refuses to fall back to a slow local image build unless `--build` is given.
 6. Clones the repo to `~/couplescash` (or `git pull`s it if present).
 7. Creates `.env`, generates `JWT_SECRET` and `POSTGRES_PASSWORD`, and asks whether you want a
    **Cloudflare Tunnel** (enter `PUBLIC_URL` + `TUNNEL_TOKEN`) or **LAN-only** mode
    (`http://<pi-ip>:3000`, web bound to the whole LAN).
 8. Pulls the images (falls back to building locally) and starts the stack, waiting for health.
 
-Flags: `--lan`, `--public-url URL`, `--tunnel-token TOK`, `--no-start`, `--build`, `--branch NAME`,
+Flags: `--pi`, `--lan`, `--public-url URL`, `--tunnel-token TOK`, `--no-start`, `--build`, `--branch NAME`,
 `--dir DIR`, `-y` (non-interactive). Each also has an environment-variable form; `install.sh --help`
-lists them. `scripts/pi-install.sh` is kept as an alias that runs `install.sh`.
+lists them.
 
 If it added you to the `docker` group, **log out and back in** (or `newgrp
 docker`) before continuing.
@@ -205,7 +208,7 @@ CI (check `IMAGE_PREFIX`/`IMAGE_TAG` in `.env`), or CI has not yet run on
 Check `docker stats`. The `DOTNET_GCHeapHardLimit` and `mem_limit` in
 `compose.yml` are tuned for the stock app; if you raised `max_connections` or
 added heavy features, raise `api`'s `mem_limit` to `256m`. Add zram
-(`install.sh` prints the recipe when it finds no swap).
+(`install.sh --pi` sets this up automatically).
 
 **`migrate` exits non-zero** — `make logs S=migrate`. The usual cause is an
 unreachable database (wrong `POSTGRES_PASSWORD` after a manual change) or a
