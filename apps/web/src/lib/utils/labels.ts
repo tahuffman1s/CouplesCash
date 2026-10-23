@@ -94,3 +94,27 @@ export const ACCOUNT_ICONS = [
 	'house',
 	'car'
 ] as const;
+
+export const GOAL_ICONS = [
+	'piggy-bank',
+	'plane',
+	'house',
+	'car',
+	'gift',
+	'graduation-cap',
+	'heart',
+	'party-popper',
+	'shield',
+	'sparkles'
+] as const;
+
+/** Activity kinds that the scheduler (not a person) produces. */
+export function isSystemActivity(kind: string): boolean {
+	return kind === 'occurrence.autopaid';
+}
+
+/** Human label for an activity actor: the person's name, or "Autopay" for scheduler events. */
+export function activityActor(actorName: string | null, kind: string): string {
+	if (actorName) return actorName;
+	return isSystemActivity(kind) ? 'Autopay' : 'Someone';
+}

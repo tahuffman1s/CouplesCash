@@ -9,6 +9,7 @@
 	import EmptyState from '#lib/components/EmptyState.svelte';
 	import NoHousehold from '#lib/components/NoHousehold.svelte';
 	import AccountCard from '#lib/components/AccountCard.svelte';
+	import GoalCard from '#lib/components/GoalCard.svelte';
 
 	let { data }: PageProps = $props();
 
@@ -51,7 +52,7 @@
 <main class="flex flex-col gap-4 px-4 pt-2">
 	{#if !data.accounts}
 		<NoHousehold />
-	{:else if data.accounts.length === 0}
+	{:else if data.accounts.length === 0 && data.goals.length === 0}
 		<EmptyState
 			icon="wallet"
 			title="No accounts yet"
@@ -85,6 +86,15 @@
 			</div>
 		</section>
 
+		{#if data.accounts.length === 0}
+			<EmptyState
+				icon="wallet"
+				title="No accounts yet"
+				body="Add checking, savings, credit cards, loans. Balances are updated by hand."
+				cta="Add your first account"
+				href="/accounts/new"
+			/>
+		{/if}
 		{#each groups as g (g.type)}
 			<section aria-labelledby="group-{g.type}">
 				<div class="mb-2 flex items-baseline justify-between px-1">
@@ -103,5 +113,37 @@
 				</div>
 			</section>
 		{/each}
+
+		<section aria-labelledby="goals" data-testid="goals-section">
+			<div class="mb-2 flex items-baseline justify-between px-1">
+				<h2 id="goals" class="text-sm font-semibold tracking-wide text-base-content/70 uppercase">
+					Goals
+				</h2>
+				<a
+					href={data.goals.length ? '/goals' : '/goals/new'}
+					class="link text-sm link-primary no-underline"
+				>
+					{data.goals.length ? 'See all' : 'Add a goal'}
+				</a>
+			</div>
+			{#if data.goals.length === 0}
+				<a
+					href="/goals/new"
+					class="card border border-dashed border-base-300 bg-base-100/60 text-sm shadow-none"
+				>
+					<div class="card-body flex-row items-center gap-3 px-4 py-3">
+						<Icon name="target" size={20} class="text-secondary" />
+						<span class="flex-1">Saving for something? Set a goal and watch the ring fill up.</span>
+						<Icon name="chevron-right" size={18} class="text-base-content/40" />
+					</div>
+				</a>
+			{:else}
+				<div class="flex flex-col gap-2">
+					{#each data.goals.slice(0, 3) as goal (goal.id)}
+						<GoalCard {goal} />
+					{/each}
+				</div>
+			{/if}
+		</section>
 	{/if}
 </main>

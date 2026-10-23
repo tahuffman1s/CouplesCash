@@ -69,3 +69,52 @@ sw.addEventListener('fetch', (event) => {
 		);
 	}
 });
+
+// ---- Web Push --------------------------------------------------------------------------------
+type PushPayload = { title?: string; body?: string; url?: string; tag?: string; icon?: string };
+
+sw.addEventListener('push', (event) => {
+	let data: PushPayload;
+	try {
+		data = (event.data?.json() as PushPayload) ?? {};
+	} catch {
+		data = { body: event.data?.text() ?? '' };
+	}
+	const title = data.title ?? 'CouplesCash';
+	event.waitUntil(
+		sw.registration.showNotification(title, {
+			body: data.body ?? '',
+			icon: data.icon ?? '/icons/icon-192.png',
+			badge: '/icons/icon-192.png',
+			tag: data.tag,
+			data: { url: data.url ?? '/' }
+		})
+	);
+});
+
+sw.addEventListener('notificationclick', (event) => {
+	event.notification.close();
+	const target = new URL(
+		(event.notification.data as { url?: string })?.url ?? '/',
+		sw.location.origin
+	).href;
+	event.waitUntil(
+		(async () => {
+			const all = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
+			for (const client of all) {
+				if ('focus' in client) {
+					await client.focus();
+					if ('navigate' in client && client.url !== target) {
+						try {
+							await client.navigate(target);
+						} catch {
+							// cross-origin or unsupported – fall through to openWindow
+						}
+					}
+					return;
+				}
+			}
+			await sw.clients.openWindow(target);
+		})()
+	);
+});

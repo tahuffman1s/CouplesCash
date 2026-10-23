@@ -1,12 +1,17 @@
 import { fail, redirect } from '@sveltejs/kit';
-import type { Actions } from './$types';
+import type { Actions, PageServerLoad } from './$types';
 import type { AuthResult } from '#lib/types.ts';
-import { applyAuth, isApiError, publicPost } from '#lib/server/api.ts';
+import { applyAuth, isApiError, passkeyConfig, publicPost } from '#lib/server/api.ts';
 
 function safeNext(raw: string | null): string {
 	if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return '/';
 	return raw;
 }
+
+export const load: PageServerLoad = async (event) => {
+	const config = await passkeyConfig();
+	return { passkeysEnabled: config.enabled, next: safeNext(event.url.searchParams.get('next')) };
+};
 
 export const actions: Actions = {
 	default: async (event) => {

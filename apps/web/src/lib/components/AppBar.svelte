@@ -18,7 +18,7 @@
 </script>
 
 <header
-	class="sticky top-0 z-20 bg-base-200/85 pt-[env(safe-area-inset-top)] backdrop-blur-md supports-[backdrop-filter]:bg-base-200/70"
+	class="sticky top-0 z-20 bg-base-200/85 pt-[env(safe-area-inset-top)] backdrop-blur-md supports-[backdrop-filter]:bg-base-200/70 print:hidden"
 >
 	<div class="mx-auto flex h-14 w-full max-w-xl items-center gap-1 px-3">
 		{#if back}

@@ -8,13 +8,13 @@
 			href: '/accounts',
 			label: 'Accounts',
 			icon: 'wallet',
-			match: (p: string) => p.startsWith('/accounts')
+			match: (p: string) => p.startsWith('/accounts') || p.startsWith('/goals')
 		},
 		{
 			href: '/bills',
 			label: 'Bills',
 			icon: 'receipt',
-			match: (p: string) => p.startsWith('/bills')
+			match: (p: string) => p.startsWith('/bills') || p.startsWith('/expenses')
 		},
 		{
 			href: '/calendar',
@@ -30,12 +30,18 @@
 				p.startsWith('/more') ||
 				p.startsWith('/settings') ||
 				p.startsWith('/insights') ||
-				p.startsWith('/couple')
+				p.startsWith('/couple') ||
+				p.startsWith('/activity') ||
+				p.startsWith('/todos') ||
+				p.startsWith('/payperiod')
 		}
 	];
 </script>
 
-<nav class="dock dock-md border-base-300/60 bg-base-100/95 backdrop-blur" aria-label="Primary">
+<nav
+	class="dock dock-md border-base-300/60 bg-base-100/95 backdrop-blur print:hidden"
+	aria-label="Primary"
+>
 	{#each items as item (item.href)}
 		{@const active = item.match(page.url.pathname)}
 		<a

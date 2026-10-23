@@ -15,7 +15,12 @@ export function optimisticToggle(occ: Occurrence, userId: string): Occurrence {
 		...occ,
 		paid: occ.paid
 			? null
-			: { paidAt: new Date().toISOString(), paidBy: userId, amountCents: occ.amountCents }
+			: {
+					paidAt: new Date().toISOString(),
+					paidBy: userId,
+					amountCents: occ.amountCents,
+					auto: false
+				}
 	};
 }
 

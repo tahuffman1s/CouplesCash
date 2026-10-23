@@ -140,3 +140,43 @@ export function relativeDay(iso: ISODate, from: ISODate = today()): string {
 	if (n > 1) return `In ${n} days`;
 	return `${-n} days ago`;
 }
+
+/** Weekday headers starting on Sunday (0) or Monday (1). */
+export function weekdayHeaders(weekStart: 0 | 1): string[] {
+	const sun = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+	return weekStart === 1 ? [...sun.slice(1), sun[0]] : sun;
+}
+
+/** Column (0..6) of a date in a grid whose first column is `weekStart`. */
+export function gridColumn(iso: ISODate, weekStart: 0 | 1): number {
+	return (weekday(iso) - weekStart + 7) % 7;
+}
+
+/** "2h", "3d", "just now" style relative timestamp for activity rows. */
+export function relativeTime(ts: string, now: Date = new Date()): string {
+	const d = new Date(ts);
+	if (Number.isNaN(d.getTime())) return '';
+	const sec = Math.round((now.getTime() - d.getTime()) / 1000);
+	if (sec < 45) return 'just now';
+	const min = Math.round(sec / 60);
+	if (min < 60) return `${min}m`;
+	const hr = Math.round(min / 60);
+	if (hr < 24) return `${hr}h`;
+	const day = Math.round(hr / 24);
+	if (day < 7) return `${day}d`;
+	return formatDate(toISODate(d));
+}
+
+/** Local day (YYYY-MM-DD) of an ISO timestamp. */
+export function dayOf(ts: string): ISODate {
+	return toISODate(new Date(ts));
+}
+
+/** "Today", "Yesterday", or "Thu, Oct 23" for day group headers. */
+export function dayHeading(iso: ISODate, from: ISODate = today()): string {
+	const n = diffDays(from, iso);
+	if (n === 0) return 'Today';
+	if (n === -1) return 'Yesterday';
+	if (n === 1) return 'Tomorrow';
+	return formatWeekdayDate(iso);
+}

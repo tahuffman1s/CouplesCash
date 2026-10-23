@@ -14,10 +14,11 @@
 		endOfMonth,
 		formatMonth,
 		formatWeekdayDate,
+		gridColumn,
 		parseISODate,
 		startOfMonth,
 		today,
-		weekday
+		weekdayHeaders
 	} from '#lib/utils/dates.ts';
 	import { occurrenceKey, optimisticToggle, togglePaid } from '#lib/utils/occurrences.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
@@ -37,7 +38,8 @@
 	const total = $derived(
 		daysInMonth(parseISODate(first).getFullYear(), parseISODate(first).getMonth())
 	);
-	const offset = $derived(weekday(first));
+	const weekStart = $derived<0 | 1>(data.household?.weekStart === 1 ? 1 : 0);
+	const offset = $derived(gridColumn(first, weekStart));
 	const cells = $derived.by(() => {
 		const list: (string | null)[] = Array.from({ length: offset }, () => null);
 		for (let d = 1; d <= total; d++) list.push(`${month}-${d < 10 ? `0${d}` : d}`);
@@ -56,7 +58,7 @@
 		occurrences.filter((o) => o.kind !== 'income' && o.paid).reduce((s, o) => s + o.amountCents, 0)
 	);
 	const dayItems = $derived(selected ? (byDay[selected] ?? []) : []);
-	const weekdays = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+	const weekdays = $derived(weekdayHeaders(weekStart));
 
 	async function go(delta: number) {
 		const next = addMonths(first, delta).slice(0, 7);
@@ -145,6 +147,11 @@
 	{:else}
 		<section class="card border border-base-300/60 bg-base-100 shadow-sm">
 			<div class="card-body gap-3 p-4">
+				{#if occurrences.some((o) => o.paid?.auto && o.dueDate === todayIso)}
+					<p class="flex items-center gap-1.5 text-xs text-secondary" data-testid="autopay-note">
+						<Icon name="bot" size={14} /> Something was auto-paid today. Tap the day to undo if needed.
+					</p>
+				{/if}
 				<div class="flex items-center justify-between">
 					<button
 						type="button"
@@ -169,7 +176,7 @@
 					</button>
 				</div>
 
-				<div class="grid grid-cols-7 text-center" aria-hidden="true">
+				<div class="grid grid-cols-7 text-center" aria-hidden="true" data-testid="weekday-headers">
 					{#each weekdays as w, i (i)}
 						<span class="pb-1 text-xs font-medium text-base-content/50">{w}</span>
 					{/each}

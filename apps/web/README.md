@@ -5,18 +5,18 @@ this app; the SvelteKit server (BFF) holds the auth cookies and proxies to the .
 
 ## Scripts
 
-| Command          | What it does                                                       |
-| ---------------- | ------------------------------------------------------------------ |
-| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080) |
-| `pnpm build`     | Production build with `adapter-node` into `build/`                 |
-| `pnpm preview`   | Serve the production build on http://localhost:4173                |
-| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)    |
-| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                               |
-| `pnpm lint`      | Prettier check + ESLint                                            |
-| `pnpm format`    | Prettier write                                                     |
-| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`)                             |
-| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API     |
-| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`) |
+| Command          | What it does                                                                               |
+| ---------------- | ------------------------------------------------------------------------------------------ |
+| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                         |
+| `pnpm build`     | Production build with `adapter-node` into `build/`                                         |
+| `pnpm preview`   | Serve the production build on http://localhost:4173                                        |
+| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                            |
+| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                       |
+| `pnpm lint`      | Prettier check + ESLint                                                                    |
+| `pnpm format`    | Prettier write                                                                             |
+| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money/currency, dates, pay period, push key, codes) |
+| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                             |
+| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                         |
 
 ## Environment variables
 
@@ -46,13 +46,42 @@ Declared in `src/env.ts` (`defineEnvVars`). Copy `.env.example` to `.env` for lo
   form actions with progressive enhancement.
 - **PWA**: `static/manifest.webmanifest`, icons in `static/icons`, `src/service-worker.ts`
   (precache app shell, network-first navigations with `/offline` fallback, never caches `/api/`).
-- **Charts**: hand-rolled SVG (`src/lib/charts`): `Donut.svelte`, `Sparkline.svelte`, `KindBars.svelte`.
+- **Charts**: hand-rolled SVG (`src/lib/charts`): `Donut.svelte`, `Sparkline.svelte`, `KindBars.svelte`,
+  `ProgressRing.svelte` (goals), `BudgetBar.svelte` (budget meters), `GoalSpark.svelte` (history +
+  dashed target line). Meters use a lighter step of their own hue as the track; over-budget flips
+  to the error colour and says so in text.
+- **Money & household settings**: `formatMoney(cents, { currency? })` defaults to the household
+  currency held in `src/lib/state/currency.svelte.ts`, which `(app)/+layout.svelte` sets from the
+  household loaded in `(app)/+layout.server.ts` (`GET /couple`). The calendar grid honours
+  `household.weekStart`; the layout also posts the browser's IANA time zone once when the server
+  still has `UTC`.
+- **v2 screens**: `/settings/household` (name, currency, week start, default account, pay period
+  with live "Next payday" preview, time zone), `/activity` (keyset "Load more" via the proxy),
+  Bills › **Expenses** chip + `/expenses/new|[id]`, **Budgets** on `/insights` (inline set/clear via
+  proxy), `/insights/report?m=` (month card → **Share** renders a PNG with `html-to-image`
+  and uses `navigator.share` or a download; **Print** uses a print stylesheet), `/payperiod`
+  (+ dashboard "Until payday" card), `/goals`, `/goals/new|[id]` (+ Goals section on Accounts),
+  `/todos` (+ dashboard open items), `/settings/notifications`, `/settings/passkeys`, and
+  "Sign in with a passkey" on `/login` through the anonymous BFF endpoint
+  `src/routes/(auth)/login/passkey/+server.ts` (requires `X-Requested-With: CouplesCash`).
+- **Graceful hiding**: the Notifications page shows a "not set up" note when
+  `GET /push/vapid-public-key` is 503; Passkeys (settings and login) hide when
+  `GET /auth/passkeys/config` says `enabled: false`, when the context is not secure, or when the
+  browser lacks WebAuthn. iPhone browsers that are not installed to the Home Screen get an
+  "Add to Home Screen first" explainer instead of the push toggle.
+- **Service worker**: also handles `push` (`{ title, body, url, tag, icon }` → notification) and
+  `notificationclick` (focus an open window and navigate to `url`, else open one).
 
 ## Testing
 
 `pnpm test:e2e` starts two servers from `playwright.config.ts`: `e2e/mock-api.ts` (an in-memory
 implementation of the API contract on port 8099) and `pnpm build && pnpm preview` with
-`API_URL=http://127.0.0.1:8099`. Chromium is used for both device projects. If a Chromium is
+`API_URL=http://127.0.0.1:8099`. Chromium is used for both device projects. The mock covers v1 and
+v2 (activity recording, expenses with deduction, budgets, pay-period math shared with the app via
+`src/lib/utils/payperiod.ts`, todos, goals + projection, month report, autopay flags). Test-only
+helpers: `POST /__reset` and `POST /__mock/autopay?date=YYYY-MM-DD` (runs the autopay scheduler so
+the Undo UI can be exercised). Push is reported as not configured unless the mock runs with
+`MOCK_PUSH=1`; passkeys are always disabled in the mock. If a Chromium is
 preinstalled under `PLAYWRIGHT_BROWSERS_PATH` (as in CI containers) the config uses it even when
 its revision differs from the one Playwright expects; set `CHROMIUM_PATH` to point at a specific
 binary, or run `pnpm exec playwright install chromium` locally.

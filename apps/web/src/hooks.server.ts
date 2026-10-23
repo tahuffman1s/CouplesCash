@@ -5,7 +5,13 @@ import { decodeJwt } from '#lib/server/jwt.ts';
 import { ACCESS_COOKIE, REFRESH_COOKIE, isSecure, readTheme } from '#lib/server/cookies.ts';
 import { refreshSession } from '#lib/server/api.ts';
 
-const PUBLIC_PATHS = new Set(['/login', '/register', '/offline', '/manifest.webmanifest']);
+const PUBLIC_PATHS = new Set([
+	'/login',
+	'/login/passkey',
+	'/register',
+	'/offline',
+	'/manifest.webmanifest'
+]);
 const AUTH_PAGES = new Set(['/login', '/register']);
 export const PROXY_HEADER = 'x-requested-with';
 export const PROXY_HEADER_VALUE = 'CouplesCash';

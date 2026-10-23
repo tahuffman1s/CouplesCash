@@ -1,9 +1,15 @@
 /**
- * In-memory mock of the CouplesCash API (enough of docs/API-CONTRACT.md for e2e tests).
+ * In-memory mock of the CouplesCash API (enough of docs/API-CONTRACT.md, v1 + v2, for e2e tests).
  * Started by Playwright as a webServer on port 8099. Run manually: node e2e/mock-api.ts
+ *
+ * Test-only helpers (never in the real API):
+ *   POST /__reset                 wipe everything
+ *   POST /__mock/autopay?date=    run the autopay scheduler for that day (default: today)
+ * Env: MOCK_PUSH=1 serves a fake VAPID key (default: 503 push_not_configured).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { periodFor } from '../src/lib/utils/payperiod.ts';
 
 type User = {
 	id: string;
@@ -20,6 +26,12 @@ type Household = {
 	createdAt: string;
 	memberIds: string[];
 	joinedAt: Record<string, string>;
+	currency: string;
+	weekStart: 0 | 1;
+	timezone: string;
+	defaultAccountId: string | null;
+	payPeriod: 'weekly' | 'biweekly' | 'bimonthly' | 'monthly';
+	payAnchorDate: string | null;
 };
 type Account = {
 	id: string;
@@ -63,7 +75,7 @@ type Item = {
 	updatedAt: string;
 	archived: boolean;
 };
-type Payment = { paidAt: string; paidBy: string; amountCents: number };
+type Payment = { paidAt: string; paidBy: string | null; amountCents: number; auto: boolean };
 type Code = {
 	bytesHash: string;
 	codeHash: string;
@@ -72,6 +84,74 @@ type Code = {
 	householdId: string;
 	expiresAt: number;
 	redeemed: boolean;
+};
+type Activity = {
+	id: string;
+	householdId: string;
+	kind: string;
+	summary: string;
+	actorId: string | null;
+	entityType: string;
+	entityId: string | null;
+	data: Record<string, unknown>;
+	createdAt: string;
+};
+type Expense = {
+	id: string;
+	householdId: string;
+	name: string;
+	amountCents: number;
+	categoryId: string | null;
+	accountId: string | null;
+	spentOn: string;
+	note: string | null;
+	deducted: boolean;
+	createdBy: string;
+	createdAt: string;
+	updatedAt: string;
+};
+type Todo = {
+	id: string;
+	householdId: string;
+	title: string;
+	amountCents: number | null;
+	dueDate: string | null;
+	sortOrder: number;
+	doneAt: string | null;
+	doneBy: string | null;
+	createdBy: string;
+	createdAt: string;
+};
+type Goal = {
+	id: string;
+	householdId: string;
+	name: string;
+	targetCents: number;
+	targetDate: string | null;
+	accountId: string | null;
+	savedCents: number;
+	color: string;
+	icon: string;
+	createdBy: string;
+	createdAt: string;
+	archived: boolean;
+	contributions: { at: string; amountCents: number }[];
+};
+type PushSub = {
+	id: string;
+	userId: string;
+	endpoint: string;
+	p256dh: string;
+	auth: string;
+	userAgent: string;
+	createdAt: string;
+	lastUsedAt: string | null;
+};
+type Prefs = {
+	remindersEnabled: boolean;
+	daysBefore: number[];
+	hourLocal: number;
+	activityEnabled: boolean;
 };
 
 const users = new Map<string, User>();
@@ -83,9 +163,17 @@ const items = new Map<string, Item>();
 const payments = new Map<string, Payment>(); // `${itemId}:${date}`
 const refreshTokens = new Map<string, { userId: string; family: string; revoked: boolean }>();
 const codes: Code[] = [];
+const activity: Activity[] = [];
+const expenses = new Map<string, Expense>();
+const budgets = new Map<string, number>(); // `${hh}:${categoryId}`
+const todos = new Map<string, Todo>();
+const goals = new Map<string, Goal>();
+const pushSubs = new Map<string, PushSub>(); // by endpoint
+const prefs = new Map<string, Prefs>(); // by userId
 
 const PORT = Number(process.env.MOCK_API_PORT ?? 8099);
 const ACCESS_TTL = Number(process.env.MOCK_ACCESS_TTL ?? 900);
+const PUSH_ENABLED = process.env.MOCK_PUSH === '1';
 
 const b64url = (buf: Buffer | string) => Buffer.from(buf).toString('base64url');
 const sha = (s: string | Buffer) => createHash('sha256').update(s).digest();
@@ -114,7 +202,18 @@ function householdView(h: Household | null) {
 		const u = users.get(id)!;
 		return { id: u.id, displayName: u.displayName, email: u.email, joinedAt: h.joinedAt[id] };
 	});
-	return { id: h.id, name: h.name, createdAt: h.createdAt, members };
+	return {
+		id: h.id,
+		name: h.name,
+		createdAt: h.createdAt,
+		members,
+		currency: h.currency,
+		weekStart: h.weekStart,
+		timezone: h.timezone,
+		defaultAccountId: h.defaultAccountId,
+		payPeriod: h.payPeriod,
+		payAnchorDate: h.payAnchorDate
+	};
 }
 
 function userView(u: User) {
@@ -155,7 +254,13 @@ function createHousehold(name: string, owner: User): Household {
 		name: name || `${owner.displayName}'s household`,
 		createdAt: nowIso(),
 		memberIds: [owner.id],
-		joinedAt: { [owner.id]: nowIso() }
+		joinedAt: { [owner.id]: nowIso() },
+		currency: 'USD',
+		weekStart: 0,
+		timezone: 'UTC',
+		defaultAccountId: null,
+		payPeriod: 'monthly',
+		payAnchorDate: null
 	};
 	households.set(h.id, h);
 	owner.householdId = h.id;
@@ -174,13 +279,67 @@ function createHousehold(name: string, owner: User): Household {
 	return h;
 }
 
-// ---- recurrence -------------------------------------------------------------------------
+// ---- helpers ----------------------------------------------------------------------------
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
 const toIso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const parse = (s: string) => {
 	const [y, m, d] = s.split('-').map(Number);
 	return new Date(y, m - 1, d);
 };
+const todayIso = () => toIso(new Date());
+function money(hh: string, cents: number): string {
+	const cur = households.get(hh)?.currency ?? 'USD';
+	try {
+		return new Intl.NumberFormat('en-US', { style: 'currency', currency: cur }).format(cents / 100);
+	} catch {
+		return `${cur} ${(cents / 100).toFixed(2)}`;
+	}
+}
+function record(
+	hh: string,
+	actor: User | null,
+	kind: string,
+	entityType: string,
+	entityId: string | null,
+	summary: string,
+	data: Record<string, unknown> = {}
+) {
+	activity.push({
+		id: randomUUID(),
+		householdId: hh,
+		kind,
+		summary,
+		actorId: actor?.id ?? null,
+		entityType,
+		entityId,
+		data,
+		createdAt: nowIso()
+	});
+}
+function activityView(a: Activity) {
+	const actor = a.actorId ? users.get(a.actorId) : null;
+	return {
+		id: a.id,
+		kind: a.kind,
+		summary: a.summary,
+		actorId: a.actorId,
+		actorName: actor?.displayName ?? null,
+		entityType: a.entityType,
+		entityId: a.entityId,
+		data: a.data,
+		createdAt: a.createdAt
+	};
+}
+function setBalance(a: Account, cents: number, by: string) {
+	a.balanceCents = cents;
+	a.updatedAt = nowIso();
+	snapshots.set(a.id, [
+		{ balanceCents: a.balanceCents, recordedAt: a.updatedAt, recordedBy: by },
+		...(snapshots.get(a.id) ?? [])
+	]);
+}
+
+// ---- recurrence -------------------------------------------------------------------------
 function addMonthsClamp(anchor: Date, n: number): Date {
 	const y = anchor.getFullYear() + Math.floor((anchor.getMonth() + n) / 12);
 	const m = (((anchor.getMonth() + n) % 12) + 12) % 12;
@@ -233,7 +392,7 @@ function monthlyEq(amount: number, f: string): number {
 	}
 }
 function nextDue(item: Item): string | null {
-	const today = toIso(new Date());
+	const today = todayIso();
 	const far = toIso(addMonthsClamp(new Date(), 24));
 	return expand(item, today, far)[0] ?? null;
 }
@@ -275,8 +434,9 @@ function occurrence(i: Item, date: string) {
 		paid: payments.get(`${i.id}:${date}`) ?? null
 	};
 }
-function calendar(hh: string, from: string, to: string) {
-	const out = [];
+type Occ = ReturnType<typeof occurrence>;
+function calendar(hh: string, from: string, to: string): Occ[] {
+	const out: Occ[] = [];
 	for (const i of items.values()) {
 		if (i.householdId !== hh || i.archived) continue;
 		for (const d of expand(i, from, to)) out.push(occurrence(i, d));
@@ -291,6 +451,270 @@ function categoryView(c: Category) {
 	const { householdId: _h, ...rest } = c;
 	return rest;
 }
+function expenseView(e: Expense) {
+	const { householdId: _h, ...rest } = e;
+	return rest;
+}
+function todoView(t: Todo) {
+	const { householdId: _h, ...rest } = t;
+	return { ...rest, doneByName: t.doneBy ? (users.get(t.doneBy)?.displayName ?? null) : null };
+}
+function monthRange(month: string): [string, string] {
+	const first = `${month}-01`;
+	const d = parse(first);
+	return [first, toIso(new Date(d.getFullYear(), d.getMonth() + 1, 0))];
+}
+function hhExpenses(hh: string, from: string, to: string): Expense[] {
+	return [...expenses.values()]
+		.filter((e) => e.householdId === hh && e.spentOn >= from && e.spentOn <= to)
+		.sort((a, b) => b.spentOn.localeCompare(a.spentOn) || b.createdAt.localeCompare(a.createdAt));
+}
+function netWorthAt(hh: string, atIso: string | null): number {
+	let total = 0;
+	for (const a of accounts.values()) {
+		if (a.householdId !== hh || a.archived) continue;
+		let balance = a.balanceCents;
+		if (atIso) {
+			const snap = (snapshots.get(a.id) ?? []).find((s) => s.recordedAt <= atIso);
+			if (!snap) continue; // account did not exist yet
+			balance = snap.balanceCents;
+		}
+		total += a.type === 'credit' || a.type === 'loan' ? -balance : balance;
+	}
+	return total;
+}
+
+function summaryFor(hh: string, month: string) {
+	const [first, last] = monthRange(month);
+	const acc = [...accounts.values()].filter((a) => a.householdId === hh && !a.archived);
+	const liab = (t: string) => t === 'credit' || t === 'loan';
+	const assetsCents = acc.filter((a) => !liab(a.type)).reduce((s, a) => s + a.balanceCents, 0);
+	const liabilitiesCents = acc.filter((a) => liab(a.type)).reduce((s, a) => s + a.balanceCents, 0);
+	const active = [...items.values()].filter((i) => i.householdId === hh && !i.archived);
+	const eq = (k: string) =>
+		active
+			.filter((i) => i.kind === k)
+			.reduce((s, i) => s + monthlyEq(i.amountCents, i.frequency), 0);
+	const occ = calendar(hh, first, last);
+	const out = occ.filter((o) => o.kind !== 'income');
+	const dueThisMonthCents = out.reduce((s, o) => s + o.amountCents, 0);
+	const paidThisMonthCents = out
+		.filter((o) => o.paid)
+		.reduce((s, o) => s + (o.paid?.amountCents ?? 0), 0);
+	type Row = {
+		categoryId: string | null;
+		name: string;
+		color: string;
+		amountCents: number;
+		count: number;
+	};
+	const byCat = new Map<string | null, Row>();
+	const bucket = (categoryId: string | null) => {
+		const c = categoryId ? categories.get(categoryId) : undefined;
+		const key = c?.id ?? null;
+		const row = byCat.get(key) ?? {
+			categoryId: key,
+			name: c?.name ?? 'Uncategorised',
+			color: c?.color ?? '#9ca3af',
+			amountCents: 0,
+			count: 0
+		};
+		byCat.set(key, row);
+		return row;
+	};
+	for (const i of active) {
+		if (i.kind === 'income') continue;
+		const row = bucket(i.categoryId);
+		row.amountCents += monthlyEq(i.amountCents, i.frequency);
+		row.count += 1;
+	}
+	// v2: one-off expenses in the month count too
+	for (const e of hhExpenses(hh, first, last)) {
+		const row = bucket(e.categoryId);
+		row.amountCents += e.amountCents;
+		row.count += 1;
+	}
+	const byKind = ['bill', 'subscription', 'income'].map((kind) => ({
+		kind,
+		amountCents: eq(kind),
+		count: active.filter((i) => i.kind === kind).length
+	}));
+	const today = todayIso();
+	const in14 = toIso(new Date(Date.now() + 14 * 86400_000));
+	const upcoming = calendar(hh, today, in14)
+		.sort((a, b) => Number(!!a.paid) - Number(!!b.paid) || a.dueDate.localeCompare(b.dueDate))
+		.slice(0, 20);
+	return {
+		month,
+		netWorthCents: assetsCents - liabilitiesCents,
+		assetsCents,
+		liabilitiesCents,
+		monthlyBillsCents: eq('bill'),
+		monthlySubscriptionsCents: eq('subscription'),
+		monthlyIncomeCents: eq('income'),
+		dueThisMonthCents,
+		paidThisMonthCents,
+		remainingThisMonthCents: dueThisMonthCents - paidThisMonthCents,
+		byCategory: [...byCat.values()].sort((a, b) => b.amountCents - a.amountCents),
+		byKind,
+		upcoming,
+		accounts: acc.map(accountView)
+	};
+}
+
+function budgetRows(hh: string, month: string) {
+	const [first, last] = monthRange(month);
+	const active = [...items.values()].filter((i) => i.householdId === hh && !i.archived);
+	const monthExpenses = hhExpenses(hh, first, last);
+	const rows = [...categories.values()]
+		.filter((c) => c.householdId === hh)
+		.sort((a, b) => a.sortOrder - b.sortOrder)
+		.map((c) => budgetRow(hh, c, active, monthExpenses));
+	return {
+		month,
+		rows,
+		totalBudgetCents: rows.reduce((s, r) => s + (r.budgetCents ?? 0), 0),
+		totalSpentCents: rows
+			.filter((r) => r.budgetCents !== null)
+			.reduce((s, r) => s + r.spentCents, 0)
+	};
+}
+function budgetRow(hh: string, c: Category, active: Item[], monthExpenses: Expense[]) {
+	const recurringCents = active
+		.filter((i) => i.kind !== 'income' && i.categoryId === c.id)
+		.reduce((s, i) => s + monthlyEq(i.amountCents, i.frequency), 0);
+	const expensesCents = monthExpenses
+		.filter((e) => e.categoryId === c.id)
+		.reduce((s, e) => s + e.amountCents, 0);
+	const spentCents = recurringCents + expensesCents;
+	const budgetCents = budgets.get(`${hh}:${c.id}`) ?? null;
+	return {
+		categoryId: c.id,
+		name: c.name,
+		color: c.color,
+		icon: c.icon,
+		budgetCents,
+		recurringCents,
+		expensesCents,
+		spentCents,
+		remainingCents: budgetCents === null ? null : budgetCents - spentCents,
+		percent:
+			budgetCents === null
+				? null
+				: budgetCents > 0
+					? Math.round((spentCents / budgetCents) * 100)
+					: spentCents > 0
+						? 100
+						: 0
+	};
+}
+
+function goalView(g: Goal) {
+	const account = g.accountId ? accounts.get(g.accountId) : undefined;
+	let history: { at: string; value: number }[];
+	let currentCents: number;
+	if (account) {
+		history = [...(snapshots.get(account.id) ?? [])]
+			.reverse()
+			.map((s) => ({ at: s.recordedAt, value: s.balanceCents }));
+		currentCents = account.balanceCents;
+	} else {
+		let running = 0;
+		history = g.contributions.map((c) => ({ at: c.at, value: (running += c.amountCents) }));
+		currentCents = g.savedCents;
+	}
+	history = history.slice(-90);
+	const cutoff = new Date(Date.now() - 90 * 86400_000).toISOString();
+	const recent = history.filter((h) => h.at >= cutoff);
+	let monthlyPaceCents: number | null = null;
+	if (recent.length >= 2) {
+		const firstP = recent[0];
+		const lastP = recent[recent.length - 1];
+		const days = (new Date(lastP.at).getTime() - new Date(firstP.at).getTime()) / 86400_000;
+		if (days >= 7) monthlyPaceCents = Math.round((lastP.value - firstP.value) / (days / 30.4375));
+	}
+	const remaining = g.targetCents - currentCents;
+	let projectedDate: string | null = null;
+	if (remaining > 0 && monthlyPaceCents !== null && monthlyPaceCents > 0) {
+		const months = remaining / monthlyPaceCents;
+		projectedDate = toIso(new Date(Date.now() + months * 30.4375 * 86400_000));
+	}
+	let monthlyNeededCents: number | null = null;
+	if (remaining > 0 && g.targetDate) {
+		const months = Math.max(
+			1 / 30.4375,
+			(parse(g.targetDate).getTime() - Date.now()) / (30.4375 * 86400_000)
+		);
+		monthlyNeededCents = Math.round(remaining / months);
+	}
+	return {
+		id: g.id,
+		name: g.name,
+		targetCents: g.targetCents,
+		targetDate: g.targetDate,
+		accountId: g.accountId,
+		accountName: account?.name ?? null,
+		color: g.color,
+		icon: g.icon,
+		currentCents,
+		percent: g.targetCents > 0 ? Math.min(999, (currentCents / g.targetCents) * 100) : 0,
+		monthlyPaceCents,
+		projectedDate,
+		monthlyNeededCents,
+		history,
+		createdAt: g.createdAt
+	};
+}
+
+function prefsFor(userId: string): Prefs {
+	let p = prefs.get(userId);
+	if (!p) {
+		p = { remindersEnabled: true, daysBefore: [1], hourLocal: 9, activityEnabled: true };
+		prefs.set(userId, p);
+	}
+	return p;
+}
+function prefsView(userId: string) {
+	const p = prefsFor(userId);
+	return {
+		...p,
+		subscriptions: [...pushSubs.values()]
+			.filter((s) => s.userId === userId)
+			.map((s) => ({
+				id: s.id,
+				userAgent: s.userAgent,
+				createdAt: s.createdAt,
+				lastUsedAt: s.lastUsedAt
+			}))
+	};
+}
+
+/** Scheduler step 1: mark autoPay occurrences due on `date` as paid (auto = true, paidBy null). */
+function runAutopay(date: string) {
+	let n = 0;
+	for (const i of items.values()) {
+		if (i.archived || !i.autoPay || i.kind === 'income') continue;
+		if (!expand(i, date, date).includes(date)) continue;
+		const key = `${i.id}:${date}`;
+		if (payments.has(key)) continue;
+		payments.set(key, { paidAt: nowIso(), paidBy: null, amountCents: i.amountCents, auto: true });
+		record(
+			i.householdId,
+			null,
+			'occurrence.autopaid',
+			'occurrence',
+			i.id,
+			`auto-paid ${i.name} · ${money(i.householdId, i.amountCents)}`,
+			{
+				itemId: i.id,
+				dueDate: date,
+				amountCents: i.amountCents
+			}
+		);
+		n++;
+	}
+	return n;
+}
 
 // ---- http -------------------------------------------------------------------------------
 function send(res: ServerResponse, status: number, body?: unknown) {
@@ -304,8 +728,13 @@ function send(res: ServerResponse, status: number, body?: unknown) {
 	});
 	res.end(JSON.stringify(body));
 }
-const problem = (res: ServerResponse, status: number, title: string, detail?: string) =>
-	send(res, status, { type: 'about:blank', title, status, detail });
+const problem = (
+	res: ServerResponse,
+	status: number,
+	title: string,
+	detail?: string,
+	type?: string
+) => send(res, status, { type: type ?? 'about:blank', title, status, detail });
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
 	const chunks: Buffer[] = [];
@@ -347,12 +776,31 @@ const server = createServer(async (req, res) => {
 				categories,
 				items,
 				payments,
-				refreshTokens
+				refreshTokens,
+				expenses,
+				budgets,
+				todos,
+				goals,
+				pushSubs,
+				prefs
 			])
 				map.clear();
 			codes.length = 0;
+			activity.length = 0;
 			return send(res, 204);
 		}
+		if (p === '/__mock/autopay' && m === 'POST') {
+			const date = url.searchParams.get('date') ?? todayIso();
+			return send(res, 200, { date, marked: runAutopay(date) });
+		}
+
+		// --- anonymous passkey routes
+		if (p === '/v1/auth/passkeys/config' && m === 'GET')
+			return send(res, 200, { enabled: false, rpId: 'localhost' });
+		if (p === '/v1/auth/passkeys/login/options' && m === 'POST')
+			return problem(res, 503, 'Passkeys not configured');
+		if (p === '/v1/auth/passkeys/login' && m === 'POST')
+			return problem(res, 503, 'Passkeys not configured');
 
 		// --- auth
 		if (p === '/v1/auth/register' && m === 'POST') {
@@ -410,8 +858,18 @@ const server = createServer(async (req, res) => {
 			});
 		if (p === '/v1/auth/me' && m === 'PATCH') {
 			const b = await readJson(req);
-			if (typeof b.displayName === 'string' && b.displayName.trim())
+			if (typeof b.displayName === 'string' && b.displayName.trim()) {
 				user.displayName = b.displayName.trim();
+				if (user.householdId)
+					record(
+						user.householdId,
+						user,
+						'user.renamed',
+						'user',
+						user.id,
+						`is now called ${user.displayName}`
+					);
+			}
 			return send(res, 200, userView(user));
 		}
 		if (p === '/v1/auth/password' && m === 'POST') {
@@ -422,6 +880,63 @@ const server = createServer(async (req, res) => {
 			for (const r of refreshTokens.values()) if (r.userId === user.id) r.revoked = true;
 			return send(res, 204);
 		}
+
+		// --- passkeys (authenticated; disabled in the mock)
+		if (p === '/v1/auth/passkeys' && m === 'GET') return send(res, 200, []);
+		if (p.startsWith('/v1/auth/passkeys')) return problem(res, 503, 'Passkeys not configured');
+
+		// --- push (per user)
+		if (p === '/v1/push/vapid-public-key' && m === 'GET') {
+			if (!PUSH_ENABLED)
+				return problem(
+					res,
+					503,
+					'Push not configured',
+					undefined,
+					'https://couplescash.app/problems/push_not_configured'
+				);
+			return send(res, 200, { publicKey: 'BMockVapidPublicKey_' + 'A'.repeat(60) });
+		}
+		if (p === '/v1/push/subscriptions' && m === 'POST') {
+			const b = await readJson(req);
+			const endpoint = String(b.endpoint ?? '');
+			if (!endpoint) return problem(res, 400, 'Validation failed');
+			const keys = (b.keys ?? {}) as { p256dh?: string; auth?: string };
+			const existing = pushSubs.get(endpoint);
+			const sub: PushSub = existing ?? {
+				id: randomUUID(),
+				userId: user.id,
+				endpoint,
+				p256dh: keys.p256dh ?? '',
+				auth: keys.auth ?? '',
+				userAgent: String(b.userAgent ?? ''),
+				createdAt: nowIso(),
+				lastUsedAt: null
+			};
+			sub.userId = user.id;
+			pushSubs.set(endpoint, sub);
+			return send(res, 201, { id: sub.id });
+		}
+		if (p === '/v1/push/subscriptions' && m === 'DELETE') {
+			const b = await readJson(req);
+			for (const [ep, s] of pushSubs) {
+				if (s.userId !== user.id) continue;
+				if (ep === b.endpoint || s.id === b.id) pushSubs.delete(ep);
+			}
+			return send(res, 204);
+		}
+		if (p === '/v1/push/prefs' && m === 'GET') return send(res, 200, prefsView(user.id));
+		if (p === '/v1/push/prefs' && m === 'PUT') {
+			const b = await readJson(req);
+			prefs.set(user.id, {
+				remindersEnabled: Boolean(b.remindersEnabled),
+				daysBefore: Array.isArray(b.daysBefore) ? (b.daysBefore as number[]).slice(0, 5) : [1],
+				hourLocal: Number(b.hourLocal ?? 9),
+				activityEnabled: Boolean(b.activityEnabled)
+			});
+			return send(res, 200, prefsView(user.id));
+		}
+		if (p === '/v1/push/test' && m === 'POST') return send(res, 202);
 
 		// --- couple
 		if (p === '/v1/couple' && m === 'GET')
@@ -434,7 +949,74 @@ const server = createServer(async (req, res) => {
 			const h = user.householdId ? households.get(user.householdId) : null;
 			if (!h) return problem(res, 409, 'No household');
 			const b = await readJson(req);
-			if (typeof b.name === 'string' && b.name.trim()) h.name = b.name.trim();
+			const changed: string[] = [];
+			if (typeof b.name === 'string' && b.name.trim()) {
+				h.name = b.name.trim();
+				changed.push('name');
+			}
+			if (typeof b.currency === 'string') {
+				if (!/^[A-Z]{3}$/.test(b.currency))
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { currency: ['Must be a 3-letter ISO code'] }
+					});
+				h.currency = b.currency;
+				changed.push('currency');
+			}
+			if (b.weekStart === 0 || b.weekStart === 1) {
+				h.weekStart = b.weekStart;
+				changed.push('week start');
+			}
+			if (typeof b.timezone === 'string' && b.timezone) {
+				try {
+					new Intl.DateTimeFormat('en-US', { timeZone: b.timezone });
+				} catch {
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { timezone: ['Unknown time zone'] }
+					});
+				}
+				h.timezone = b.timezone;
+				changed.push('time zone');
+			}
+			if ('defaultAccountId' in b) {
+				const id = (b.defaultAccountId as string | null) || null;
+				if (id) {
+					const a = accounts.get(id);
+					if (!a || a.householdId !== h.id)
+						return send(res, 400, {
+							title: 'Validation failed',
+							status: 400,
+							errors: { defaultAccountId: ['Unknown account'] }
+						});
+				}
+				h.defaultAccountId = id;
+				changed.push('default account');
+			}
+			if (typeof b.payPeriod === 'string') {
+				if (!['weekly', 'biweekly', 'bimonthly', 'monthly'].includes(b.payPeriod))
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { payPeriod: ['Unknown pay period'] }
+					});
+				h.payPeriod = b.payPeriod as Household['payPeriod'];
+				changed.push('pay period');
+			}
+			if ('payAnchorDate' in b) {
+				h.payAnchorDate = (b.payAnchorDate as string | null) || null;
+			}
+			if (changed.length)
+				record(
+					h.id,
+					user,
+					'couple.settings',
+					'couple',
+					h.id,
+					`updated household ${changed.join(', ')}`
+				);
 			return send(res, 200, householdView(h));
 		}
 		if (p === '/v1/couple/code' && m === 'POST') {
@@ -489,6 +1071,7 @@ const server = createServer(async (req, res) => {
 			h.memberIds.push(user.id);
 			h.joinedAt[user.id] = nowIso();
 			user.householdId = h.id;
+			record(h.id, user, 'couple.joined', 'couple', h.id, 'joined the household');
 			return send(res, 200, authResult(user));
 		}
 		if (p === '/v1/couple/leave' && m === 'POST') {
@@ -496,6 +1079,7 @@ const server = createServer(async (req, res) => {
 			if (h) {
 				h.memberIds = h.memberIds.filter((id) => id !== user.id);
 				if (h.memberIds.length === 0) households.delete(h.id);
+				else record(h.id, user, 'couple.left', 'couple', h.id, 'left the household');
 			}
 			user.householdId = null;
 			return send(res, 200, authResult(user));
@@ -503,6 +1087,7 @@ const server = createServer(async (req, res) => {
 
 		const hh = user.householdId;
 		if (!hh) return problem(res, 409, 'No household');
+		const $ = (cents: number) => money(hh, cents);
 
 		// --- accounts
 		if (p === '/v1/accounts' && m === 'GET') {
@@ -536,6 +1121,14 @@ const server = createServer(async (req, res) => {
 			snapshots.set(a.id, [
 				{ balanceCents: a.balanceCents, recordedAt: a.createdAt, recordedBy: user.id }
 			]);
+			record(
+				hh,
+				user,
+				'account.created',
+				'account',
+				a.id,
+				`added account ${a.name} · ${$(a.balanceCents)}`
+			);
 			return send(res, 201, accountView(a));
 		}
 		let mm = /^\/v1\/accounts\/([^/]+)(\/balance|\/history)?$/.exec(p);
@@ -551,31 +1144,38 @@ const server = createServer(async (req, res) => {
 			if (mm[2] === '/balance' && m === 'POST') {
 				const b = await readJson(req);
 				if (typeof b.balanceCents !== 'number') return problem(res, 400, 'Validation failed');
-				a.balanceCents = b.balanceCents;
-				a.updatedAt = nowIso();
-				snapshots.set(a.id, [
-					{ balanceCents: a.balanceCents, recordedAt: a.updatedAt, recordedBy: user.id },
-					...(snapshots.get(a.id) ?? [])
-				]);
+				setBalance(a, b.balanceCents, user.id);
+				record(
+					hh,
+					user,
+					'account.balance',
+					'account',
+					a.id,
+					`updated ${a.name} balance to ${$(a.balanceCents)}`
+				);
 				return send(res, 200, accountView(a));
 			}
 			if (!mm[2] && m === 'GET') return send(res, 200, accountView(a));
 			if (!mm[2] && m === 'PUT') {
 				const b = await readJson(req);
+				const balanceChanged =
+					typeof b.balanceCents === 'number' && b.balanceCents !== a.balanceCents;
 				Object.assign(a, {
 					name: b.name,
 					institution: b.institution,
 					type: b.type,
-					balanceCents: b.balanceCents,
 					color: b.color ?? a.color,
 					icon: b.icon ?? a.icon,
 					note: b.note ?? null,
 					updatedAt: nowIso()
 				});
+				if (balanceChanged) setBalance(a, b.balanceCents as number, user.id);
+				record(hh, user, 'account.updated', 'account', a.id, `updated account ${a.name}`);
 				return send(res, 200, accountView(a));
 			}
 			if (!mm[2] && m === 'DELETE') {
 				a.archived = true;
+				record(hh, user, 'account.deleted', 'account', null, `removed account ${a.name}`);
 				return send(res, 204);
 			}
 		}
@@ -602,6 +1202,7 @@ const server = createServer(async (req, res) => {
 				isDefault: false
 			};
 			categories.set(c.id, c);
+			record(hh, user, 'category.created', 'category', c.id, `added category ${c.name}`);
 			return send(res, 201, categoryView(c));
 		}
 		mm = /^\/v1\/categories\/([^/]+)$/.exec(p);
@@ -621,6 +1222,8 @@ const server = createServer(async (req, res) => {
 			if (m === 'DELETE') {
 				categories.delete(c.id);
 				for (const i of items.values()) if (i.categoryId === c.id) i.categoryId = null;
+				for (const e of expenses.values()) if (e.categoryId === c.id) e.categoryId = null;
+				budgets.delete(`${hh}:${c.id}`);
 				return send(res, 204);
 			}
 		}
@@ -659,6 +1262,14 @@ const server = createServer(async (req, res) => {
 				archived: false
 			};
 			items.set(i.id, i);
+			record(
+				hh,
+				user,
+				'recurring.created',
+				'recurring',
+				i.id,
+				`added ${i.kind} ${i.name} · ${$(i.amountCents)}`
+			);
 			return send(res, 201, itemView(i));
 		}
 		mm = /^\/v1\/recurring\/([^/]+)(?:\/occurrences\/(\d{4}-\d{2}-\d{2})\/paid)?$/.exec(p);
@@ -670,15 +1281,30 @@ const server = createServer(async (req, res) => {
 				if (!expand(i, date, date).includes(date)) return problem(res, 404, 'Not an occurrence');
 				if (m === 'PUT') {
 					const b = await readJson(req);
+					const amount = typeof b.amountCents === 'number' ? b.amountCents : i.amountCents;
 					payments.set(`${i.id}:${date}`, {
 						paidAt: nowIso(),
 						paidBy: user.id,
-						amountCents: typeof b.amountCents === 'number' ? b.amountCents : i.amountCents
+						amountCents: amount,
+						auto: false
 					});
+					record(
+						hh,
+						user,
+						'occurrence.paid',
+						'occurrence',
+						i.id,
+						`marked ${i.name} paid · ${$(amount)}`,
+						{ itemId: i.id, dueDate: date }
+					);
 					return send(res, 200, occurrence(i, date));
 				}
 				if (m === 'DELETE') {
 					payments.delete(`${i.id}:${date}`);
+					record(hh, user, 'occurrence.unpaid', 'occurrence', i.id, `marked ${i.name} unpaid`, {
+						itemId: i.id,
+						dueDate: date
+					});
 					return send(res, 200, occurrence(i, date));
 				}
 			} else {
@@ -699,10 +1325,12 @@ const server = createServer(async (req, res) => {
 						url: b.url ?? null,
 						updatedAt: nowIso()
 					});
+					record(hh, user, 'recurring.updated', 'recurring', i.id, `updated ${i.name}`);
 					return send(res, 200, itemView(i));
 				}
 				if (m === 'DELETE') {
 					i.archived = true;
+					record(hh, user, 'recurring.deleted', 'recurring', null, `removed ${i.name}`);
 					return send(res, 204);
 				}
 			}
@@ -710,82 +1338,400 @@ const server = createServer(async (req, res) => {
 
 		// --- calendar & summary
 		if (p === '/v1/calendar' && m === 'GET') {
-			const from = url.searchParams.get('from') ?? toIso(new Date());
+			const from = url.searchParams.get('from') ?? todayIso();
 			const to = url.searchParams.get('to') ?? from;
 			return send(res, 200, { from, to, occurrences: calendar(hh, from, to) });
 		}
 		if (p === '/v1/summary' && m === 'GET') {
-			const month = url.searchParams.get('month') ?? toIso(new Date()).slice(0, 7);
-			const first = `${month}-01`;
-			const firstD = parse(first);
-			const last = toIso(new Date(firstD.getFullYear(), firstD.getMonth() + 1, 0));
-			const acc = [...accounts.values()].filter((a) => a.householdId === hh && !a.archived);
-			const liab = (t: string) => t === 'credit' || t === 'loan';
-			const assetsCents = acc.filter((a) => !liab(a.type)).reduce((s, a) => s + a.balanceCents, 0);
-			const liabilitiesCents = acc
-				.filter((a) => liab(a.type))
-				.reduce((s, a) => s + a.balanceCents, 0);
-			const active = [...items.values()].filter((i) => i.householdId === hh && !i.archived);
-			const eq = (k: string) =>
-				active
-					.filter((i) => i.kind === k)
-					.reduce((s, i) => s + monthlyEq(i.amountCents, i.frequency), 0);
-			const occ = calendar(hh, first, last);
+			const month = url.searchParams.get('month') ?? todayIso().slice(0, 7);
+			return send(res, 200, summaryFor(hh, month));
+		}
+
+		// --- activity
+		if (p === '/v1/activity' && m === 'GET') {
+			const before = url.searchParams.get('before');
+			const limit = Math.min(100, Number(url.searchParams.get('limit') ?? 30));
+			const all = activity
+				.filter((a) => a.householdId === hh && (!before || a.createdAt < before))
+				.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+			const page = all.slice(0, limit);
+			return send(res, 200, {
+				events: page.map(activityView),
+				nextBefore: all.length > limit ? page[page.length - 1].createdAt : null
+			});
+		}
+
+		// --- expenses
+		if (p === '/v1/expenses' && m === 'GET') {
+			let from = url.searchParams.get('from');
+			let to = url.searchParams.get('to');
+			if (!from || !to) {
+				[from, to] = monthRange(url.searchParams.get('month') ?? todayIso().slice(0, 7));
+			}
+			return send(res, 200, hhExpenses(hh, from, to).map(expenseView));
+		}
+		if (p === '/v1/expenses' && m === 'POST') {
+			const b = await readJson(req);
+			if (!b.name || typeof b.amountCents !== 'number' || b.amountCents <= 0 || !b.spentOn)
+				return problem(res, 400, 'Validation failed');
+			const accountId = (b.accountId as string | null) || null;
+			const account = accountId ? accounts.get(accountId) : undefined;
+			if (accountId && (!account || account.householdId !== hh))
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { accountId: ['Unknown account'] }
+				});
+			const deduct = account ? (b.deduct === undefined ? true : Boolean(b.deduct)) : false;
+			const e: Expense = {
+				id: randomUUID(),
+				householdId: hh,
+				name: String(b.name),
+				amountCents: b.amountCents,
+				categoryId: (b.categoryId as string | null) || null,
+				accountId,
+				spentOn: String(b.spentOn),
+				note: (b.note as string | null) ?? null,
+				deducted: deduct,
+				createdBy: user.id,
+				createdAt: nowIso(),
+				updatedAt: nowIso()
+			};
+			if (deduct && account) setBalance(account, account.balanceCents - e.amountCents, user.id);
+			expenses.set(e.id, e);
+			record(
+				hh,
+				user,
+				'expense.created',
+				'expense',
+				e.id,
+				`spent ${$(e.amountCents)} on ${e.name}`,
+				{ expenseId: e.id }
+			);
+			return send(res, 201, expenseView(e));
+		}
+		mm = /^\/v1\/expenses\/([^/]+)$/.exec(p);
+		if (mm) {
+			const e = expenses.get(mm[1]);
+			if (!e || e.householdId !== hh) return problem(res, 404, 'Not found');
+			if (m === 'GET') return send(res, 200, expenseView(e));
+			if (m === 'PUT') {
+				const b = await readJson(req);
+				if (!b.name || typeof b.amountCents !== 'number' || b.amountCents <= 0 || !b.spentOn)
+					return problem(res, 400, 'Validation failed');
+				// reverse the old deduction, apply the new one
+				if (e.deducted && e.accountId) {
+					const old = accounts.get(e.accountId);
+					if (old) setBalance(old, old.balanceCents + e.amountCents, user.id);
+				}
+				const accountId = (b.accountId as string | null) || null;
+				const account = accountId ? accounts.get(accountId) : undefined;
+				const deduct = account ? (b.deduct === undefined ? true : Boolean(b.deduct)) : false;
+				Object.assign(e, {
+					name: String(b.name),
+					amountCents: b.amountCents,
+					categoryId: (b.categoryId as string | null) || null,
+					accountId,
+					spentOn: String(b.spentOn),
+					note: (b.note as string | null) ?? null,
+					deducted: deduct,
+					updatedAt: nowIso()
+				});
+				if (deduct && account) setBalance(account, account.balanceCents - e.amountCents, user.id);
+				record(
+					hh,
+					user,
+					'expense.updated',
+					'expense',
+					e.id,
+					`updated expense ${e.name} · ${$(e.amountCents)}`
+				);
+				return send(res, 200, expenseView(e));
+			}
+			if (m === 'DELETE') {
+				if (e.deducted && e.accountId) {
+					const a = accounts.get(e.accountId);
+					if (a) setBalance(a, a.balanceCents + e.amountCents, user.id);
+				}
+				expenses.delete(e.id);
+				record(hh, user, 'expense.deleted', 'expense', null, `deleted expense ${e.name}`);
+				return send(res, 204);
+			}
+		}
+
+		// --- budgets
+		if (p === '/v1/budgets' && m === 'GET') {
+			const month = url.searchParams.get('month') ?? todayIso().slice(0, 7);
+			return send(res, 200, budgetRows(hh, month));
+		}
+		mm = /^\/v1\/budgets\/([^/]+)$/.exec(p);
+		if (mm) {
+			const c = categories.get(mm[1]);
+			if (!c || c.householdId !== hh) return problem(res, 404, 'Not found');
+			const month = url.searchParams.get('month') ?? todayIso().slice(0, 7);
+			if (m === 'PUT') {
+				const b = await readJson(req);
+				if (typeof b.amountCents !== 'number' || b.amountCents < 0)
+					return problem(res, 400, 'Validation failed');
+				budgets.set(`${hh}:${c.id}`, b.amountCents);
+				record(
+					hh,
+					user,
+					'budget.set',
+					'budget',
+					c.id,
+					`set the ${c.name} budget to ${$(b.amountCents)}`
+				);
+				const [first, last] = monthRange(month);
+				const active = [...items.values()].filter((i) => i.householdId === hh && !i.archived);
+				return send(res, 200, budgetRow(hh, c, active, hhExpenses(hh, first, last)));
+			}
+			if (m === 'DELETE') {
+				budgets.delete(`${hh}:${c.id}`);
+				record(hh, user, 'budget.cleared', 'budget', c.id, `cleared the ${c.name} budget`);
+				return send(res, 204);
+			}
+		}
+
+		// --- pay period
+		if (p === '/v1/payperiod' && m === 'GET') {
+			const h = households.get(hh)!;
+			if (!h.payAnchorDate) return problem(res, 409, 'Pay period not configured');
+			const date = url.searchParams.get('date') ?? todayIso();
+			const bounds = periodFor(h.payPeriod, h.payAnchorDate, date);
+			const occ = calendar(hh, bounds.start, bounds.end);
 			const out = occ.filter((o) => o.kind !== 'income');
-			const dueThisMonthCents = out.reduce((s, o) => s + o.amountCents, 0);
-			const paidThisMonthCents = out
+			const dueCents = out.reduce((s, o) => s + o.amountCents, 0);
+			const paidCents = out
 				.filter((o) => o.paid)
 				.reduce((s, o) => s + (o.paid?.amountCents ?? 0), 0);
-			const byCat = new Map<
-				string | null,
-				{
-					categoryId: string | null;
-					name: string;
-					color: string;
-					amountCents: number;
-					count: number;
-				}
-			>();
-			for (const i of active) {
-				if (i.kind === 'income') continue;
-				const c = i.categoryId ? categories.get(i.categoryId) : undefined;
-				const key = c?.id ?? null;
-				const row = byCat.get(key) ?? {
-					categoryId: key,
-					name: c?.name ?? 'Uncategorised',
-					color: c?.color ?? '#9ca3af',
-					amountCents: 0,
-					count: 0
-				};
-				row.amountCents += monthlyEq(i.amountCents, i.frequency);
-				row.count += 1;
-				byCat.set(key, row);
+			const remainingCents = out.filter((o) => !o.paid).reduce((s, o) => s + o.amountCents, 0);
+			const liquid = [...accounts.values()]
+				.filter(
+					(a) => a.householdId === hh && !a.archived && (a.type === 'checking' || a.type === 'cash')
+				)
+				.reduce((s, a) => s + a.balanceCents, 0);
+			return send(res, 200, {
+				period: h.payPeriod,
+				start: bounds.start,
+				end: bounds.end,
+				nextPayday: bounds.nextPayday,
+				daysLeft: bounds.daysLeft,
+				expectedIncomeCents: occ
+					.filter((o) => o.kind === 'income')
+					.reduce((s, o) => s + o.amountCents, 0),
+				dueCents,
+				paidCents,
+				remainingCents,
+				spendableCents: liquid - remainingCents,
+				occurrences: occ,
+				expensesCents: hhExpenses(hh, bounds.start, bounds.end).reduce(
+					(s, e) => s + e.amountCents,
+					0
+				)
+			});
+		}
+
+		// --- todos
+		const hhTodos = () => [...todos.values()].filter((t) => t.householdId === hh);
+		if (p === '/v1/todos' && m === 'GET') {
+			const includeDone = url.searchParams.get('includeDone') === 'true';
+			const cutoff = new Date(Date.now() - 30 * 86400_000).toISOString();
+			const open = hhTodos()
+				.filter((t) => !t.doneAt)
+				.sort((a, b) => a.sortOrder - b.sortOrder);
+			const done = includeDone
+				? hhTodos()
+						.filter((t) => t.doneAt && t.doneAt >= cutoff)
+						.sort((a, b) => b.doneAt!.localeCompare(a.doneAt!))
+				: [];
+			return send(res, 200, [...open, ...done].map(todoView));
+		}
+		if (p === '/v1/todos' && m === 'POST') {
+			const b = await readJson(req);
+			const title = String(b.title ?? '').trim();
+			if (!title || title.length > 120) return problem(res, 400, 'Validation failed');
+			const t: Todo = {
+				id: randomUUID(),
+				householdId: hh,
+				title,
+				amountCents: typeof b.amountCents === 'number' ? b.amountCents : null,
+				dueDate: (b.dueDate as string | null) || null,
+				sortOrder: hhTodos().length,
+				doneAt: null,
+				doneBy: null,
+				createdBy: user.id,
+				createdAt: nowIso()
+			};
+			todos.set(t.id, t);
+			record(hh, user, 'todo.created', 'todo', t.id, `added to-pay ${t.title}`);
+			return send(res, 201, todoView(t));
+		}
+		if (p === '/v1/todos/order' && m === 'PUT') {
+			const b = await readJson(req);
+			const ids = Array.isArray(b.ids) ? (b.ids as string[]) : [];
+			ids.forEach((id, i) => {
+				const t = todos.get(id);
+				if (t && t.householdId === hh) t.sortOrder = i;
+			});
+			return send(res, 204);
+		}
+		mm = /^\/v1\/todos\/([^/]+)(\/done)?$/.exec(p);
+		if (mm) {
+			const t = todos.get(mm[1]);
+			if (!t || t.householdId !== hh) return problem(res, 404, 'Not found');
+			if (mm[2] && m === 'POST') {
+				t.doneAt = nowIso();
+				t.doneBy = user.id;
+				record(hh, user, 'todo.done', 'todo', t.id, `ticked off ${t.title}`);
+				return send(res, 200, todoView(t));
 			}
-			const byKind = ['bill', 'subscription', 'income'].map((kind) => ({
-				kind,
-				amountCents: eq(kind),
-				count: active.filter((i) => i.kind === kind).length
-			}));
-			const today = toIso(new Date());
-			const in14 = toIso(new Date(Date.now() + 14 * 86400_000));
-			const upcoming = calendar(hh, today, in14)
-				.sort((a, b) => Number(!!a.paid) - Number(!!b.paid) || a.dueDate.localeCompare(b.dueDate))
-				.slice(0, 20);
+			if (mm[2] && m === 'DELETE') {
+				t.doneAt = null;
+				t.doneBy = null;
+				record(hh, user, 'todo.undone', 'todo', t.id, `reopened ${t.title}`);
+				return send(res, 200, todoView(t));
+			}
+			if (!mm[2] && m === 'PUT') {
+				const b = await readJson(req);
+				Object.assign(t, {
+					title: String(b.title ?? t.title),
+					amountCents: typeof b.amountCents === 'number' ? b.amountCents : null,
+					dueDate: (b.dueDate as string | null) || null,
+					sortOrder: typeof b.sortOrder === 'number' ? b.sortOrder : t.sortOrder
+				});
+				return send(res, 200, todoView(t));
+			}
+			if (!mm[2] && m === 'DELETE') {
+				todos.delete(t.id);
+				record(hh, user, 'todo.deleted', 'todo', null, `deleted to-pay ${t.title}`);
+				return send(res, 204);
+			}
+		}
+
+		// --- goals
+		if (p === '/v1/goals' && m === 'GET')
+			return send(
+				res,
+				200,
+				[...goals.values()].filter((g) => g.householdId === hh && !g.archived).map(goalView)
+			);
+		if (p === '/v1/goals' && m === 'POST') {
+			const b = await readJson(req);
+			if (!b.name || typeof b.targetCents !== 'number' || b.targetCents <= 0)
+				return problem(res, 400, 'Validation failed');
+			const accountId = (b.accountId as string | null) || null;
+			if (accountId) {
+				const a = accounts.get(accountId);
+				if (!a || a.householdId !== hh)
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { accountId: ['Unknown account'] }
+					});
+			}
+			const g: Goal = {
+				id: randomUUID(),
+				householdId: hh,
+				name: String(b.name),
+				targetCents: b.targetCents,
+				targetDate: (b.targetDate as string | null) || null,
+				accountId,
+				savedCents: 0,
+				color: String(b.color ?? '#1baf7a'),
+				icon: String(b.icon ?? 'piggy-bank'),
+				createdBy: user.id,
+				createdAt: nowIso(),
+				archived: false,
+				contributions: []
+			};
+			goals.set(g.id, g);
+			record(
+				hh,
+				user,
+				'goal.created',
+				'goal',
+				g.id,
+				`created goal ${g.name} · ${$(g.targetCents)}`
+			);
+			return send(res, 201, goalView(g));
+		}
+		mm = /^\/v1\/goals\/([^/]+)(\/contribute)?$/.exec(p);
+		if (mm) {
+			const g = goals.get(mm[1]);
+			if (!g || g.householdId !== hh || g.archived) return problem(res, 404, 'Not found');
+			if (mm[2] && m === 'POST') {
+				if (g.accountId)
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						detail: 'Update the linked account balance instead.'
+					});
+				const b = await readJson(req);
+				if (typeof b.amountCents !== 'number' || b.amountCents === 0)
+					return problem(res, 400, 'Validation failed');
+				g.savedCents += b.amountCents;
+				g.contributions.push({ at: nowIso(), amountCents: b.amountCents });
+				record(
+					hh,
+					user,
+					'goal.contributed',
+					'goal',
+					g.id,
+					`${b.amountCents > 0 ? 'added' : 'took'} ${$(Math.abs(b.amountCents))} ${b.amountCents > 0 ? 'to' : 'from'} ${g.name}`
+				);
+				return send(res, 200, goalView(g));
+			}
+			if (!mm[2] && m === 'GET') return send(res, 200, goalView(g));
+			if (!mm[2] && m === 'PUT') {
+				const b = await readJson(req);
+				Object.assign(g, {
+					name: String(b.name ?? g.name),
+					targetCents: typeof b.targetCents === 'number' ? b.targetCents : g.targetCents,
+					targetDate: (b.targetDate as string | null) || null,
+					accountId: (b.accountId as string | null) || null,
+					color: String(b.color ?? g.color),
+					icon: String(b.icon ?? g.icon)
+				});
+				record(hh, user, 'goal.updated', 'goal', g.id, `updated goal ${g.name}`);
+				return send(res, 200, goalView(g));
+			}
+			if (!mm[2] && m === 'DELETE') {
+				g.archived = true;
+				record(hh, user, 'goal.deleted', 'goal', null, `removed goal ${g.name}`);
+				return send(res, 204);
+			}
+		}
+
+		// --- month report
+		if (p === '/v1/reports/month' && m === 'GET') {
+			const month = url.searchParams.get('month') ?? todayIso().slice(0, 7);
+			const [first, last] = monthRange(month);
+			const summary = summaryFor(hh, month);
+			const prevEnd = new Date(parse(first).getTime() - 1).toISOString();
+			const hasHistory = [...accounts.values()].some(
+				(a) =>
+					a.householdId === hh && (snapshots.get(a.id) ?? []).some((s) => s.recordedAt <= prevEnd)
+			);
+			const previousNetWorthCents = hasHistory ? netWorthAt(hh, prevEnd) : null;
+			const monthExpenses = hhExpenses(hh, first, last);
+			const occ = calendar(hh, first, last).filter((o) => o.kind !== 'income');
 			return send(res, 200, {
 				month,
-				netWorthCents: assetsCents - liabilitiesCents,
-				assetsCents,
-				liabilitiesCents,
-				monthlyBillsCents: eq('bill'),
-				monthlySubscriptionsCents: eq('subscription'),
-				monthlyIncomeCents: eq('income'),
-				dueThisMonthCents,
-				paidThisMonthCents,
-				remainingThisMonthCents: dueThisMonthCents - paidThisMonthCents,
-				byCategory: [...byCat.values()].sort((a, b) => b.amountCents - a.amountCents),
-				byKind,
-				upcoming,
-				accounts: acc.map(accountView)
+				summary,
+				previousNetWorthCents,
+				netWorthDeltaCents:
+					previousNetWorthCents === null ? null : summary.netWorthCents - previousNetWorthCents,
+				expensesTotalCents: monthExpenses.reduce((s, e) => s + e.amountCents, 0),
+				topExpenses: [...monthExpenses]
+					.sort((a, b) => b.amountCents - a.amountCents)
+					.slice(0, 5)
+					.map(expenseView),
+				budgets: budgetRows(hh, month).rows,
+				autoPaid: occ.filter((o) => o.paid?.auto),
+				paidCount: occ.filter((o) => o.paid).length,
+				unpaidCount: occ.filter((o) => !o.paid).length,
+				generatedAt: nowIso()
 			});
 		}
 

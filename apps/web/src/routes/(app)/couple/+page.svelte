@@ -155,13 +155,19 @@
 					<Icon name="heart-handshake" size={32} />
 				</span>
 				<h2 class="text-xl font-bold">
-					{household ? `Invite your partner to ${household.name}` : 'Link up with your partner'}
+					{household ? `Invite a partner to ${household.name}` : 'Link up with your partner'}
 				</h2>
 				<p class="text-sm text-base-content/65">
 					{household
 						? 'Show them your Couple Code, or they can type it. Codes last 10 minutes and work once.'
 						: 'One of you creates the household and shows a Couple Code; the other scans or types it.'}
 				</p>
+				{#if household}
+					<p class="text-xs text-base-content/55" data-testid="invite-new-partner">
+						If a partner has left, a fresh Couple Code invites a new one – everything in {household.name}
+						stays as it is.
+					</p>
+				{/if}
 			</div>
 		</section>
 

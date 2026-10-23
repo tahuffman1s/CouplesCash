@@ -20,6 +20,8 @@
 	},
 	"dependencies": {
 		"@lucide/svelte": "^1.61.0",
+		"@simplewebauthn/browser": "14.0.0",
+		"html-to-image": "1.11.13",
 		"jsqr": "^1.4.0",
 		"qr-code-styling": "^1.9.2"
 	},

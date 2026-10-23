@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { centsToInput, formatMoney, parseMoney } from './money.ts';
+import { centsToInput, currencySymbol, formatMoney, parseMoney } from './money.ts';
+import { currency } from '#lib/state/currency.svelte.ts';
 
 describe('formatMoney', () => {
 	it('formats cents as USD', () => {
@@ -19,12 +20,28 @@ describe('formatMoney', () => {
 	it('tolerates garbage', () => {
 		expect(formatMoney(Number.NaN)).toBe('$0.00');
 	});
+	it('formats other currencies when asked', () => {
+		expect(formatMoney(123456, { currency: 'EUR' })).toBe('€1,234.56');
+		expect(formatMoney(123456, { currency: 'GBP', whole: true })).toBe('£1,235');
+		// cents are always hundredths; zero-decimal currencies just drop the fraction
+		expect(formatMoney(150000, { currency: 'JPY' })).toBe('¥1,500');
+		expect(formatMoney(100, { currency: 'Z1' })).toBe('$1.00'); // malformed → USD fallback
+	});
+	it('follows the household currency by default', () => {
+		currency.set('EUR');
+		expect(formatMoney(250)).toBe('€2.50');
+		expect(currencySymbol()).toBe('€');
+		currency.set('usd');
+		expect(formatMoney(250)).toBe('$2.50');
+		expect(currencySymbol('GBP')).toBe('£');
+	});
 });
 
 describe('parseMoney', () => {
 	it('parses user input into cents', () => {
 		expect(parseMoney('1,234.56')).toBe(123456);
 		expect(parseMoney('$12')).toBe(1200);
+		expect(parseMoney('€12,50'.replace(',', '.'))).toBe(1250);
 		expect(parseMoney('0.5')).toBe(50);
 		expect(parseMoney('-3')).toBe(-300);
 		expect(parseMoney(' 7.1 ')).toBe(710);

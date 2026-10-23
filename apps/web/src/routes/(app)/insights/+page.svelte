@@ -7,6 +7,7 @@
 	import NoHousehold from '#lib/components/NoHousehold.svelte';
 	import Donut from '#lib/charts/Donut.svelte';
 	import KindBars from '#lib/charts/KindBars.svelte';
+	import BudgetList from '#lib/components/BudgetList.svelte';
 	import { formatMoney } from '#lib/utils/money.ts';
 	import { addMonths, formatMonth } from '#lib/utils/dates.ts';
 	import { FREQUENCY_SUFFIX } from '#lib/utils/labels.ts';
@@ -38,12 +39,26 @@
 	const subsTotal = $derived(
 		data.subscriptions.reduce((a: number, i: RecurringItem) => a + i.monthlyEquivalentCents, 0)
 	);
-	const hasData = $derived(!!s && s.byKind.some((k) => k.count > 0));
+	const hasData = $derived(
+		!!s && (s.byKind.some((k) => k.count > 0) || s.byCategory.some((c) => c.amountCents > 0))
+	);
 </script>
 
 <svelte:head><title>Insights · CouplesCash</title></svelte:head>
 
-<AppBar title="Insights" back="/more" />
+<AppBar title="Insights" back="/more">
+	{#snippet action()}
+		{#if s}
+			<a
+				href="/insights/report?m={data.month}"
+				class="btn min-h-11 rounded-full btn-ghost px-3 btn-sm"
+				data-testid="report-link"
+			>
+				<Icon name="file-text" size={18} /> Month report
+			</a>
+		{/if}
+	{/snippet}
+</AppBar>
 
 <main class="flex flex-col gap-4 px-4 pt-2">
 	{#if !s}
@@ -81,7 +96,7 @@
 					<div>
 						<h2 id="bycat" class="font-semibold">Spending by category</h2>
 						<p class="text-xs text-base-content/60">
-							Monthly equivalent of every active bill and subscription
+							Monthly equivalent of every bill and subscription, plus this month's expenses
 						</p>
 					</div>
 					{#if slices.length}
@@ -118,6 +133,23 @@
 					</ul>
 				</div>
 			</section>
+
+			{#if data.budgets}
+				<section
+					class="card border border-base-300/60 bg-base-100 shadow-sm"
+					aria-labelledby="budgets"
+				>
+					<div class="card-body gap-3 p-5">
+						<div>
+							<h2 id="budgets" class="font-semibold">Budgets</h2>
+							<p class="text-xs text-base-content/60">
+								Monthly amount per category · tap a row to set or change it
+							</p>
+						</div>
+						<BudgetList budgets={data.budgets} month={data.month} />
+					</div>
+				</section>
+			{/if}
 
 			<section
 				class="card border border-base-300/60 bg-base-100 shadow-sm"

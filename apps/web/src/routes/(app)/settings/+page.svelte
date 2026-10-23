@@ -58,6 +58,40 @@
 		</form>
 	</section>
 
+	<ul
+		class="card divide-y divide-base-300/60 border border-base-300/60 bg-base-100 shadow-sm"
+		aria-label="More settings"
+	>
+		<li>
+			<a href="/settings/notifications" class="flex min-h-14 items-center gap-3 px-4 py-3">
+				<span
+					class="flex h-10 w-10 items-center justify-center rounded-xl bg-base-200 text-primary"
+				>
+					<Icon name="bell" size={20} />
+				</span>
+				<span class="flex-1">
+					<span class="block font-medium">Notifications</span>
+					<span class="block text-xs text-base-content/60">Bill reminders on your phone</span>
+				</span>
+				<Icon name="chevron-right" size={18} class="text-base-content/40" />
+			</a>
+		</li>
+		<li>
+			<a href="/settings/passkeys" class="flex min-h-14 items-center gap-3 px-4 py-3">
+				<span
+					class="flex h-10 w-10 items-center justify-center rounded-xl bg-base-200 text-primary"
+				>
+					<Icon name="key-round" size={20} />
+				</span>
+				<span class="flex-1">
+					<span class="block font-medium">Passkeys</span>
+					<span class="block text-xs text-base-content/60">Sign in with Face ID or Touch ID</span>
+				</span>
+				<Icon name="chevron-right" size={18} class="text-base-content/40" />
+			</a>
+		</li>
+	</ul>
+
 	<section class="card border border-base-300/60 bg-base-100 shadow-sm" aria-labelledby="security">
 		<div class="card-body gap-3 p-5">
 			<div class="flex items-center justify-between">

@@ -138,3 +138,13 @@
 @utility hairline {
 	border-color: color-mix(in oklab, var(--color-base-content) 8%, transparent);
 }
+
+/* Month report → PDF: hide app chrome, let the card breathe */
+@media print {
+	body {
+		background: white;
+	}
+	.pb-dock {
+		padding-bottom: 0;
+	}
+}

@@ -1,6 +1,22 @@
 import { API_URL } from '$app/env/private';
 import { redirect, type RequestEvent } from '@sveltejs/kit';
-import type { AuthResult, Problem } from '#lib/types.ts';
+import type {
+	ActivityPage,
+	AuthResult,
+	BudgetRow,
+	BudgetsResponse,
+	Expense,
+	Goal,
+	Household,
+	MonthReport,
+	Passkey,
+	PasskeyConfig,
+	PayPeriod,
+	PayPeriodView,
+	Problem,
+	PushPrefs,
+	Todo
+} from '#lib/types.ts';
 import { ACCESS_COOKIE, REFRESH_COOKIE, clearAuthCookies, setAuthCookies } from './cookies';
 
 export const API_BASE = `${API_URL}/v1`;
@@ -148,6 +164,146 @@ export function api(event: RequestEvent) {
 }
 
 export type Api = ReturnType<typeof api>;
+
+export type HouseholdPatch = Partial<{
+	name: string;
+	currency: string;
+	weekStart: 0 | 1;
+	timezone: string;
+	defaultAccountId: string | null;
+	payPeriod: PayPeriod;
+	payAnchorDate: string | null;
+}>;
+export type ExpenseBody = {
+	name: string;
+	amountCents: number;
+	categoryId: string | null;
+	accountId: string | null;
+	spentOn: string;
+	note: string | null;
+	deduct: boolean;
+};
+export type TodoBody = { title: string; amountCents: number | null; dueDate: string | null };
+export type GoalBody = {
+	name: string;
+	targetCents: number;
+	targetDate: string | null;
+	accountId: string | null;
+	color: string;
+	icon: string;
+};
+export type PushPrefsBody = Omit<PushPrefs, 'subscriptions'>;
+
+/**
+ * Typed v2 endpoints (docs/API-CONTRACT.md § v2 additions) on top of the generic client.
+ * Everything here is household-scoped by the caller's token; ids never come from the browser
+ * unvalidated – they are forwarded as route segments the API 404s on when foreign.
+ */
+export function endpoints(event: RequestEvent) {
+	const c = api(event);
+	const month = (m?: string | null) => (m ? `?month=${encodeURIComponent(m)}` : '');
+	return {
+		household: {
+			get: () => c.get<Household | null>('/couple'),
+			update: (patch: HouseholdPatch) => c.patch<Household>('/couple', patch)
+		},
+		activity: {
+			list: (opts: { before?: string | null; limit?: number } = {}) => {
+				const q = new URLSearchParams();
+				if (opts.before) q.set('before', opts.before);
+				if (opts.limit) q.set('limit', String(opts.limit));
+				const qs = q.toString();
+				return c.get<ActivityPage>(`/activity${qs ? `?${qs}` : ''}`);
+			}
+		},
+		expenses: {
+			list: (m?: string | null) => c.get<Expense[]>(`/expenses${month(m)}`),
+			range: (from: string, to: string) => c.get<Expense[]>(`/expenses?from=${from}&to=${to}`),
+			get: (id: string) => c.get<Expense>(`/expenses/${id}`),
+			create: (body: ExpenseBody) => c.post<Expense>('/expenses', body),
+			update: (id: string, body: ExpenseBody) => c.put<Expense>(`/expenses/${id}`, body),
+			remove: (id: string) => c.del(`/expenses/${id}`)
+		},
+		budgets: {
+			list: (m?: string | null) => c.get<BudgetsResponse>(`/budgets${month(m)}`),
+			set: (categoryId: string, amountCents: number) =>
+				c.put<BudgetRow>(`/budgets/${categoryId}`, { amountCents }),
+			clear: (categoryId: string) => c.del(`/budgets/${categoryId}`)
+		},
+		payperiod: {
+			/** Resolves to null when the household has not configured a pay period (409). */
+			view: async (date?: string | null): Promise<PayPeriodView | null> => {
+				try {
+					return await c.get<PayPeriodView>(`/payperiod${date ? `?date=${date}` : ''}`);
+				} catch (e) {
+					if (isApiError(e, 409)) return null;
+					throw e;
+				}
+			}
+		},
+		todos: {
+			list: (includeDone = false) =>
+				c.get<Todo[]>(`/todos${includeDone ? '?includeDone=true' : ''}`),
+			create: (body: TodoBody) => c.post<Todo>('/todos', body),
+			update: (id: string, body: TodoBody & { sortOrder?: number }) =>
+				c.put<Todo>(`/todos/${id}`, body),
+			done: (id: string) => c.post<Todo>(`/todos/${id}/done`),
+			undone: (id: string) => c.del<Todo>(`/todos/${id}/done`),
+			remove: (id: string) => c.del(`/todos/${id}`),
+			order: (ids: string[]) => c.put<void>('/todos/order', { ids })
+		},
+		goals: {
+			list: () => c.get<Goal[]>('/goals'),
+			get: (id: string) => c.get<Goal>(`/goals/${id}`),
+			create: (body: GoalBody) => c.post<Goal>('/goals', body),
+			update: (id: string, body: GoalBody) => c.put<Goal>(`/goals/${id}`, body),
+			remove: (id: string) => c.del(`/goals/${id}`),
+			contribute: (id: string, amountCents: number) =>
+				c.post<Goal>(`/goals/${id}/contribute`, { amountCents })
+		},
+		push: {
+			/** Resolves to null when push is not configured on the server (503). */
+			vapidPublicKey: async (): Promise<string | null> => {
+				try {
+					const r = await c.get<{ publicKey: string }>('/push/vapid-public-key');
+					return r.publicKey;
+				} catch (e) {
+					if (isApiError(e, 503)) return null;
+					throw e;
+				}
+			},
+			prefs: () => c.get<PushPrefs>('/push/prefs'),
+			updatePrefs: (body: PushPrefsBody) => c.put<PushPrefs>('/push/prefs', body),
+			unsubscribe: (body: { endpoint?: string; id?: string }) =>
+				authFetch(event, '/push/subscriptions', jsonInit('DELETE', body)).then(parse<void>),
+			test: () => c.post<void>('/push/test')
+		},
+		passkeys: {
+			list: () => c.get<Passkey[]>('/auth/passkeys'),
+			remove: (id: string) => c.del(`/auth/passkeys/${id}`)
+		},
+		reports: {
+			month: (m?: string | null) => c.get<MonthReport>(`/reports/month${month(m)}`)
+		}
+	};
+}
+
+/** Unauthenticated GET (passkey config). */
+export async function publicGet<T>(path: string): Promise<T> {
+	const res = await fetch(`${API_BASE}${path}`, {
+		headers: { accept: 'application/json, application/problem+json' }
+	});
+	return parse<T>(res);
+}
+
+/** `GET /auth/passkeys/config`, tolerant of old API builds and outages (→ disabled). */
+export async function passkeyConfig(): Promise<PasskeyConfig> {
+	try {
+		return await publicGet<PasskeyConfig>('/auth/passkeys/config');
+	} catch {
+		return { enabled: false, rpId: '' };
+	}
+}
 
 /** Unauthenticated POST (register / login / refresh). */
 export async function publicPost<T>(path: string, body: unknown): Promise<T> {

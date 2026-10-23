@@ -12,16 +12,40 @@
 			body: 'Where the money goes each month'
 		},
 		{
+			href: '/activity',
+			icon: 'activity',
+			label: 'Activity',
+			body: 'Who changed what, and when'
+		},
+		{
+			href: '/todos',
+			icon: 'list-checks',
+			label: 'To pay',
+			body: "Shared checklist for things that aren't bills"
+		},
+		{
+			href: '/payperiod',
+			icon: 'calendar-clock',
+			label: 'Pay period',
+			body: "What's due before the next payday"
+		},
+		{
 			href: '/couple',
 			icon: 'heart-handshake',
 			label: 'Couple',
 			body: data.hasHousehold ? 'Your household and partner' : 'Link with your partner'
 		},
 		{
+			href: '/settings/household',
+			icon: 'sliders-horizontal',
+			label: 'Household settings',
+			body: 'Currency, week start, pay period, time zone'
+		},
+		{
 			href: '/settings',
 			icon: 'settings',
 			label: 'Settings',
-			body: 'Theme, profile, install, sign out'
+			body: 'Theme, profile, notifications, passkeys, install'
 		}
 	]);
 </script>

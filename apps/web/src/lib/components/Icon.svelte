@@ -74,6 +74,25 @@
 	import EyeOff from '@lucide/svelte/icons/eye-off';
 	import Bell from '@lucide/svelte/icons/bell';
 	import Pencilline from '@lucide/svelte/icons/pencil-line';
+	import Bot from '@lucide/svelte/icons/bot';
+	import ListChecks from '@lucide/svelte/icons/list-checks';
+	import Target from '@lucide/svelte/icons/target';
+	import BellRing from '@lucide/svelte/icons/bell-ring';
+	import KeyRound from '@lucide/svelte/icons/key-round';
+	import Fingerprint from '@lucide/svelte/icons/fingerprint';
+	import Printer from '@lucide/svelte/icons/printer';
+	import ArrowUp from '@lucide/svelte/icons/arrow-up';
+	import ArrowDown from '@lucide/svelte/icons/arrow-down';
+	import ChevronUp from '@lucide/svelte/icons/chevron-up';
+	import Activity from '@lucide/svelte/icons/activity';
+	import CalendarClock from '@lucide/svelte/icons/calendar-clock';
+	import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
+	import Undo2 from '@lucide/svelte/icons/undo-2';
+	import ShoppingBag from '@lucide/svelte/icons/shopping-bag';
+	import FileText from '@lucide/svelte/icons/file-text';
+	import Globe from '@lucide/svelte/icons/globe';
+	import CircleMinus from '@lucide/svelte/icons/circle-minus';
+	import Send from '@lucide/svelte/icons/send';
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const ICONS: Record<string, Component<any>> = {
@@ -154,7 +173,26 @@
 		dog: Dog,
 		eye: Eye,
 		'eye-off': EyeOff,
-		bell: Bell
+		bell: Bell,
+		bot: Bot,
+		'list-checks': ListChecks,
+		target: Target,
+		'bell-ring': BellRing,
+		'key-round': KeyRound,
+		fingerprint: Fingerprint,
+		printer: Printer,
+		'arrow-up': ArrowUp,
+		'arrow-down': ArrowDown,
+		'chevron-up': ChevronUp,
+		activity: Activity,
+		'calendar-clock': CalendarClock,
+		'sliders-horizontal': SlidersHorizontal,
+		'undo-2': Undo2,
+		'shopping-bag': ShoppingBag,
+		'file-text': FileText,
+		globe: Globe,
+		'circle-minus': CircleMinus,
+		send: Send
 	};
 
 	export const ICON_NAMES = Object.keys(ICONS);
