@@ -338,3 +338,55 @@ Read these alongside the §v2 tables above; where the two differ the notes descr
 - **CLI:** `dotnet CouplesCash.Api.dll --vapid` runs before any configuration is read (no database, no
   `Jwt__Secret`, read-only FS fine) and prints exactly two stdout lines, `Push__VapidPublicKey=…` and
   `Push__VapidPrivateKey=…` (base64url, 65-byte uncompressed P-256 point / 32-byte scalar), exit code 0.
+
+---
+
+# v3 additions
+
+```ts
+type BankLink = { id: string; provider: 'simplefin'; name: string; createdAt: string; lastSyncedAt: string | null; lastError: string | null;
+  syncEnabled: boolean; bridgeErrors: string[]; accounts: ExternalAccount[] };
+type ExternalAccount = { id: string; externalId: string; orgName: string; name: string; currency: string; balanceCents: number;
+  availableCents: number | null; balanceAt: string; accountId: string | null; accountName: string | null; updatedAt: string };
+type SyncResult = { linkId: string; newTransactions: number; updatedAccounts: number; autoMatched: number; errors: string[]; syncedAt: string };
+type InboxStatus = 'pending' | 'confirmed' | 'ignored';
+type Suggestion =
+  | { kind: 'category'; categoryId: string; categoryName: string; confidence: number }
+  | { kind: 'occurrence'; itemId: string; itemName: string; itemKind: Kind; dueDate: string; confidence: number }
+  | { kind: 'transfer'; confidence: number }
+  | null;
+type InboxItem = { id: string; source: 'simplefin' | 'csv'; accountId: string | null; accountName: string | null; postedOn: string;
+  amountCents: number /* signed */; description: string; payee: string | null; memo: string | null; pending: boolean; status: InboxStatus;
+  suggestion: Suggestion; confirmed: { expenseId: string | null; itemId: string | null; dueDate: string | null; by: string | null; byName: string | null; at: string | null; auto: boolean } | null;
+  createdAt: string };
+type InboxSummary = { pending: number; suggested: number /* pending with confidence ≥ 70 */; lastSyncedAt: string | null; linkCount: number };
+type CsvImportResult = { id: string; rowCount: number; imported: number; duplicates: number; skipped: number; inboxPending: number };
+```
+
+## Linked banks
+| Method | Route | Body | Response |
+|---|---|---|---|
+| GET | `/v1/banks` | — | `200 BankLink[]` |
+| POST | `/v1/banks/simplefin/claim` | `{ setupToken, name? }` | `201 BankLink` (claims, stores encrypted, runs a first sync inline with a 20 s budget) · `400 errors.setupToken` invalid/expired · `503 bank_sync_not_configured` without `Security__DataKey` · `502 bridge_unreachable` |
+| DELETE | `/v1/banks/{id}` | — | `204` (keeps inbox rows and mappings' accounts; external accounts removed) |
+| PATCH | `/v1/banks/{id}` | `{ name?, syncEnabled? }` | `200 BankLink` |
+| POST | `/v1/banks/{id}/sync` | — | `200 SyncResult` · `429` if synced < 15 min ago (`Retry-After`) · `502` with `errors` on Bridge failure |
+| PUT | `/v1/banks/accounts/{externalAccountId}` | `{ accountId: string | null }` or `{ create: { name, type, institution? } }` | `200 ExternalAccount` (mapping an account immediately updates its balance + snapshot) |
+
+## Inbox
+| Method | Route | Body / Query | Response |
+|---|---|---|---|
+| GET | `/v1/inbox/summary` | — | `200 InboxSummary` |
+| GET | `/v1/inbox?status=pending&before=&limit=50` | | `200 { items: InboxItem[]; nextBefore: string | null }` newest `postedOn` first |
+| POST | `/v1/inbox/{id}/confirm` | `{ as: 'expense', categoryId?, name? }` or `{ as: 'occurrence', itemId, dueDate }` | `200 InboxItem` · `400` sign/kind mismatch, not pending, occurrence already paid |
+| POST | `/v1/inbox/{id}/ignore` | — | `200 InboxItem` |
+| POST | `/v1/inbox/{id}/restore` | — | `200 InboxItem` (back to pending; reverses the confirmed expense / payment) |
+| POST | `/v1/inbox/bulk` | `{ action: 'confirm-suggested' \| 'ignore', ids?: string[] }` (no ids = all pending; confirm-suggested only takes confidence ≥ 70) | `200 { confirmed, ignored, skipped }` |
+
+## CSV import
+| POST | `/v1/imports/csv` | `{ accountId, filename, rows: { postedOn: 'YYYY-MM-DD', amountCents: number, description, payee?, memo? }[] }` (≤ 5000 rows, body ≤ 2 MB — the web parses and maps columns client-side) | `201 CsvImportResult` |
+| GET | `/v1/imports/csv` | — | `200 { id, filename, rowCount, imported, duplicates, createdAt, createdByName }[]` last 20 |
+
+Activity kinds added: `bank.linked|unlinked|synced|error`, `import.csv`, `transaction.confirmed|ignored|restored|automatched`.
+Occurrence payments created from the inbox carry `paid.auto = false` (user) or `true` (auto-match); unpaying an auto-matched occurrence restores the inbox row to pending.
+Env: `Security__DataKey` (base64 32 bytes), `Sync__IntervalHours` (6), `Sync__ManualCooldownMinutes` (15), `SimpleFin__BaseUrl` (override for tests; default derived from the access URL).
