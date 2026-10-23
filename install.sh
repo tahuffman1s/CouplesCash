@@ -233,6 +233,7 @@ else
 fi
 
 RELOGIN=0
+NEEDS_REBOOT=0
 if [[ "$TARGET_USER" != root ]] && ! id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx docker; then
   $SUDO usermod -aG docker "$TARGET_USER" && RELOGIN=1
   warn "added $TARGET_USER to the docker group (takes effect after you log out and back in)"
@@ -284,6 +285,20 @@ if [[ "$PI_MODE" == 1 ]]; then
     ok "zram swap enabled (zstd, 25% of RAM)"
   else
     warn "no swap configured — consider enabling zram for your distro"
+  fi
+  # Raspberry Pi OS boots with the memory cgroup disabled, so Docker cannot enforce the
+  # mem_limit values in compose.yml ("Your kernel does not support memory limit capabilities").
+  # Enabling it needs a kernel flag and a reboot; we add the flag and ask for the reboot at the end.
+  cmdline=""
+  for f in /boot/firmware/cmdline.txt /boot/cmdline.txt; do [[ -f "$f" ]] && { cmdline="$f"; break; }; done
+  if [[ -n "$cmdline" ]]; then
+    if grep -q "cgroup_enable=memory" "$cmdline"; then
+      ok "memory cgroup enabled (Docker memory limits work)"
+    else
+      $SUDO sed -i '1 s/$/ cgroup_enable=memory cgroup_memory=1/' "$cmdline"
+      NEEDS_REBOOT=1
+      warn "enabled the memory cgroup in $cmdline — a reboot is needed before Docker memory limits apply"
+    fi
   fi
   # Image pulls are much faster than local builds on a Pi 4; make the fallback explicit.
   PI_PULL_ONLY=1
@@ -481,6 +496,7 @@ if [[ "$NO_START" != 1 ]]; then
   printf '\n'
 fi
 (( RELOGIN )) && printf '  Log out and back in (or run: newgrp docker) to use docker without sudo.\n\n'
+(( NEEDS_REBOOT )) && printf '  %sReboot once%s (sudo reboot) so the memory cgroup takes effect — until then Docker prints\n  "Your kernel does not support memory limit capabilities" and runs without memory limits.\n\n' "$YELLOW" "$RESET"
 printf '  Update:   curl -fsSL https://raw.githubusercontent.com/tahuffman1s/CouplesCash/%s/install.sh | bash\n' "$BRANCH"
 printf '  Status:   cd %s && make ps        Logs: make logs\n' "$INSTALL_DIR"
 printf '  Backup:   make backup                 Stop: make down\n'

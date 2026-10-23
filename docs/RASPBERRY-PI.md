@@ -234,6 +234,13 @@ Check `docker stats`. The `DOTNET_GCHeapHardLimit` and `mem_limit` in
 added heavy features, raise `api`'s `mem_limit` to `256m`. Add zram
 (`install.sh --pi` sets this up automatically).
 
+**`Your kernel does not support memory limit capabilities or the cgroup is not mounted`**
+— Raspberry Pi OS disables the memory cgroup by default, so the `mem_limit`
+values in `compose.yml` are ignored (the app still runs). `install.sh --pi`
+adds `cgroup_enable=memory cgroup_memory=1` to `/boot/firmware/cmdline.txt`;
+reboot once and the warning disappears. To do it by hand:
+`sudo sed -i '1 s/$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt && sudo reboot`.
+
 **`docker compose pull` says `denied` / `unauthorized`** — the GHCR packages that
 CI publishes are **private by default**. One-time fix on GitHub: your profile →
 *Packages* → `couplescash-api` and `couplescash-web` → *Package settings* →
