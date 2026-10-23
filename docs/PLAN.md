@@ -27,9 +27,9 @@ This plan is optimized for **vibe coding**: every section is small, self-contain
 
 | Layer | Choice | Why |
 |---|---|---|
-| Frontend | SvelteKit 2 + Svelte 5 (runes), TypeScript, `adapter-node` | SSR + form actions = fast on a Pi, progressive enhancement, tiny client bundles |
+| Frontend | SvelteKit 3 + Svelte 5 (runes), TypeScript, `adapter-node` | SSR + form actions = fast on a Pi, progressive enhancement, tiny client bundles |
 | Styling | Tailwind CSS 4 (`@tailwindcss/vite`) + daisyUI 5 | Themeable components, `prefersdark` theme support out of the box |
-| PWA | SvelteKit built-in `src/service-worker.ts` + `static/manifest.webmanifest` | No extra dependency; precache app shell, network-first for data |
+| PWA | SvelteKit built-in service worker (`src/service-worker/index.ts`) + `static/manifest.webmanifest` | No extra dependency; precache app shell, network-first for data |
 | QR | `qr-code-styling` (render) + `jsqr` (scan via `getUserMedia`) | Styled "Couple Code" with rounded dots and a heart in the middle; scanner works in iOS PWA standalone |
 | Charts | Hand-rolled SVG donut (Svelte component) | Zero deps, theme-aware colours, ~2 KB |
 | E2E | Playwright | Mobile viewports (iPhone 14, Pixel 7), API mocked with `page.route` |
@@ -60,7 +60,7 @@ This plan is optimized for **vibe coding**: every section is small, self-contain
                                    internal docker network                SQL, rate limits
 ```
 
-**BFF (backend-for-frontend) pattern.** The browser only ever talks to SvelteKit. SvelteKit's server (`$lib/server/api.ts`) holds the access/refresh tokens in `httpOnly; Secure; SameSite=Lax` cookies, forwards requests to the API with a bearer token, and transparently refreshes on 401. Benefits:
+**BFF (backend-for-frontend) pattern.** The browser only ever talks to SvelteKit. SvelteKit's server (`src/lib/server/api.ts`) holds the access/refresh tokens in `httpOnly; Secure; SameSite=Lax` cookies, forwards requests to the API with a bearer token, and transparently refreshes on 401. Benefits:
 - The API is **not reachable from the internet** at all — only `web` is published through the tunnel.
 - No tokens in `localStorage`, no CORS surface, SvelteKit's built-in origin check protects form actions from CSRF.
 - Client-side fetches (calendar month navigation, etc.) go through `/api/[...path]` which is a thin authenticated proxy requiring the `X-Requested-With: CouplesCash` header.
@@ -177,3 +177,13 @@ Theme: daisyUI themes `couplescash` (light) and `couplescash-dark` (dark, `prefe
 | — | **Integrator** (main thread) | glue | API runs against local Postgres, web talks to the real API, smoke test register → link → add account → add bill → calendar → paid |
 
 Phases after v1 (not in this pass): push reminders (Web Push works on iOS 16.4+ PWAs), CSV import, budgets, transaction logging, Cloudflare Access setup guide.
+
+---
+
+## 10. Status (2026-10-23)
+
+v1 is built and verified:
+- API: `dotnet build -warnaserror` clean, 70 unit tests, migrations applied to PostgreSQL 16, curl smoke script green.
+- Web: `pnpm check` 0 errors, lint clean, 21 unit tests, 18 Playwright e2e tests on iPhone 14 + Pixel 7, passing against both the mock API and the real API + Postgres.
+- Infra: compose validated, scripts shellcheck-clean, CI publishes multi-arch images to GHCR.
+- Not yet exercised here: a real `docker compose up` (no Docker daemon in the build sandbox) and a Cloudflare tunnel. Follow README → "Deploy to a Raspberry Pi".
