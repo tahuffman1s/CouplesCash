@@ -1,6 +1,23 @@
 import { expect, test, type Page } from '@playwright/test';
 import { addAccount, registerWithHousehold, todayIso } from './helpers';
 
+/**
+ * The demo bank (`demo-token`) only exists in the mock API's fake Bridge. Against a real API the
+ * claim form shows the "not configured" state (no DATA_KEY) or rejects the token, so these flows
+ * skip themselves; the real bank-sync path is covered by apps/api/scripts/smoke.sh with a fake
+ * SimpleFIN server.
+ */
+async function skipUnlessMockBridge(page: Page) {
+	await page.goto('/settings/banks');
+	await expect(page.getByRole('heading', { name: 'How bank sync works' })).toBeVisible();
+	// the not-configured state only shows after a claim attempt (listing links always works)
+	await page.getByLabel('Setup token').fill('probe');
+	await page.getByRole('button', { name: 'Link bank' }).click();
+	await expect(page.getByRole('alert').or(page.getByTestId('banks-not-configured'))).toBeVisible();
+	const notConfigured = await page.getByTestId('banks-not-configured').count();
+	test.skip(notConfigured > 0, 'bank sync not configured on this API (demo bank is mock-only)');
+}
+
 /** Links the demo bank at /settings/banks and waits for its two external accounts. */
 async function linkDemoBank(page: Page) {
 	await page.goto('/settings/banks');
@@ -45,6 +62,7 @@ test('link a bank: bad token, demo token, map + create accounts, sync cooldown, 
 }) => {
 	await registerWithHousehold(page);
 	await addAccount(page, 'Everyday', '1000');
+	await skipUnlessMockBridge(page);
 
 	// an invalid setup token is a field error, not a crash
 	await page.goto('/settings/banks');
@@ -106,6 +124,7 @@ test('inbox: suggestions, confirm as bill / expense, ignore + restore, bulk conf
 }) => {
 	await registerWithHousehold(page);
 	await addAccount(page, 'Everyday', '1000');
+	await skipUnlessMockBridge(page);
 	const today = todayIso();
 	const firstOfMonth = `${today.slice(0, 7)}-01`;
 
