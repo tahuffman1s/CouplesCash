@@ -541,3 +541,45 @@ Deviations and clarifications from the "# v4 additions" tables, as built in `app
   target" at 0).
 - **Migration 0004**: `budgets.period` (`monthly` default, CHECK) with the PK rebuilt as `(household_id, category_id, period)`;
   `households.weekly_spend_cents`; `recurring_items.payee_hint`; `notification_prefs.week_summary_enabled`; `week_summary_log`.
+
+---
+
+# v5 additions
+
+```ts
+type IgnoreReason = 'manual' | 'transfer' | 'dropped' | 'superseded';
+// InboxItem gains: ignoreReason: IgnoreReason | null;
+//   transfer: { peerId: string | null; peerAccountId: string | null; peerAccountName: string | null; auto: boolean } | null;
+//   match: { itemId: string; itemName: string; itemKind: Kind; dueDate: string } | null   // set when confirmed as occurrence
+//   expense: { expenseId: string; categoryId: string | null; categoryName: string | null } | null
+// Account gains: availableCents: number | null; pendingOutCents: number; linked: boolean
+// Household gains: autoIgnoreTransfers: boolean
+type AccountTransaction = InboxItem & { kind: 'bank' | 'manual' };   // manual = typed expense on this account (id = expense id, source 'manual')
+type MatchCandidate = { itemId: string; itemName: string; kind: Kind; dueDate: string; amountCents: number;
+  paid: Paid | null; paidByThis: boolean; score: number /* 0–100 */ };
+type TransferPair = { id: string; date: string; amountCents: number; from: { accountId: string; name: string; transactionId: string };
+  to: { accountId: string; name: string; transactionId: string }; auto: boolean };
+type TransferReport = { month: string; totalCents: number;
+  flows: { fromAccountId: string | null; fromName: string; toAccountId: string | null; toName: string; totalCents: number; count: number }[];
+  netByAccount: { accountId: string; name: string; inCents: number; outCents: number; netCents: number }[];
+  pairs: TransferPair[]; oneSided: InboxItem[] };
+type BillPayment = { dueDate: string; plannedCents: number; paid: Paid | null; varianceCents: number | null;
+  transaction: { id: string; postedOn: string; amountCents: number; description: string; accountName: string | null } | null };
+```
+
+| Method | Route | Body / Query | Response |
+|---|---|---|---|
+| GET | `/v1/accounts/{id}/transactions` | `?filter=all\|pending\|review\|matched\|transfers&q=&month=YYYY-MM&before=&limit=50` | `200 { items: AccountTransaction[]; nextBefore: string \| null; totals: { inCents, outCents, pendingOutCents, count } }` |
+| GET | `/v1/inbox/{id}/candidates` | `?days=30` | `200 { occurrences: MatchCandidate[]; transferPeers: InboxItem[] }` ranked |
+| POST | `/v1/inbox/{id}/match` | `{ itemId, dueDate }` | `200 InboxItem` — any status; reverses a previous expense/transfer first · `400` sign/kind mismatch · `409` occurrence paid by another transaction |
+| POST | `/v1/inbox/{id}/transfer` | `{ peerId?: string \| null }` | `200 InboxItem` (peer updated too; one-sided learns the payee) |
+| POST | `/v1/inbox/{id}/unmatch` | — | `200 InboxItem` back to pending, reversing expense / payment / transfer (and the transfer peer) |
+| POST | `/v1/recurring/from-transaction` | `{ transactionId, name?, kind?, frequency? }` | `201 { item: RecurringItem; transaction: InboxItem }` |
+| GET | `/v1/recurring/{id}/payments` | `?limit=12` | `200 BillPayment[]` newest first |
+| GET | `/v1/recurring/{id}/occurrences/{date}/candidates` | `?days=10` | `200 InboxItem[]` ranked unmatched rows |
+| POST | `/v1/recurring/{id}/occurrences/{date}/link` | `{ transactionId }` | `200 Occurrence` |
+| GET | `/v1/transfers` | `?month=YYYY-MM` | `200 TransferReport` |
+| PATCH | `/v1/couple` | `{ autoIgnoreTransfers?: boolean }` | `200 Household` |
+
+`GET /v1/inbox` excludes `ignoreReason ∈ {dropped, superseded}` unless `?includeHidden=1`. Existing `confirm` / `ignore` / `restore` stay.
+Activity kinds added: `transaction.posted`, `transaction.dropped`, `transaction.matched`, `transaction.unmatched`, `transfer.paired`, `transfer.auto`, `transfer.unpaired`, `recurring.from_transaction`.
