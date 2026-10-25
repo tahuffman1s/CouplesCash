@@ -606,3 +606,18 @@ type PendingView = { totalOutCents: number; totalInCents: number; count: number;
 | GET | `/v1/matcher/status` | — | `200 { engine: 'fuzzy' \| 'builtin', reachable: boolean, version: string \| null, lastRunAt: string \| null, lastAutoMatched: number }` |
 | PATCH | `/v1/couple` | `{ autoMatchLevel? }` | `200 Household` |
 WeekView gains `pendingOutCents`. Activity kinds: `transaction.automatched` carries `data.reason`; new `transaction.autocategorized`.
+
+### v6 simplicity additions
+```ts
+type BillSuggestion = { id: string; name: string; kind: Kind; amountCents: number; amountVaries: boolean; frequency: Frequency;
+  nextDue: string; bankName: string; score: number; sampleCount: number; lastSeen: string };
+type TransactionFeed = { pending: InboxItem[] /* all in-progress, every account */; items: InboxItem[]; nextBefore: string | null;
+  toReviewCount: number };
+```
+| Method | Route | Body / Query | Response |
+|---|---|---|---|
+| GET | `/v1/transactions` | `?accountId=&q=&before=&limit=50` | `200 TransactionFeed` — `pending` always complete (first page only), `items` posted rows + manual expenses, newest first |
+| GET | `/v1/bill-suggestions` | — | `200 BillSuggestion[]` (status open, best first) |
+| POST | `/v1/bill-suggestions/{id}/accept` | `{ name?, kind?, amountCents?, frequency?, nextDue? }` (overrides) | `201 { item: RecurringItem; matched: number }` — creates the item with `bankNames=[bankName]` and matches the sample transactions |
+| POST | `/v1/bill-suggestions/{id}/dismiss` | — | `204` (never suggested again) |
+`POST /v1/recurring` is what the quick-add sheet calls (the parser is client-side); it already accepts every field the preview produces.

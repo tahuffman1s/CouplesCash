@@ -53,3 +53,25 @@ Response:
 - **Categories** (for transactions without an occurrence match): best `categoryRules` entry by name score;
   `auto` when `autoLevel = all`, name ≥ 90 and hits ≥ 2; else a suggestion when name ≥ 75.
 - Returned `matches` include only pairs with combined ≥ `suggestThreshold`; one entry per transaction.
+
+## `POST /v1/detect-recurring`
+Finds regular payments in a household's imported transactions so the app can offer "Add this bill?".
+```jsonc
+{ "today": "2026-10-26",
+  "transactions": [ { "id": "uuid", "postedOn": "2026-09-07", "amountCents": -1549, "description": "NETFLIX.COM 866-579-7172 CA", "payee": null } ],
+  "knownNames": ["Netflix", "Rent", "OAKWOOD PROPERTY"] }   // names/bank names of existing items — never suggest these again
+```
+Response:
+```jsonc
+{ "suggestions": [ { "name": "Netflix", "bankName": "NETFLIX", "kind": "subscription", "frequency": "monthly",
+                     "amountCents": 1549, "amountVaries": false, "nextDue": "2026-11-07", "score": 92,
+                     "transactionIds": ["uuid", "uuid", "uuid"] } ] }
+```
+Rules: cluster outflows (and inflows → income) by normalised name with token_set_ratio ≥ 85; a cluster needs ≥ 3
+transactions (≥ 2 for yearly is not enough — skip yearly) whose consecutive gaps fit one frequency: weekly 7±1,
+biweekly 14±2, monthly 28–33 days (or same day-of-month ±3), quarterly 85–95; amounts within 10 % of the median
+(else `amountVaries` when within 35 %, else not a bill). `nextDue` = last date + period (monthly keeps the
+day-of-month, clamped). `kind`: inflow → income; known streaming/software names → subscription; else bill. Display
+`name` = title-cased core of the normalised name ("NETFLIX" → "Netflix", "OAKWOOD PROPERTY MGMT" → "Oakwood Property").
+`score` = 60 + 10 per extra occurrence beyond 3 (max +20) + 20 × regularity (0–1), capped at 100. Skip clusters that
+fuzzy-match any `knownNames` ≥ 85. Return at most 20, best first.
