@@ -27,7 +27,8 @@ public sealed record HouseholdSettingsRequest(
     Optional<string?> Timezone,
     Optional<Guid?> DefaultAccountId,
     Optional<PayPeriod?> PayPeriod,
-    Optional<DateOnly?> PayAnchorDate);
+    Optional<DateOnly?> PayAnchorDate,
+    Optional<long?> WeeklySpendCents);
 
 public sealed record AccountRequest(
     string Name,
@@ -53,7 +54,8 @@ public sealed record RecurringRequest(
     DateOnly? EndDate,
     bool? AutoPay,
     string? Notes,
-    string? Url);
+    string? Url,
+    string? PayeeHint);
 
 public sealed record MarkPaidRequest(long? AmountCents);
 
@@ -88,7 +90,8 @@ public sealed record PushSubscriptionRequest(string Endpoint, PushKeys? Keys, st
 
 public sealed record PushUnsubscribeRequest(string? Endpoint, Guid? Id);
 
-public sealed record PushPrefsRequest(bool RemindersEnabled, int[]? DaysBefore, int HourLocal, bool ActivityEnabled);
+/// <summary><paramref name="WeekSummaryEnabled"/> (v4) defaults to true when omitted so v2/v3 clients keep working.</summary>
+public sealed record PushPrefsRequest(bool RemindersEnabled, int[]? DaysBefore, int HourLocal, bool ActivityEnabled, bool? WeekSummaryEnabled = true);
 
 public sealed record PasskeyOptionsRequest(string Name);
 

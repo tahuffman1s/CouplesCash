@@ -245,6 +245,33 @@ public sealed class AccountRepository(NpgsqlDataSource db)
         return list.Sum(r => Enum.Parse<AccountType>(r.Type, ignoreCase: true).IsLiability() ? -r.BalanceCents : r.BalanceCents);
     }
 
+    /// <summary>
+    /// Spendable (checking + cash) balance as of <paramref name="before"/>: the latest snapshot of each active spendable account
+    /// recorded strictly before that instant. Null when no such account has a snapshot that old (the week view then shows no
+    /// "left at end" for that past week).
+    /// </summary>
+    public async Task<long?> SpendableBalanceBeforeAsync(Guid householdId, DateTime before, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var rows = await conn.QueryAsync<long>(Cmd(
+            """
+            SELECT s.balance_cents
+            FROM accounts a
+            JOIN LATERAL (
+                SELECT balance_cents
+                FROM account_balance_snapshots
+                WHERE account_id = a.id AND recorded_at < @Before
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT 1
+            ) s ON true
+            WHERE a.household_id = @HouseholdId AND a.archived_at IS NULL AND a.type IN ('checking', 'cash')
+            """,
+            new { HouseholdId = householdId, Before = before }, ct));
+
+        var list = rows.ToList();
+        return list.Count == 0 ? null : list.Sum();
+    }
+
     private static Task<int> InsertSnapshotAsync(NpgsqlConnection conn, Guid accountId, long balanceCents, Guid userId, DateTime now, CancellationToken ct) =>
         conn.ExecuteAsync(Cmd(
             "INSERT INTO account_balance_snapshots (id, account_id, balance_cents, recorded_at, recorded_by) VALUES (@Id, @AccountId, @BalanceCents, @Now, @UserId)",

@@ -484,3 +484,60 @@ type WeekView = {
 `GET /v1/budgets?month=` is unchanged and returns monthly rows only.
 Matcher: `once` items match within ±7 days and max(15 %, $10); `payeeHint` seeds an item payee rule so the first bank match auto-applies.
 Week summaries: push kinds `week.ahead` (day before week start) and `week.left` (5th day of the week) at the user's `hourLocal`, once per week each, when `weekSummaryEnabled`.
+
+## v4 implementation notes (API)
+
+Deviations and clarifications from the "# v4 additions" tables, as built in `apps/api`:
+
+- **Week bounds**: `start = date − ((dayOfWeek − weekStart + 7) mod 7)`, `end = start + 6`. `today` is the household-local
+  date (`timezone`). `isCurrent` = start ≤ today ≤ end, `isPast` = end < today, `projected` = start > today (future weeks only;
+  the current week's `leftAtEndCents` is also an estimate but is not flagged). `?start` must be `YYYY-MM-DD` (else 400).
+- **Occurrence `status`** = `cleared` when paid (any source), `overdue` when unpaid and `dueDate < today`, else `planned`
+  (an unpaid item due today is `planned`). `varianceCents = paid.amountCents − amountCents` when paid, else null. On `/calendar`,
+  `/payperiod`, `/summary.upcoming` and the mark-paid responses "today" is UTC; on `/week` it is household-local.
+- **Totals**: `incomeExpectedCents` = Σ planned income in the week; `incomeReceivedCents` = Σ actual of paid income; `plannedOutCents`
+  = Σ planned bill/subscription amounts; `paidOutCents` = Σ **actual** amounts of the paid ones; `remainingOutCents` = Σ planned amounts
+  of the unpaid ones (so `paidOut + remainingOut ≠ plannedOut` when actuals differ); `unplannedCents` = Σ expenses dated in the week.
+  `WeekDay.plannedOutCents/plannedInCents` are planned amounts; `unplannedCents` the day's expenses.
+- **`leftAtEndCents`**: current week = `spendableNow + unpaid income due in [today, end] − unpaid planned outflow due in [today, end]`
+  (unpaid items due earlier in the week show as `overdue` rows and are not deducted again); past week =
+  `startingBalance + incomeReceived − paidOut − unplanned`, null when `startingBalanceCents` is null; future week =
+  `spendableNow + all unpaid income − all unpaid planned outflow due in [today, end]`. `spendableNowCents` = Σ balances of active
+  checking + cash accounts. `startingBalanceCents` (past weeks only, else null) = Σ latest snapshots of active checking/cash accounts
+  recorded **before local midnight of `start`**; null when no such account has a snapshot that old.
+- **`overdue`**: unpaid occurrences (any kind) with `dueDate < start` and `dueDate < today`, looked back 90 days before `start`,
+  oldest first, max 50. For a future week, items due between today and `start` are upcoming, not overdue.
+- **Weekly budgets**: `spentCents` for a category = Σ expenses in the week in that category + Σ **actual** amounts of paid
+  bill/subscription occurrences due in the week in that category; the overall row (`categoryId: null`, name "Weekly spending")
+  counts everything including uncategorised. `percent` follows the v2 rule (whole number, uncapped; zero budget → 0 or 100).
+  `categories` lists only categories with a weekly budget, in category sort order; `totalBudgetCents`/`totalSpentCents` cover
+  the category rows only (not the overall target). `history` = the viewed week and the 7 before it, oldest first, judged against
+  today's budgets: with an overall target `budget = target`, `spent` = everything; without one `budget = Σ category weekly
+  budgets`, `spent` = Σ spent in those categories; empty when there is neither.
+- **Budget routes**: `?period` is case-insensitive, defaults to `monthly`, anything else → `400 errors.period`. `PUT ?period=weekly`
+  returns the category's `WeekBudgetRow` for the **current** week (household-local today); `?month` is ignored for weekly rows.
+  `DELETE ?period=` removes only that period's row (404 when none). `budget.set` / `budget.cleared` activity events carry
+  `data.period`; the weekly summary reads "set Groceries weekly budget to $100.00". `GET /v1/budgets?month=` and `/reports/month`
+  stay monthly-only.
+- **`weeklySpendCents`** on `PATCH /v1/couple`: ≥ 0 (≤ 9.99 billion cents), `null` clears; the `couple.settings` event lists
+  "weekly spending target" and carries `data.weeklySpendCents`.
+- **`payeeHint`** (≤ 80 chars, trimmed, blank → null) on `POST/PUT /v1/recurring` and in `RecurringItem`. Saving a hint upserts
+  `payee_rules(payee_norm(hint), item_id = item)` for the household (the same normaliser as bank transactions: lower-case, no
+  punctuation, digit tokens and processor noise dropped — "JIFFY LUBE #42" ≡ "Jiffy Lube"); any learned category on that payee is
+  kept and `hits` is not bumped. Changing or clearing the hint, or archiving the item, removes the previous rule when it still
+  points at the item (a rule that also carries a learned category is only unlinked from the item). Hints that normalise to
+  nothing are ignored.
+- **Matcher**: `once` occurrences match within ±7 days and `max(15 %, $10.00)`; recurring items keep ±5 days / `max(2 %, $1)`.
+  A hinted one-off therefore scores 95 (90 + 5 rule bonus) and passes the auto-match preconditions (confidence ≥ 90 **and** a
+  learned rule naming the item), so the first matching bank transaction marks it paid with the actual amount (`paid.source: bank`,
+  `auto: true`, `paidBy: null`) and confirms the inbox row with `auto`. Undo works as in v3 (the inbox row returns to pending).
+- **`weekSummaryEnabled`** on `PUT /v1/push/prefs` defaults to `true` when omitted (v2/v3 clients keep working) and is returned on
+  `PushPrefs`. Week summaries go to users with at least one push subscription, during their `hourLocal`, once per
+  `(user, week_start, kind)` via `week_summary_log`: `ahead` on the last day of the current week (keyed on the coming week's start),
+  `left` on the 5th day of the week (keyed on the current week's start). Payloads: `{ title: "Week ahead", body: "Week ahead: $X planned,
+  $Y expected left", url: "/week", tag: "week-ahead" }` (planned = the coming week's `plannedOutCents`, left = its projected
+  `leftAtEndCents`) and `{ title: "This week", body: "You have $Z left this week · budget $A under/over", url: "/week", tag: "week-left" }`
+  (budget part = overall target variance, else the budgeted categories' total variance, omitted without weekly budgets; "budget on
+  target" at 0).
+- **Migration 0004**: `budgets.period` (`monthly` default, CHECK) with the PK rebuilt as `(household_id, category_id, period)`;
+  `households.weekly_spend_cents`; `recurring_items.payee_hint`; `notification_prefs.week_summary_enabled`; `week_summary_log`.

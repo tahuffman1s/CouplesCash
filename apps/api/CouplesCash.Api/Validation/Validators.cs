@@ -86,6 +86,8 @@ public sealed class HouseholdSettingsRequestValidator : AbstractValidator<Househ
         RuleFor(x => x.Timezone.Value).NotEmpty().MaximumLength(64).Must(IsKnownTimeZone).When(x => x.Timezone.HasValue).OverridePropertyName("Timezone")
             .WithMessage("Must be a valid IANA time zone id (e.g. America/Chicago).");
         RuleFor(x => x.PayPeriod.Value).NotNull().IsInEnum().When(x => x.PayPeriod.HasValue).OverridePropertyName("PayPeriod");
+        RuleFor(x => x.WeeklySpendCents.Value!.Value).InclusiveBetween(0, Rules.MaxCents)
+            .When(x => x.WeeklySpendCents is { HasValue: true, Value: not null }).OverridePropertyName("WeeklySpendCents");
     }
 
     public static bool IsKnownTimeZone(string? id) => !string.IsNullOrWhiteSpace(id) && TimeZoneInfo.TryFindSystemTimeZoneById(id, out _);
@@ -136,7 +138,11 @@ public sealed class RecurringRequestValidator : AbstractValidator<RecurringReque
             .WithMessage("End date must be on or after the anchor date.");
         RuleFor(x => x.Notes).MaximumLength(1000);
         RuleFor(x => x.Url).MaximumLength(2048).Must(Rules.IsHttpUrl).WithMessage("Must be an absolute http(s) URL.");
+        RuleFor(x => x.PayeeHint).MaximumLength(MaxPayeeHintLength);
     }
+
+    /// <summary>v4 "Bank shows it as" hint length.</summary>
+    public const int MaxPayeeHintLength = 80;
 }
 
 public sealed class MarkPaidRequestValidator : AbstractValidator<MarkPaidRequest>

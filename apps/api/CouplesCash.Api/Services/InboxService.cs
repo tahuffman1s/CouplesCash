@@ -37,12 +37,15 @@ public sealed class InboxService(
             return new Dictionary<Guid, Suggestion>();
         }
 
-        var from = rows.Min(r => r.PostedOn).AddDays(-TransactionMatcher.RecurringWindowDays);
-        var to = rows.Max(r => r.PostedOn).AddDays(TransactionMatcher.RecurringWindowDays);
+        // The window is the wider one-off window; FindOccurrence applies the per-item window (±5 recurring, ±7 once).
+        var from = rows.Min(r => r.PostedOn).AddDays(-TransactionMatcher.OnceWindowDays);
+        var to = rows.Max(r => r.PostedOn).AddDays(TransactionMatcher.OnceWindowDays);
 
-        var unpaid = (await occurrences.ListAsync(householdId, from, to, ct))
+        var itemRows = await items.ListAsync(householdId, null, ct);
+        var onceItems = itemRows.Where(i => i.Frequency == Frequency.Once).Select(i => i.Id).ToHashSet();
+        var unpaid = (await occurrences.ListAsync(householdId, itemRows, from, to, ct))
             .Where(o => o.Paid is null)
-            .Select(o => new MatchableOccurrence(o.ItemId, o.Name, o.Kind, o.AmountCents, o.DueDate))
+            .Select(o => new MatchableOccurrence(o.ItemId, o.Name, o.Kind, o.AmountCents, o.DueDate, onceItems.Contains(o.ItemId)))
             .ToList();
         var rules = (await imports.ListRulesAsync(conn, householdId, ct)).Select(ToRule).ToList();
         var categoriesByName = CategoriesByName(await categories.ListAsync(householdId, ct));

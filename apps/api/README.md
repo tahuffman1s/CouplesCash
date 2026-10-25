@@ -5,7 +5,9 @@ on PostgreSQL 16 with Npgsql + Dapper, DbUp migrations, Argon2id passwords, HS25
 refresh tokens and Scalar docs. v2 adds Web Push (VAPID), WebAuthn passkeys (Fido2NetLib), an activity feed,
 expenses, budgets, savings goals, a to-pay checklist, household settings, the pay-period view, the month report
 and an in-process scheduler (autopay, reminders, hygiene). v3 adds SimpleFIN bank sync (encrypted access URLs,
-scheduled + manual sync, balance updates), CSV import, the review inbox with a suggestion engine, and auto-matching.
+scheduled + manual sync, balance updates), CSV import, the review inbox with a suggestion engine, and auto-matching. v4 adds the
+week view (`/v1/week`: planned items per day, left at end of week, overdue), planned one-offs with a `payeeHint` that reconciles
+from the bank, weekly budgets + an overall weekly target (`/v1/budgets/week`, `?period=weekly`) and week-summary pushes.
 
 ```
 apps/api/
@@ -20,22 +22,24 @@ apps/api/
 │  ├─ Endpoints/                  # one static class per area, MapGroup("/v1")
 │  ├─ Auth/                       # Argon2idPasswordHasher, TokenService, CoupleCodeService, JwtOptions, WebAuthnOptions
 │  ├─ Domain/                     # pure, unit-tested: RecurrenceEngine, PayPeriodEngine, GoalProjection, SchedulerRules, BudgetMath, Money,
-│  │                              # TransactionMatcher (suggestions), Fingerprint (dedupe), BankSyncRules (interval, cooldown, window)
+│  │                              # TransactionMatcher (suggestions), Fingerprint (dedupe), BankSyncRules (interval, cooldown, window),
+│  │                              # WeekEngine (week bounds, status/variance, left-at-end, weekly budget rows + history)
 │  ├─ Data/                       # NpgsqlDataSource, Dapper repositories, UnitOfWork, DbUpMigrator
 │  ├─ Services/                   # AuthSessionService, OccurrenceService, SummaryService, BudgetService, GoalService,
 │  │                              # ActivityService (+ summaries), PasskeyService (Fido2NetLib), DTO mapping,
-│  │                              # BankSyncService (claim/sync/mapping), InboxService (matcher run, auto-match, confirm/ignore/restore)
+│  │                              # BankSyncService (claim/sync/mapping), InboxService (matcher run, auto-match, confirm/ignore/restore),
+│  │                              # WeekService (composes /week and /budgets/week; also feeds the week-summary pushes)
 │  ├─ SimpleFin/                  # ISimpleFinClient + SimpleFinClient (claim, GET /accounts, URL masking/rewrite), SimpleFinParser
 │  ├─ Security/                   # DataProtector: AES-256-GCM for the stored access URL (Security__DataKey)
 │  ├─ Push/                       # PushOptions, VapidKeys (--vapid), WebPushSender (Lib.Net.Http.WebPush), PushNotifier queue + dispatcher
-│  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene, bank sync)
+│  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene, bank sync, week summaries)
 │  ├─ Validation/                 # FluentValidation validators + endpoint filter
 │  ├─ Infrastructure/             # ProblemDetails, exception handler, rate limiting, OpenAPI bearer, options, feature filters
-│  └─ Migrations/000N_*.sql       # embedded, journaled in public.schema_versions (0001 = v1, 0002 = v2, 0003 = v3 imports)
-└─ CouplesCash.Api.Tests/         # xunit: recurrence, pay period, goal projection, scheduler rules, budget math,
-                                  # VAPID keys, activity summaries, WebAuthn config, couple codes, tokens, Argon2,
-                                  # DataProtector, Fingerprint, TransactionMatcher, SimpleFIN parser/client helpers,
-                                  # bank sync rules, v3 validators
+│  └─ Migrations/000N_*.sql       # embedded, journaled in public.schema_versions (0001 = v1, 0002 = v2, 0003 = v3 imports, 0004 = v4 week)
+└─ CouplesCash.Api.Tests/         # xunit: recurrence, pay period, goal projection, scheduler rules (+ week summaries), budget math,
+                                  # WeekEngine, VAPID keys, activity summaries, WebAuthn config, couple codes, tokens, Argon2,
+                                  # DataProtector, Fingerprint, TransactionMatcher (+ one-off tolerances), SimpleFIN parser/client helpers,
+                                  # bank sync rules, v3 + v4 validators
 ```
 
 ## Run locally
@@ -109,8 +113,12 @@ That walks: claim (first sync inline) → 2 external accounts → map checking (
 credit card (−540.00 → 54000 owed) → inbox: Rent suggested as occurrence ≥ 90, Kroger → Groceries, Netflix →
 Subscriptions, payroll → Income, pending coffee → confirm Rent (occurrence paid, `source: bank`) → confirm Kroger as
 expense (`deduct=false`) → ignore/restore → CSV import with a duplicate → learned payee rule → bulk confirm-suggested →
-manual sync (0 new) → 429 + `Retry-After` → scheduler auto-match of a second rent payment → undo restores the inbox row →
-> 64 KB CSV body on the import route → unlink.
+(v4) the Bridge posts "JIFFY LUBE #42" −54.20 → manual sync auto-matches the planned $60 "Oil change" one-off through its
+`payeeHint` → `/week` shows it cleared at 54.20 with `varianceCents: -580` and the weekly budget rows over/under → 429 +
+`Retry-After` → scheduler auto-match of a second rent payment → undo restores the inbox row → > 64 KB CSV body on the import
+route → unlink. Before the bank part the smoke also covers the always-on v4 checks: weekly target + weekly category budgets,
+`PUT /budgets/{id}?period=weekly` returning a `WeekBudgetRow`, `/week` for the current, a past (no snapshots → `leftAtEndCents`
+null) and a future (`projected`) week, and that planning the one-off lowers `leftAtEndCents` by exactly its amount.
 
 ## Configuration
 
@@ -132,7 +140,7 @@ manual sync (0 new) → 429 + `Retry-After` → scheduler auto-match of a second
 | `WebAuthn__RelyingPartyId` | host of origin | WebAuthn rpId (override only for sub-domain setups) |
 | `WebAuthn__RelyingPartyName` | `CouplesCash` | Shown by the authenticator |
 | `Api__PublicUrl` | empty | Public URL of the app (`PUBLIC_URL`); default WebAuthn origin |
-| `Scheduler__Enabled` | `true` | Run the autopay / reminder / hygiene job (set `false` in tests) |
+| `Scheduler__Enabled` | `true` | Run the autopay / reminder / hygiene / bank-sync / week-summary job (set `false` in tests) |
 | `Scheduler__IntervalSeconds` | `60` | Tick interval |
 | `Scheduler__AutopayLookbackDays` | `3` | Autopay still marks due dates up to this many days back (Pi was off) |
 | `Security__DataKey` | empty | base64 of 32 random bytes (`openssl rand -base64 32`; `DATA_KEY` in `.env`). AES-256-GCM key for stored SimpleFIN access URLs. **Secret.** Blank = bank sync disabled: `POST /v1/banks/simplefin/claim` and `/sync` answer `503 bank_sync_not_configured`, `GET /v1/banks` reports `lastError: "encryption key missing"`. A malformed key fails startup. Rotation = re-link |

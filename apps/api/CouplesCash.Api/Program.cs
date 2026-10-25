@@ -126,6 +126,7 @@ builder.Services.AddSingleton<AuthSessionService>();
 builder.Services.AddSingleton<OccurrenceService>();
 builder.Services.AddSingleton<SummaryService>();
 builder.Services.AddSingleton<BudgetService>();
+builder.Services.AddSingleton<WeekService>();
 builder.Services.AddSingleton<GoalService>();
 builder.Services.AddSingleton<ActivityService>();
 builder.Services.AddSingleton<PasskeyService>();
@@ -140,7 +141,7 @@ builder.Services.AddHttpClient<IPushSender, WebPushSender>(client => client.Time
 builder.Services.AddSingleton<PushNotifier>();
 builder.Services.AddHostedService<PushDispatchService>();
 
-// Autopay, reminders and hygiene (Scheduler__Enabled=false in tests).
+// Autopay, reminders, hygiene, bank sync and week summaries (Scheduler__Enabled=false in tests).
 builder.Services.AddHostedService<SchedulerService>();
 
 builder.Services

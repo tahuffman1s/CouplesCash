@@ -16,14 +16,15 @@ public sealed record RecurringFields(
     DateOnly? EndDate,
     bool AutoPay,
     string? Notes,
-    string? Url);
+    string? Url,
+    string? PayeeHint = null);
 
 public sealed class RecurringRepository(NpgsqlDataSource db)
 {
     private const string Select =
         """
         SELECT i.id, i.household_id, i.name, i.kind, i.amount_cents, i.category_id, i.account_id, i.frequency,
-               i.anchor_date, i.end_date, i.auto_pay, i.notes, i.url, i.created_by, i.created_at, i.updated_at, i.archived_at,
+               i.anchor_date, i.end_date, i.auto_pay, i.notes, i.url, i.payee_hint, i.created_by, i.created_at, i.updated_at, i.archived_at,
                c.name AS category_name, c.color AS category_color, a.name AS account_name
         FROM recurring_items i
         LEFT JOIN categories c ON c.id = i.category_id
@@ -71,9 +72,9 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
         await conn.ExecuteAsync(Cmd(
             """
             INSERT INTO recurring_items (id, household_id, name, kind, amount_cents, category_id, account_id, frequency,
-                                         anchor_date, end_date, auto_pay, notes, url, created_by, created_at, updated_at)
+                                         anchor_date, end_date, auto_pay, notes, url, payee_hint, created_by, created_at, updated_at)
             VALUES (@Id, @HouseholdId, @Name, @Kind, @AmountCents, @CategoryId, @AccountId, @Frequency,
-                    @AnchorDate, @EndDate, @AutoPay, @Notes, @Url, @UserId, @Now, @Now)
+                    @AnchorDate, @EndDate, @AutoPay, @Notes, @Url, @PayeeHint, @UserId, @Now, @Now)
             """,
             new
             {
@@ -90,6 +91,7 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
                 f.AutoPay,
                 f.Notes,
                 f.Url,
+                f.PayeeHint,
                 UserId = userId,
                 Now = now,
             }, ct));
@@ -104,7 +106,7 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
             UPDATE recurring_items
             SET name = @Name, kind = @Kind, amount_cents = @AmountCents, category_id = @CategoryId, account_id = @AccountId,
                 frequency = @Frequency, anchor_date = @AnchorDate, end_date = @EndDate, auto_pay = @AutoPay,
-                notes = @Notes, url = @Url, updated_at = @Now
+                notes = @Notes, url = @Url, payee_hint = @PayeeHint, updated_at = @Now
             WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL
             """,
             new
@@ -122,6 +124,7 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
                 f.AutoPay,
                 f.Notes,
                 f.Url,
+                f.PayeeHint,
                 Now = now,
             }, ct));
 

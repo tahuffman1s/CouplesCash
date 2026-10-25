@@ -36,6 +36,28 @@ public enum PayPeriod
     Monthly,
 }
 
+/// <summary>Which budget a <c>budgets</c> row belongs to (v4). The two periods are independent rows per category.</summary>
+public enum BudgetPeriod
+{
+    Monthly,
+    Weekly,
+}
+
+/// <summary>Where an occurrence stands today (v4): unpaid and not yet due, paid (any source), or unpaid and past due.</summary>
+public enum OccurrenceStatus
+{
+    Planned,
+    Cleared,
+    Overdue,
+}
+
+/// <summary>The two weekly summary pushes (v4): the evening before the week starts, and on the week's 5th day.</summary>
+public enum WeekSummaryKind
+{
+    Ahead,
+    Left,
+}
+
 public static class EnumExtensions
 {
     /// <summary>Lower-case name used in the database CHECK constraints and in JSON.</summary>

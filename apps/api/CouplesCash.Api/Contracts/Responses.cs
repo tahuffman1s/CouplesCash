@@ -18,7 +18,8 @@ public sealed record HouseholdDto(
     string Timezone,
     Guid? DefaultAccountId,
     PayPeriod PayPeriod,
-    DateOnly? PayAnchorDate);
+    DateOnly? PayAnchorDate,
+    long? WeeklySpendCents);
 
 public sealed record AuthResult(
     UserDto User,
@@ -61,6 +62,7 @@ public sealed record RecurringItemDto(
     bool AutoPay,
     string? Notes,
     string? Url,
+    string? PayeeHint,
     long MonthlyEquivalentCents,
     DateOnly? NextDueDate,
     DateTime CreatedAt,
@@ -81,7 +83,9 @@ public sealed record OccurrenceDto(
     string? CategoryColor,
     Guid? AccountId,
     string? AccountName,
-    PaidInfo? Paid);
+    PaidInfo? Paid,
+    long? VarianceCents,
+    OccurrenceStatus Status);
 
 public sealed record CalendarResponse(DateOnly From, DateOnly To, IReadOnlyList<OccurrenceDto> Occurrences, IReadOnlyList<ExpenseDto> Expenses);
 
@@ -137,6 +141,7 @@ public sealed record ExpenseDto(
     DateTime CreatedAt,
     DateTime UpdatedAt);
 
+/// <summary>A monthly budget row (v2). <c>GET /v1/budgets?month=</c> and <c>PUT ?period=monthly</c>.</summary>
 public sealed record BudgetRowDto(
     Guid CategoryId,
     string Name,
@@ -203,6 +208,7 @@ public sealed record PushPrefsDto(
     IReadOnlyList<int> DaysBefore,
     int HourLocal,
     bool ActivityEnabled,
+    bool WeekSummaryEnabled,
     IReadOnlyList<PushSubscriptionDto> Subscriptions);
 
 public sealed record VapidPublicKeyResponse(string PublicKey);
@@ -298,3 +304,58 @@ public sealed record BulkResultDto(int Confirmed, int Ignored, int Skipped);
 public sealed record CsvImportResultDto(Guid Id, int RowCount, int Imported, int Duplicates, int Skipped, int InboxPending);
 
 public sealed record CsvImportHistoryDto(Guid Id, string Filename, int RowCount, int Imported, int Duplicates, DateTime CreatedAt, string CreatedByName);
+
+// ---------------------------------------------------------------------------------------------
+// v4
+// ---------------------------------------------------------------------------------------------
+
+/// <summary>One day of the week view: planned occurrences (any kind), unplanned expenses, and their sums (planned amounts).</summary>
+public sealed record WeekDayDto(
+    DateOnly Date,
+    IReadOnlyList<OccurrenceDto> Planned,
+    IReadOnlyList<ExpenseDto> Expenses,
+    long PlannedOutCents,
+    long PlannedInCents,
+    long UnplannedCents);
+
+/// <summary>A weekly budget row. <paramref name="CategoryId"/> null = the overall target. <paramref name="VarianceCents"/> = spent − budget (+ = over).</summary>
+public sealed record WeekBudgetRowDto(
+    Guid? CategoryId,
+    string Name,
+    string Color,
+    string Icon,
+    long BudgetCents,
+    long SpentCents,
+    long VarianceCents,
+    int Percent);
+
+public sealed record WeekBudgetHistoryPoint(DateOnly WeekStart, long BudgetCents, long SpentCents, long VarianceCents);
+
+/// <summary><c>WeekView.budget</c> and <c>GET /v1/budgets/week</c>. Totals cover the category rows only; history is oldest first, viewed week last.</summary>
+public sealed record WeekBudgetDto(
+    WeekBudgetRowDto? Overall,
+    IReadOnlyList<WeekBudgetRowDto> Categories,
+    long TotalBudgetCents,
+    long TotalSpentCents,
+    IReadOnlyList<WeekBudgetHistoryPoint> History);
+
+public sealed record WeekViewDto(
+    DateOnly Start,
+    DateOnly End,
+    int WeekStart,
+    bool IsCurrent,
+    bool IsPast,
+    DateOnly Today,
+    long SpendableNowCents,
+    long? StartingBalanceCents,
+    long IncomeExpectedCents,
+    long IncomeReceivedCents,
+    long PlannedOutCents,
+    long PaidOutCents,
+    long RemainingOutCents,
+    long UnplannedCents,
+    long? LeftAtEndCents,
+    bool Projected,
+    IReadOnlyList<WeekDayDto> Days,
+    IReadOnlyList<OccurrenceDto> Overdue,
+    WeekBudgetDto Budget);

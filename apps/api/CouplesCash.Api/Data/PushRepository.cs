@@ -1,14 +1,15 @@
+using CouplesCash.Api.Domain;
 using Dapper;
 using Npgsql;
 using static CouplesCash.Api.Data.Sql;
 
 namespace CouplesCash.Api.Data;
 
-/// <summary>Push subscriptions, notification preferences and the reminder log.</summary>
+/// <summary>Push subscriptions, notification preferences, the reminder log and the week-summary log.</summary>
 public sealed class PushRepository(NpgsqlDataSource db)
 {
     private const string SubscriptionColumns = "id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_used_at, failures";
-    private const string PrefsColumns = "user_id, reminders_enabled, days_before, hour_local, activity_enabled, updated_at";
+    private const string PrefsColumns = "user_id, reminders_enabled, days_before, hour_local, activity_enabled, week_summary_enabled, updated_at";
 
     // ---------------------------------------------------------------------------------------------
     // Subscriptions
@@ -116,19 +117,20 @@ public sealed class PushRepository(NpgsqlDataSource db)
             new { UserId = userId }, ct));
     }
 
-    public async Task<NotificationPrefsRow> UpsertPrefsAsync(Guid userId, bool remindersEnabled, short[] daysBefore, int hourLocal, bool activityEnabled, DateTime now, CancellationToken ct)
+    public async Task<NotificationPrefsRow> UpsertPrefsAsync(Guid userId, bool remindersEnabled, short[] daysBefore, int hourLocal, bool activityEnabled, bool weekSummaryEnabled, DateTime now, CancellationToken ct)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
         return await conn.QuerySingleAsync<NotificationPrefsRow>(Cmd(
             $"""
-            INSERT INTO notification_prefs (user_id, reminders_enabled, days_before, hour_local, activity_enabled, updated_at)
-            VALUES (@UserId, @RemindersEnabled, @DaysBefore, @HourLocal, @ActivityEnabled, @Now)
+            INSERT INTO notification_prefs (user_id, reminders_enabled, days_before, hour_local, activity_enabled, week_summary_enabled, updated_at)
+            VALUES (@UserId, @RemindersEnabled, @DaysBefore, @HourLocal, @ActivityEnabled, @WeekSummaryEnabled, @Now)
             ON CONFLICT (user_id) DO UPDATE
                 SET reminders_enabled = EXCLUDED.reminders_enabled, days_before = EXCLUDED.days_before,
-                    hour_local = EXCLUDED.hour_local, activity_enabled = EXCLUDED.activity_enabled, updated_at = EXCLUDED.updated_at
+                    hour_local = EXCLUDED.hour_local, activity_enabled = EXCLUDED.activity_enabled,
+                    week_summary_enabled = EXCLUDED.week_summary_enabled, updated_at = EXCLUDED.updated_at
             RETURNING {PrefsColumns}
             """,
-            new { UserId = userId, RemindersEnabled = remindersEnabled, DaysBefore = daysBefore, HourLocal = (short)hourLocal, ActivityEnabled = activityEnabled, Now = now }, ct));
+            new { UserId = userId, RemindersEnabled = remindersEnabled, DaysBefore = daysBefore, HourLocal = (short)hourLocal, ActivityEnabled = activityEnabled, WeekSummaryEnabled = weekSummaryEnabled, Now = now }, ct));
     }
 
     /// <summary>Members of a household who want partner-activity pushes (no prefs row = defaults = enabled), minus <paramref name="exceptUserId"/>.</summary>
@@ -148,16 +150,17 @@ public sealed class PushRepository(NpgsqlDataSource db)
         return rows.ToList();
     }
 
-    /// <summary>Users with at least one push subscription and a household, with their reminder prefs (defaults when unsaved).</summary>
+    /// <summary>Users with at least one push subscription and a household, with their reminder / week-summary prefs (defaults when unsaved).</summary>
     public async Task<IReadOnlyList<ReminderUserRow>> ReminderUsersAsync(CancellationToken ct)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<ReminderUserRow>(Cmd(
             """
-            SELECT m.user_id, m.household_id, h.timezone, h.currency,
+            SELECT m.user_id, m.household_id, h.timezone, h.currency, h.week_start,
                    COALESCE(p.reminders_enabled, true) AS reminders_enabled,
                    COALESCE(p.days_before, '{1}'::smallint[]) AS days_before,
-                   COALESCE(p.hour_local, 9) AS hour_local
+                   COALESCE(p.hour_local, 9) AS hour_local,
+                   COALESCE(p.week_summary_enabled, true) AS week_summary_enabled
             FROM household_members m
             JOIN households h ON h.id = m.household_id
             LEFT JOIN notification_prefs p ON p.user_id = m.user_id
@@ -191,6 +194,24 @@ public sealed class PushRepository(NpgsqlDataSource db)
             ON CONFLICT DO NOTHING
             """,
             new { ItemId = itemId, DueDate = dueDate, UserId = userId, Now = now }, ct));
+        return rows > 0;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Week summary log (v4)
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>Returns false when this (user, week start, kind) summary was already sent.</summary>
+    public async Task<bool> TryLogWeekSummaryAsync(Guid userId, DateOnly weekStart, WeekSummaryKind kind, DateTime now, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var rows = await conn.ExecuteAsync(Cmd(
+            """
+            INSERT INTO week_summary_log (user_id, week_start, kind, sent_at)
+            VALUES (@UserId, @WeekStart, @Kind, @Now)
+            ON CONFLICT DO NOTHING
+            """,
+            new { UserId = userId, WeekStart = weekStart, Kind = kind.ToDb(), Now = now }, ct));
         return rows > 0;
     }
 }

@@ -34,6 +34,9 @@ public sealed class HouseholdRow
     public PayPeriod PayPeriod { get; init; } = PayPeriod.Monthly;
 
     public DateOnly? PayAnchorDate { get; init; }
+
+    /// <summary>Overall weekly spending target (v4); null = none.</summary>
+    public long? WeeklySpendCents { get; init; }
 }
 
 public sealed class MemberRow
@@ -141,6 +144,9 @@ public sealed class RecurringItemRow
 
     public string? Url { get; init; }
 
+    /// <summary>"Bank shows it as" (v4): seeds a payee rule so the first matching bank transaction auto-applies.</summary>
+    public string? PayeeHint { get; init; }
+
     public Guid CreatedBy { get; init; }
 
     public DateTime CreatedAt { get; init; }
@@ -243,6 +249,9 @@ public sealed class BudgetRow
     public Guid HouseholdId { get; init; }
 
     public Guid CategoryId { get; init; }
+
+    /// <summary>monthly | weekly (v4).</summary>
+    public BudgetPeriod Period { get; init; } = BudgetPeriod.Monthly;
 
     public long AmountCents { get; init; }
 
@@ -369,6 +378,8 @@ public sealed class NotificationPrefsRow
 
     public bool ActivityEnabled { get; init; } = true;
 
+    public bool WeekSummaryEnabled { get; init; } = true;
+
     public DateTime UpdatedAt { get; init; }
 
     public static NotificationPrefsRow Defaults(Guid userId, DateTime now) => new() { UserId = userId, UpdatedAt = now };
@@ -390,6 +401,11 @@ public sealed class ReminderUserRow
     public short[] DaysBefore { get; init; } = [1];
 
     public int HourLocal { get; init; } = 9;
+
+    /// <summary>Household week start (0 Sunday / 1 Monday) for the v4 week summaries.</summary>
+    public int WeekStart { get; init; }
+
+    public bool WeekSummaryEnabled { get; init; } = true;
 }
 
 public sealed class WebAuthnCredentialRow

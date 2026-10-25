@@ -225,6 +225,49 @@ Authorization: Bearer {{accessToken}}
 DELETE {{host}}/v1/budgets/{{categories.response.body.0.id}}
 Authorization: Bearer {{accessToken}}
 
+### v4: weekly spending target (null clears)
+PATCH {{host}}/v1/couple
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "weeklySpendCents": 20000 }
+
+### v4: set a weekly budget for Transportation (returns its WeekBudgetRow for the current week)
+PUT {{host}}/v1/budgets/{{categories.response.body.3.id}}?period=weekly
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "amountCents": 5000 }
+
+### v4: weekly budget view (overall target, budgeted categories, 8-week history) — ?start= any date in the week
+GET {{host}}/v1/budgets/week
+Authorization: Bearer {{accessToken}}
+
+### v4: plan a one-off that the bank will clear ("Bank shows it as" seeds a payee rule)
+# @name oneoff
+POST {{host}}/v1/recurring
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "Oil change",
+  "kind": "bill",
+  "amountCents": 6000,
+  "categoryId": "{{categories.response.body.3.id}}",
+  "accountId": "{{account.response.body.id}}",
+  "frequency": "once",
+  "anchorDate": "{{$datetime 'YYYY-MM-DD'}}",
+  "payeeHint": "JIFFY LUBE"
+}
+
+### v4: the week view (days, overdue, left at end of week, weekly budgets); ?start=YYYY-MM-DD for another week
+GET {{host}}/v1/week
+Authorization: Bearer {{accessToken}}
+
+### v4: clear the weekly budget (monthly rows are untouched)
+DELETE {{host}}/v1/budgets/{{categories.response.body.3.id}}?period=weekly
+Authorization: Bearer {{accessToken}}
+
 ### To-pay: add an item
 # @name todo
 POST {{host}}/v1/todos

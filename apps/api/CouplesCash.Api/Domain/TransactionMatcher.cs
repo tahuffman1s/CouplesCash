@@ -8,8 +8,12 @@ public sealed record MatchTransaction(Guid Id, Guid? AccountId, DateOnly PostedO
     public long Magnitude => Math.Abs(AmountCents);
 }
 
-/// <summary>An unpaid occurrence of an active recurring item.</summary>
-public sealed record MatchableOccurrence(Guid ItemId, string ItemName, Kind Kind, long AmountCents, DateOnly DueDate);
+/// <summary>An unpaid occurrence of an active recurring item. <paramref name="Once"/> (v4) = a planned one-off, matched with the wider window and tolerance.</summary>
+public sealed record MatchableOccurrence(Guid ItemId, string ItemName, Kind Kind, long AmountCents, DateOnly DueDate, bool Once = false)
+{
+    /// <summary>±5 days for recurring items, ±7 for one-offs.</summary>
+    public int WindowDays => Once ? TransactionMatcher.OnceWindowDays : TransactionMatcher.RecurringWindowDays;
+}
 
 /// <summary>A learned <c>payee_rules</c> row.</summary>
 public sealed record PayeeRule(string PayeeNorm, Guid? CategoryId, Guid? ItemId, int Hits);
@@ -35,7 +39,7 @@ public sealed record Suggestion(SuggestionKind Kind, Guid? CategoryId, Guid? Ite
 
 /// <summary>
 /// The suggestion engine (PLAN-V3 "Suggestion engine"), pure and unit-tested. For each transaction, in order:
-/// recurring match (±5 days, max(2 %, $1), sign ↔ kind, unpaid only) → 90, +5 when the item's learned payee rule matches;
+/// recurring match (±5 days, max(2 %, $1); v4 one-offs: ±7 days, max(15 %, $10); sign ↔ kind, unpaid only) → 90, +5 when the item's learned payee rule matches;
 /// transfer between two mapped accounts (same |amount|, opposite sign, ≤ 3 days) → ignore, 80;
 /// payee rule → category, 70 + min(hits, 20); built-in keyword table → 40; otherwise none, 0.
 /// </summary>
@@ -49,6 +53,9 @@ public static class TransactionMatcher
     public const int TransferConfidence = 80;
     public const int RecurringWindowDays = 5;
     public const int TransferWindowDays = 3;
+
+    /// <summary>v4: a planned one-off (<c>frequency = once</c>) may post up to a week either side of its planned date.</summary>
+    public const int OnceWindowDays = 7;
 
     /// <summary>Confidence at which the scheduler may mark the occurrence paid without a human (plus a learned rule).</summary>
     public const int AutoMatchConfidence = 90;
@@ -101,10 +108,13 @@ public static class TransactionMatcher
         return result.Length > 0 ? result : Fingerprint.Normalise(source);
     }
 
-    /// <summary>max(2 % of the expected amount, $1.00), in cents.</summary>
-    public static long Tolerance(long expectedCents) => Math.Max(100, (long)Math.Round(Math.Abs(expectedCents) * 0.02, MidpointRounding.AwayFromZero));
+    /// <summary>Recurring: max(2 % of the expected amount, $1.00). One-off (<paramref name="once"/>, v4): max(15 %, $10.00). In cents.</summary>
+    public static long Tolerance(long expectedCents, bool once = false) => once
+        ? Math.Max(1000, (long)Math.Round(Math.Abs(expectedCents) * 0.15, MidpointRounding.AwayFromZero))
+        : Math.Max(100, (long)Math.Round(Math.Abs(expectedCents) * 0.02, MidpointRounding.AwayFromZero));
 
-    public static bool AmountMatches(long expectedCents, long actualMagnitude) => Math.Abs(Math.Abs(expectedCents) - actualMagnitude) <= Tolerance(expectedCents);
+    public static bool AmountMatches(long expectedCents, long actualMagnitude, bool once = false) =>
+        Math.Abs(Math.Abs(expectedCents) - actualMagnitude) <= Tolerance(expectedCents, once);
 
     public static bool SignMatchesKind(Kind kind, bool isOutflow) => kind.IsOutflow() == isOutflow;
 
@@ -179,8 +189,8 @@ public static class TransactionMatcher
     public static MatchableOccurrence? FindOccurrence(MatchTransaction tx, IEnumerable<MatchableOccurrence> unpaid) =>
         unpaid
             .Where(o => SignMatchesKind(o.Kind, tx.IsOutflow))
-            .Where(o => Math.Abs(o.DueDate.DayNumber - tx.PostedOn.DayNumber) <= RecurringWindowDays)
-            .Where(o => AmountMatches(o.AmountCents, tx.Magnitude))
+            .Where(o => Math.Abs(o.DueDate.DayNumber - tx.PostedOn.DayNumber) <= o.WindowDays)
+            .Where(o => AmountMatches(o.AmountCents, tx.Magnitude, o.Once))
             .OrderBy(o => Math.Abs(o.DueDate.DayNumber - tx.PostedOn.DayNumber))
             .ThenBy(o => Math.Abs(Math.Abs(o.AmountCents) - tx.Magnitude))
             .ThenBy(o => o.ItemName, StringComparer.OrdinalIgnoreCase)

@@ -114,4 +114,69 @@ public class SchedulerRulesTests
         Assert.Equal(utc, SchedulerRules.ToLocal(utc, "Mars/Olympus_Mons"));
         Assert.Equal(utc, SchedulerRules.ToLocal(utc, null));
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // v4: week summaries
+    // ---------------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(2026, 10, 25, 1, WeekSummaryKind.Ahead, "2026-10-26")] // Sunday before a Monday start → ahead, keyed on Monday
+    [InlineData(2026, 10, 23, 1, WeekSummaryKind.Left, "2026-10-19")]  // Friday = 5th day of a Monday week → left, keyed on this Monday
+    [InlineData(2026, 10, 24, 0, WeekSummaryKind.Ahead, "2026-10-25")] // Saturday before a Sunday start
+    [InlineData(2026, 10, 22, 0, WeekSummaryKind.Left, "2026-10-18")]  // Thursday = 5th day of a Sunday week
+    public void WeekSummaryDueToday_picks_the_day_before_week_start_and_the_fifth_day(int y, int m, int d, int weekStart, WeekSummaryKind kind, string keyedOn)
+    {
+        var due = SchedulerRules.WeekSummaryDueToday(D(y, m, d), weekStart);
+
+        Assert.NotNull(due);
+        Assert.Equal(kind, due.Value.Kind);
+        Assert.Equal(DateOnly.Parse(keyedOn), due.Value.WeekStart);
+    }
+
+    [Theory]
+    [InlineData(2026, 10, 19, 1)] // Monday
+    [InlineData(2026, 10, 20, 1)] // Tuesday
+    [InlineData(2026, 10, 21, 1)] // Wednesday
+    [InlineData(2026, 10, 22, 1)] // Thursday
+    [InlineData(2026, 10, 24, 1)] // Saturday
+    [InlineData(2026, 10, 23, 0)] // Friday with a Sunday start
+    [InlineData(2026, 10, 25, 0)] // Sunday itself with a Sunday start (the "ahead" went out on Saturday)
+    public void WeekSummaryDueToday_is_null_on_other_days(int y, int m, int d, int weekStart)
+    {
+        Assert.Null(SchedulerRules.WeekSummaryDueToday(D(y, m, d), weekStart));
+    }
+
+    [Fact]
+    public void Week_summary_fires_exactly_twice_per_week()
+    {
+        foreach (var weekStart in new[] { 0, 1 })
+        {
+            var week = WeekEngine.WeekBounds(D(2026, 10, 22), weekStart);
+            var kinds = Enumerable.Range(0, 7).Select(i => SchedulerRules.WeekSummaryDueToday(week.Start.AddDays(i), weekStart)).Where(d => d is not null).Select(d => d!.Value.Kind).ToList();
+
+            Assert.Equal([WeekSummaryKind.Left, WeekSummaryKind.Ahead], kinds);
+        }
+    }
+
+    [Fact]
+    public void Week_summary_bodies_read_naturally()
+    {
+        Assert.Equal("Week ahead: $60.00 planned, $2,390.00 expected left", SchedulerRules.WeekAheadBody(6_000, 239_000, "USD"));
+        Assert.Equal("Week ahead: $60.00 planned", SchedulerRules.WeekAheadBody(6_000, null, "USD"));
+        Assert.Equal("You have $2,390.00 left this week · budget $4.20 over", SchedulerRules.WeekLeftBody(239_000, 420, "USD"));
+        Assert.Equal("You have $2,390.00 left this week · budget $12.00 under", SchedulerRules.WeekLeftBody(239_000, -1_200, "USD"));
+        Assert.Equal("You have €5.00 left this week · budget on target", SchedulerRules.WeekLeftBody(500, 0, "EUR"));
+        Assert.Equal("You have $5.00 left this week", SchedulerRules.WeekLeftBody(500, null, "USD"));
+        Assert.Equal("Weekly check-in · budget $1.00 over", SchedulerRules.WeekLeftBody(null, 100, "USD"));
+        Assert.Equal("week-ahead", SchedulerRules.WeekSummaryTag(WeekSummaryKind.Ahead));
+        Assert.Equal("week-left", SchedulerRules.WeekSummaryTag(WeekSummaryKind.Left));
+        Assert.Equal("/week", SchedulerRules.WeekLink);
+    }
+
+    [Fact]
+    public void LocalMidnightUtc_converts_the_start_of_a_local_day()
+    {
+        Assert.Equal(new DateTime(2026, 7, 1, 5, 0, 0, DateTimeKind.Utc), SchedulerRules.LocalMidnightUtc(D(2026, 7, 1), "America/Chicago")); // CDT = UTC−5
+        Assert.Equal(new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc), SchedulerRules.LocalMidnightUtc(D(2026, 7, 1), null));
+    }
 }

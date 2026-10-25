@@ -29,12 +29,14 @@ public static class Mapping
         i.AutoPay,
         i.Notes,
         i.Url,
+        i.PayeeHint,
         RecurrenceEngine.MonthlyEquivalent(i.AmountCents, i.Frequency),
         RecurrenceEngine.NextDue(i.Rule, today),
         i.CreatedAt,
         i.UpdatedAt);
 
-    public static OccurrenceDto ToOccurrence(this RecurringItemRow i, DateOnly dueDate, PaymentRow? paid) => new(
+    /// <summary><paramref name="today"/> decides planned vs. overdue (v4 <c>status</c>); <c>varianceCents = paid − planned</c> when paid.</summary>
+    public static OccurrenceDto ToOccurrence(this RecurringItemRow i, DateOnly dueDate, PaymentRow? paid, DateOnly today) => new(
         i.Id,
         i.Name,
         i.Kind,
@@ -46,7 +48,9 @@ public static class Mapping
         i.CategoryColor,
         i.AccountId,
         i.AccountName,
-        paid is null ? null : new PaidInfo(paid.PaidAt, paid.PaidBy, paid.AmountCents, paid.Auto, paid.Source));
+        paid is null ? null : new PaidInfo(paid.PaidAt, paid.PaidBy, paid.AmountCents, paid.Auto, paid.Source),
+        WeekEngine.Variance(paid?.AmountCents, i.AmountCents),
+        WeekEngine.Status(dueDate, paid is not null, today));
 
     // ---------------------------------------------------------------------------------------------
     // v2
@@ -66,7 +70,7 @@ public static class Mapping
     public static PushSubscriptionDto ToDto(this PushSubscriptionRow s) => new(s.Id, s.UserAgent ?? "", s.CreatedAt, s.LastUsedAt);
 
     public static PushPrefsDto ToDto(this NotificationPrefsRow p, IEnumerable<PushSubscriptionRow> subscriptions) =>
-        new(p.RemindersEnabled, p.DaysBefore.Select(d => (int)d).ToList(), p.HourLocal, p.ActivityEnabled, subscriptions.Select(s => s.ToDto()).ToList());
+        new(p.RemindersEnabled, p.DaysBefore.Select(d => (int)d).ToList(), p.HourLocal, p.ActivityEnabled, p.WeekSummaryEnabled, subscriptions.Select(s => s.ToDto()).ToList());
 
     private static JsonElement ParseData(string json)
     {

@@ -15,7 +15,9 @@ namespace CouplesCash.Api.Scheduler;
 /// <item>sends due-date reminders during each user's local <c>hourLocal</c>, once per (item, due date, user) via <c>reminder_log</c>;</item>
 /// <item>deletes expired WebAuthn challenges and dead push subscriptions;</item>
 /// <item>(v3) syncs every enabled bank link whose last sync is older than <c>Sync__IntervalHours</c>, auto-matching
-/// high-confidence recurring payments — see <see cref="BankSyncService"/>.</item>
+/// high-confidence recurring payments — see <see cref="BankSyncService"/>;</item>
+/// <item>(v4) sends week summaries during each user's <c>hourLocal</c>: "week ahead" the day before the week starts and
+/// "week left" on its 5th day, once per (user, week, kind) via <c>week_summary_log</c> — see <see cref="WeekService"/>.</item>
 /// </list>
 /// Selection logic is in <see cref="SchedulerRules"/>; this class only does I/O. Every exception is caught and logged.
 /// The logger category contains "Scheduler" so <c>make scheduler-logs</c> can filter for it.
@@ -31,6 +33,7 @@ public sealed class SchedulerService(
     ActivityService activity,
     PushNotifier notifier,
     BankSyncService bankSync,
+    WeekService weeks,
     IHostApplicationLifetime lifetime,
     TimeProvider time,
     ILogger<SchedulerService> logger) : BackgroundService
@@ -86,6 +89,7 @@ public sealed class SchedulerService(
         await RunPhaseAsync("reminders", () => RemindersAsync(nowUtc, ct));
         await RunPhaseAsync("hygiene", () => HygieneAsync(nowUtc, ct));
         await RunPhaseAsync("bank-sync", () => bankSync.SyncDueAsync(nowUtc, ct));
+        await RunPhaseAsync("week-summaries", () => WeekSummariesAsync(nowUtc, ct));
     }
 
     private async Task RunPhaseAsync(string name, Func<Task> phase)
@@ -225,4 +229,58 @@ public sealed class SchedulerService(
             logger.LogInformation("Scheduler hygiene: removed {Challenges} expired challenge(s), {Subscriptions} dead subscription(s)", challenges, subscriptions);
         }
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // 5. Week summaries (v4)
+    // ---------------------------------------------------------------------------------------------
+    private async Task WeekSummariesAsync(DateTime nowUtc, CancellationToken ct)
+    {
+        var users = await pushes.ReminderUsersAsync(ct);
+        var viewCache = new Dictionary<(Guid HouseholdId, DateOnly WeekStart), Contracts.WeekViewDto?>();
+
+        foreach (var user in users)
+        {
+            var nowLocal = SchedulerRules.ToLocal(nowUtc, user.Timezone);
+            if (!SchedulerRules.ShouldSendReminderNow(user.WeekSummaryEnabled, user.HourLocal, nowLocal))
+            {
+                continue;
+            }
+
+            var today = DateOnly.FromDateTime(nowLocal);
+            if (SchedulerRules.WeekSummaryDueToday(today, user.WeekStart) is not { } due)
+            {
+                continue;
+            }
+
+            if (!await pushes.TryLogWeekSummaryAsync(user.UserId, due.WeekStart, due.Kind, nowUtc, ct))
+            {
+                continue;
+            }
+
+            var key = (user.HouseholdId, due.WeekStart);
+            if (!viewCache.TryGetValue(key, out var view))
+            {
+                view = await weeks.GetAsync(user.HouseholdId, due.WeekStart, ct);
+                viewCache[key] = view;
+            }
+
+            if (view is null)
+            {
+                continue;
+            }
+
+            var (title, body) = due.Kind switch
+            {
+                WeekSummaryKind.Ahead => ("Week ahead", SchedulerRules.WeekAheadBody(view.PlannedOutCents, view.LeftAtEndCents, user.Currency)),
+                _ => ("This week", SchedulerRules.WeekLeftBody(view.LeftAtEndCents, BudgetVariance(view.Budget), user.Currency)),
+            };
+
+            notifier.ToUser(user.UserId, new PushPayload(title, body, SchedulerRules.WeekLink, SchedulerRules.WeekSummaryTag(due.Kind)));
+            logger.LogInformation("Scheduler week summary {Kind} for week {WeekStart} queued to user {UserId}", due.Kind, due.WeekStart, user.UserId);
+        }
+    }
+
+    /// <summary>Overall target variance when set, else the budgeted categories' total variance, else null (no weekly budget).</summary>
+    private static long? BudgetVariance(Contracts.WeekBudgetDto budget) =>
+        budget.Overall?.VarianceCents ?? (budget.Categories.Count > 0 ? budget.TotalSpentCents - budget.TotalBudgetCents : null);
 }

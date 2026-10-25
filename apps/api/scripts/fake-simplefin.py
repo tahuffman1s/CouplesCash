@@ -5,7 +5,8 @@
                                     (token "expired" -> 403, like an already-claimed token)
   GET  /simplefin/accounts       -> 200 JSON { errors: [], accounts: [...] }; needs Basic auth user:pass (else 403);
                                     honours start-date / end-date (exclusive) / pending=1
-  POST /__phase/<n>              -> switches the data set (phase 2 adds a second RENT PAYMENT so auto-match can be observed)
+  POST /__phase/<n>              -> enables a data-set phase (phases accumulate): 2 adds a second RENT PAYMENT so auto-match can be
+                                    observed; 3 adds "JIFFY LUBE #42" -54.20 today, which clears a planned $60 one-off (v4)
   GET  /__health                 -> 200 ok
 
 Usage: fake-simplefin.py --port 8765 --rent-date YYYY-MM-DD --rent2-date YYYY-MM-DD [--today YYYY-MM-DD]
@@ -19,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 USER, PASSWORD = "demo-user", "demo-pass"
-STATE = {"phase": 1}
+STATE = {"phases": {1}}
 
 
 def noon(date_str):
@@ -36,8 +37,10 @@ def accounts(args):
         {"id": "tx-payroll-1", "posted": today, "amount": "3200.00", "description": "ACME CORP PAYROLL DIRECT DEP"},
         {"id": "tx-coffee-1", "posted": today, "amount": "-4.50", "description": "SQ *BLUE BOTTLE COFFEE", "pending": True},
     ]
-    if STATE["phase"] >= 2:
+    if 2 in STATE["phases"]:
         checking_tx.append({"id": "tx-rent-2", "posted": noon(args.rent2_date), "amount": "-1850.00", "description": "RENT PAYMENT"})
+    if 3 in STATE["phases"]:
+        checking_tx.append({"id": "tx-jiffy-1", "posted": today, "amount": "-54.20", "description": "JIFFY LUBE #42", "payee": "Jiffy Lube"})
     return [
         {
             "org": {"domain": "demobank.example", "name": "Demo Bank", "url": "https://demobank.example"},
@@ -108,8 +111,8 @@ class Handler(BaseHTTPRequestHandler):
             self.rfile.read(length)
 
         if url.path.startswith("/__phase/"):
-            STATE["phase"] = int(url.path.rsplit("/", 1)[1])
-            return self._send(200, f"phase {STATE['phase']}")
+            STATE["phases"].add(int(url.path.rsplit("/", 1)[1]))
+            return self._send(200, "phases " + ",".join(str(p) for p in sorted(STATE["phases"])))
 
         if url.path.startswith("/simplefin/claim/"):
             token = url.path.rsplit("/", 1)[1]

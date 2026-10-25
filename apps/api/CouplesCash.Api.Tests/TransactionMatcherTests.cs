@@ -75,6 +75,29 @@ public class TransactionMatcherTests
         Assert.Equal(matches, TransactionMatcher.AmountMatches(expected, actual));
     }
 
+    [Theory]
+    [InlineData(1000, 1000)]     // $10 → $10 floor
+    [InlineData(6000, 1000)]     // $60 → 15 % = $9 < $10 floor
+    [InlineData(10000, 1500)]    // $100 → 15 % = $15
+    [InlineData(-10000, 1500)]
+    public void One_off_tolerance_is_max_of_fifteen_percent_and_ten_dollars(long expected, long tolerance)
+    {
+        Assert.Equal(tolerance, TransactionMatcher.Tolerance(expected, once: true));
+        Assert.Equal(Math.Max(100, (long)Math.Round(Math.Abs(expected) * 0.02)), TransactionMatcher.Tolerance(expected)); // recurring unchanged
+    }
+
+    [Theory]
+    [InlineData(6000, 5420, true)]   // −$5.80 within the $10 floor
+    [InlineData(6000, 7000, true)]   // +$10.00 exactly
+    [InlineData(6000, 7001, false)]  // one cent over
+    [InlineData(20000, 23000, true)] // 15 % of $200 = $30
+    [InlineData(20000, 23001, false)]
+    public void One_off_amount_match_respects_the_wider_tolerance(long expected, long actual, bool matches)
+    {
+        Assert.Equal(matches, TransactionMatcher.AmountMatches(expected, actual, once: true));
+        Assert.False(TransactionMatcher.AmountMatches(6000, 5420)); // the same amounts fail the recurring tolerance
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Recurring match
     // ---------------------------------------------------------------------------------------------
@@ -152,6 +175,67 @@ public class TransactionMatcherTests
         var suggestion = TransactionMatcher.Suggest(Tx(-2999, "GYM", day: 10), weekly, NoRules, Categories);
 
         Assert.Equal(new DateOnly(2026, 10, 12), suggestion.DueDate);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // v4: planned one-offs
+    // ---------------------------------------------------------------------------------------------
+
+    private static readonly Guid OilChange = Guid.Parse("00000000-0000-7000-8000-000000000004");
+
+    private static readonly MatchableOccurrence[] WithOneOff =
+    [
+        .. Unpaid,
+        new(OilChange, "Oil change", Kind.Bill, 6000, new DateOnly(2026, 10, 20), Once: true),
+    ];
+
+    [Theory]
+    [InlineData(13, true)]  // 7 days early → in
+    [InlineData(27, true)]  // 7 days late → in
+    [InlineData(12, false)] // 8 days → out
+    [InlineData(28, false)]
+    public void One_off_match_window_is_seven_days(int day, bool matched)
+    {
+        var suggestion = TransactionMatcher.Suggest(Tx(-5420, "JIFFY LUBE #42", day), WithOneOff, NoRules, Categories);
+
+        Assert.Equal(matched, suggestion.Kind == SuggestionKind.Occurrence && suggestion.ItemId == OilChange);
+    }
+
+    [Fact]
+    public void One_off_matches_a_different_amount_within_fifteen_percent_or_ten_dollars()
+    {
+        var suggestion = TransactionMatcher.Suggest(Tx(-5420, "JIFFY LUBE #42", day: 21), WithOneOff, NoRules, Categories);
+
+        Assert.Equal(SuggestionKind.Occurrence, suggestion.Kind);
+        Assert.Equal(OilChange, suggestion.ItemId);
+        Assert.Equal(new DateOnly(2026, 10, 20), suggestion.DueDate);
+        Assert.Equal(90, suggestion.Confidence);
+
+        Assert.NotEqual(SuggestionKind.Occurrence, TransactionMatcher.Suggest(Tx(-7001, "JIFFY LUBE #42", day: 21), WithOneOff, NoRules, Categories).Kind);
+    }
+
+    [Fact]
+    public void Recurring_items_keep_the_narrow_window_and_tolerance_beside_one_offs()
+    {
+        Assert.NotEqual(SuggestionKind.Occurrence, TransactionMatcher.Suggest(Tx(-185000, "RENT PAYMENT", day: 7), WithOneOff, NoRules, Categories).Kind);  // 6 days
+        Assert.NotEqual(SuggestionKind.Occurrence, TransactionMatcher.Suggest(Tx(-190000, "RENT PAYMENT", day: 1), WithOneOff, NoRules, Categories).Kind); // 2.7 %
+        Assert.Equal(Rent, TransactionMatcher.Suggest(Tx(-185000, "RENT PAYMENT", day: 3), WithOneOff, NoRules, Categories).ItemId);
+    }
+
+    [Fact]
+    public void Hinted_one_off_reaches_auto_match_confidence_with_its_payee_rule()
+    {
+        // payeeHint "JIFFY LUBE" → payee_rules("jiffy lube", item = Oil change), as RecurringEndpoints writes it.
+        var rules = Rules(new PayeeRule(TransactionMatcher.NormalisePayee("JIFFY LUBE", null), null, OilChange, 1));
+        var tx = Tx(-5420, "JIFFY LUBE #42", day: 22);
+
+        var suggestion = TransactionMatcher.Suggest(tx, WithOneOff, rules, Categories);
+
+        Assert.Equal(SuggestionKind.Occurrence, suggestion.Kind);
+        Assert.Equal(95, suggestion.Confidence);
+        Assert.True(suggestion.Confidence >= TransactionMatcher.AutoMatchConfidence);
+        Assert.True(TransactionMatcher.RuleMatchesItem(tx, OilChange, rules)); // the scheduler's second auto-match precondition
+        Assert.False(TransactionMatcher.RuleMatchesItem(Tx(-5420, "QUICK LUBE", day: 22), OilChange, rules));
     }
 
     // ---------------------------------------------------------------------------------------------

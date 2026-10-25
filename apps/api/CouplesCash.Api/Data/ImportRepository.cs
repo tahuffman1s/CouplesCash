@@ -274,6 +274,41 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             """,
             new { HouseholdId = householdId, PayeeNorm = payeeNorm, CategoryId = categoryId, ItemId = itemId, Now = now }, ct));
 
+    /// <summary>
+    /// v4 payee hint: points the rule for <paramref name="payeeNorm"/> at the item (hits stay as they are; a fresh rule starts at 1).
+    /// Any learned category on the same payee is kept.
+    /// </summary>
+    public Task<int> SetItemRuleAsync(NpgsqlConnection conn, Guid householdId, string payeeNorm, Guid itemId, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            INSERT INTO payee_rules (household_id, payee_norm, category_id, item_id, hits, updated_at)
+            VALUES (@HouseholdId, @PayeeNorm, NULL, @ItemId, 1, @Now)
+            ON CONFLICT (household_id, payee_norm) DO UPDATE
+            SET item_id = EXCLUDED.item_id, updated_at = EXCLUDED.updated_at
+            """,
+            new { HouseholdId = householdId, PayeeNorm = payeeNorm, ItemId = itemId, Now = now }, ct));
+
+    /// <summary>
+    /// Undoes <see cref="SetItemRuleAsync"/>: rules still pointing at <paramref name="itemId"/> (optionally only the one for
+    /// <paramref name="payeeNorm"/>) are deleted, or merely unlinked from the item when they also carry a learned category.
+    /// </summary>
+    public async Task ClearItemRuleAsync(NpgsqlConnection conn, Guid householdId, string? payeeNorm, Guid itemId, CancellationToken ct)
+    {
+        var parameters = new { HouseholdId = householdId, PayeeNorm = payeeNorm, ItemId = itemId };
+        await conn.ExecuteAsync(Cmd(
+            """
+            DELETE FROM payee_rules
+            WHERE household_id = @HouseholdId AND item_id = @ItemId AND category_id IS NULL
+              AND (@PayeeNorm::text IS NULL OR payee_norm = @PayeeNorm)
+            """, parameters, ct));
+        await conn.ExecuteAsync(Cmd(
+            """
+            UPDATE payee_rules SET item_id = NULL
+            WHERE household_id = @HouseholdId AND item_id = @ItemId
+              AND (@PayeeNorm::text IS NULL OR payee_norm = @PayeeNorm)
+            """, parameters, ct));
+    }
+
     // ---------------------------------------------------------------------------------------------
     // CSV imports
     // ---------------------------------------------------------------------------------------------

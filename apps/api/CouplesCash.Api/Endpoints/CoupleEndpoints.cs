@@ -25,7 +25,7 @@ public static class CoupleEndpoints
         group.MapPost("/leave", Leave)
             .WithSummary("Leave the household (deleted when empty)");
         group.MapPatch("", UpdateSettings).RequireHousehold().WithValidation<HouseholdSettingsRequest>()
-            .WithSummary("Update household name and settings (currency, week start, time zone, default account, pay period)");
+            .WithSummary("Update household name and settings (currency, week start, time zone, default account, pay period, weekly spending target)");
 
         return group;
     }
@@ -183,7 +183,8 @@ public static class CoupleEndpoints
             Timezone: request.Timezone.HasValue ? request.Timezone.Value?.Trim() : null,
             DefaultAccountId: request.DefaultAccountId,
             PayPeriod: request.PayPeriod.HasValue ? request.PayPeriod.Value : null,
-            PayAnchorDate: request.PayAnchorDate);
+            PayAnchorDate: request.PayAnchorDate,
+            WeeklySpendCents: request.WeeklySpendCents);
 
         var changed = new List<string>();
         if (update.Currency is not null)
@@ -211,6 +212,11 @@ public static class CoupleEndpoints
             changed.Add("pay period");
         }
 
+        if (update.WeeklySpendCents.HasValue)
+        {
+            changed.Add("weekly spending target");
+        }
+
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         if (!await households.UpdateSettingsAsync(uow.Connection, householdId, update, ct))
         {
@@ -235,6 +241,7 @@ public static class CoupleEndpoints
             defaultAccountId = update.DefaultAccountId.HasValue ? update.DefaultAccountId.Value : null,
             payPeriod = update.PayPeriod,
             payAnchorDate = update.PayAnchorDate.HasValue ? update.PayAnchorDate.Value : null,
+            weeklySpendCents = update.WeeklySpendCents.HasValue ? update.WeeklySpendCents.Value : null,
         };
         await activity.RecordAsync(uow, householdId, userId, "couple.settings", "household", householdId, summary, data, ct, principal.GetDisplayName());
         await uow.CommitAsync(ct);

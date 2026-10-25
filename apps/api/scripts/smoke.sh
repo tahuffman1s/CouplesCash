@@ -3,8 +3,10 @@
 # Walks: register → couple code → second user joins → account → recurring → calendar → paid → summary,
 # then v2: settings → pay period → expenses (deduction) → budgets → to-pay → goals → activity → push →
 # passkeys config → month report → (optionally) autopay by the scheduler,
+# then v4: weekly target + weekly budgets → plan a one-off with a payeeHint → week view (planned, left-at-end) → past/future weeks,
 # then v3: inbox/CSV validation → (with SMOKE_SIMPLEFIN_PORT) fake SimpleFIN Bridge: claim → map → inbox → confirm/ignore/
-# restore → CSV import → bulk → sync/cooldown → scheduler auto-match → undo → unlink.
+# restore → CSV import → bulk → (v4) the Bridge clears the one-off at a different amount → cleared + variance + weekly budgets →
+# sync/cooldown → scheduler auto-match → undo → unlink, then v4 cleanup (DELETE weekly budgets, clear the target).
 # Requires: curl, jq. Usage: scripts/smoke.sh [base-url]
 #   SMOKE_SCHEDULER_WAIT=<seconds>  also create an autopay bill due today and wait for the scheduler
 #                                   to mark it (set to > Scheduler__IntervalSeconds); default 0 = skip.
@@ -397,6 +399,58 @@ if [[ "${SMOKE_SCHEDULER_WAIT:-0}" -gt 0 ]]; then
 fi
 
 
+echo "--- v4: weekly target, weekly budgets, week view, planned one-off"
+TODAY_UTC="$(date -u +%F)"
+TRANSPORT="$(request GET /v1/categories "$A_TOKEN" >/dev/null; echo "$BODY" | jq -r '.[] | select(.name=="Transportation") | .id')"
+request PATCH /v1/couple "$A_TOKEN" '{"weeklySpendCents":-1}'; expect 400 "negative weekly target → 400"
+[[ "$(echo "$BODY" | jq -r '.errors | keys | join(",")')" == "weeklySpendCents" ]] || fail "errors should name 'weeklySpendCents'"
+request PATCH /v1/couple "$A_TOKEN" '{"weeklySpendCents":20000}'; expect 200 "set weekly spending target 200.00"
+[[ "$(echo "$BODY" | jq -r .weeklySpendCents)" == "20000" ]] || fail "weeklySpendCents saved"
+request GET /v1/couple "$B_TOKEN"; [[ "$(echo "$BODY" | jq -r .weeklySpendCents)" == "20000" ]] || fail "GET couple carries weeklySpendCents"
+request PUT "/v1/budgets/$TRANSPORT?period=daily" "$A_TOKEN" '{"amountCents":5000}'; expect 400 "period=daily → 400"
+[[ "$(echo "$BODY" | jq -r '.errors | keys | join(",")')" == "period" ]] || fail "errors should name 'period'"
+request PUT "/v1/budgets/$TRANSPORT?period=weekly" "$A_TOKEN" '{"amountCents":5000}'; expect 200 "set weekly Transportation budget (returns WeekBudgetRow)"
+echo "$BODY" | jq -e --arg c "$TRANSPORT" '.categoryId==$c and .budgetCents==5000 and has("spentCents") and has("varianceCents") and has("percent") and (has("recurringCents")|not)' >/dev/null || fail "WeekBudgetRow shape: $BODY"
+request PUT "/v1/budgets/$GROCERIES?period=weekly" "$A_TOKEN" '{"amountCents":10000}'; expect 200 "set weekly Groceries budget"
+request GET "/v1/budgets?month=$(date -u +%Y-%m)" "$A_TOKEN"; expect 200 "monthly budgets unchanged by weekly rows"
+[[ "$(echo "$BODY" | jq -r --arg g "$GROCERIES" '.rows[] | select(.categoryId==$g) | .budgetCents')" == "null" ]] || fail "GET /budgets?month= must list monthly rows only"
+request GET /v1/budgets/week "$A_TOKEN"; expect 200 "weekly budget view"
+echo "$BODY" | jq -e '.overall.categoryId==null and .overall.budgetCents==20000 and (.categories|length==2) and (.history|length==8) and .totalBudgetCents==15000' >/dev/null || fail "weekly budget view: $BODY"
+[[ "$(echo "$BODY" | jq -r '.history | map(.weekStart) | . == sort')" == "true" ]] || fail "history oldest first"
+request GET "/v1/week?start=nope" "$A_TOKEN"; expect 400 "bad week start → 400"
+request GET "/v1/week?start=$TODAY_UTC" "$A_TOKEN"; expect 200 "week view (week of $TODAY_UTC)"
+WEEK0="$BODY"
+echo "$WEEK0" | jq -e '(.days|length==7) and .weekStart==1 and (.isCurrent or .projected) and (.isPast|not) and .leftAtEndCents!=null and .budget.overall.budgetCents==20000 and (.overdue|type=="array")' >/dev/null || fail "week view shape: $(echo "$WEEK0" | jq -c 'del(.days,.budget,.overdue)')"
+WEEK_START="$(echo "$WEEK0" | jq -r .start)"; WEEK_END="$(echo "$WEEK0" | jq -r .end)"
+[[ "$(date -u -d "$WEEK_START" +%u)" == "1" && "$(date -u -d "$WEEK_START +6 days" +%F)" == "$WEEK_END" ]] || fail "Monday-start week bounds: $WEEK_START … $WEEK_END"
+[[ "$(echo "$WEEK0" | jq -r '.days[0].date')" == "$WEEK_START" && "$(echo "$WEEK0" | jq -r '.days[6].date')" == "$WEEK_END" ]] || fail "days run start → end"
+LEFT0="$(echo "$WEEK0" | jq -r .leftAtEndCents)"
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg c "$TRANSPORT" --arg a "$ACC" --arg d "$TODAY_UTC" --arg h "$(printf 'x%.0s' $(seq 1 81))" '{name:"Oil change",kind:"bill",amountCents:6000,categoryId:$c,accountId:$a,frequency:"once",anchorDate:$d,payeeHint:$h}')"; expect 400 "payeeHint > 80 chars → 400"
+[[ "$(echo "$BODY" | jq -r '.errors | keys | join(",")')" == "payeeHint" ]] || fail "errors should name 'payeeHint'"
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg c "$TRANSPORT" --arg a "$ACC" --arg d "$TODAY_UTC" '{name:"Oil change",kind:"bill",amountCents:6000,categoryId:$c,accountId:$a,frequency:"once",anchorDate:$d,payeeHint:"JIFFY LUBE"}')"; expect 201 "plan a one-off: Oil change 60.00 on $TODAY_UTC, bank shows it as JIFFY LUBE"
+ONEOFF="$(echo "$BODY" | jq -r .id)"
+echo "$BODY" | jq -e --arg d "$TODAY_UTC" '.frequency=="once" and .payeeHint=="JIFFY LUBE" and .monthlyEquivalentCents==0 and .nextDueDate==$d' >/dev/null || fail "one-off shape: $BODY"
+request GET "/v1/week?start=$TODAY_UTC" "$A_TOKEN"; expect 200 "week view after planning"
+[[ "$(echo "$BODY" | jq -r .leftAtEndCents)" == "$((LEFT0 - 6000))" ]] || fail "leftAtEnd should drop by 6000: $LEFT0 → $(echo "$BODY" | jq -r .leftAtEndCents)"
+echo "$BODY" | jq -e --arg id "$ONEOFF" --arg d "$TODAY_UTC" '.days[] | select(.date==$d) | .planned[] | select(.itemId==$id) | .status=="planned" and .varianceCents==null and .paid==null' >/dev/null || fail "one-off should be planned on $TODAY_UTC"
+[[ "$(echo "$BODY" | jq -r --arg d "$TODAY_UTC" '.days[] | select(.date==$d) | .plannedOutCents')" -ge 6000 ]] || fail "day plannedOutCents includes the one-off"
+pass "one-off planned · leftAtEnd −60.00"
+request GET "/v1/calendar?from=$TODAY_UTC&to=$TODAY_UTC" "$A_TOKEN"
+echo "$BODY" | jq -e --arg id "$ONEOFF" '.occurrences[] | select(.itemId==$id) | .status=="planned" and .varianceCents==null' >/dev/null || fail "calendar occurrences carry status/varianceCents"
+request GET "/v1/recurring/$ONEOFF" "$A_TOKEN"; [[ "$(echo "$BODY" | jq -r .payeeHint)" == "JIFFY LUBE" ]] || fail "GET recurring carries payeeHint"
+request PUT "/v1/recurring/$ONEOFF" "$A_TOKEN" "$(jq -nc --arg c "$TRANSPORT" --arg a "$ACC" --arg d "$TODAY_UTC" '{name:"Oil change",kind:"bill",amountCents:6000,categoryId:$c,accountId:$a,frequency:"once",anchorDate:$d}')"; expect 200 "PUT without payeeHint clears it"
+[[ "$(echo "$BODY" | jq -r .payeeHint)" == "null" ]] || fail "payeeHint cleared"
+request PUT "/v1/recurring/$ONEOFF" "$A_TOKEN" "$(jq -nc --arg c "$TRANSPORT" --arg a "$ACC" --arg d "$TODAY_UTC" '{name:"Oil change",kind:"bill",amountCents:6000,categoryId:$c,accountId:$a,frequency:"once",anchorDate:$d,payeeHint:"Jiffy Lube"}')"; expect 200 "PUT sets payeeHint again"
+PAST_START="$(date -u -d "$TODAY_UTC -14 days" +%F)"
+request GET "/v1/week?start=$PAST_START" "$A_TOKEN"; expect 200 "past week (start $PAST_START)"
+echo "$BODY" | jq -e '.isPast==true and .isCurrent==false and .projected==false and .startingBalanceCents==null and .leftAtEndCents==null' >/dev/null || fail "past week without snapshots: $(echo "$BODY" | jq -c 'del(.days,.budget,.overdue)')"
+FUTURE_START="$(date -u -d "$TODAY_UTC +14 days" +%F)"
+request GET "/v1/week?start=$FUTURE_START" "$A_TOKEN"; expect 200 "future week (start $FUTURE_START)"
+echo "$BODY" | jq -e '.projected==true and .isPast==false and .isCurrent==false and .leftAtEndCents!=null and .startingBalanceCents==null' >/dev/null || fail "future week projected: $(echo "$BODY" | jq -c 'del(.days,.budget,.overdue)')"
+request GET "/v1/budgets/week?start=$FUTURE_START" "$A_TOKEN"; expect 200 "weekly budget view for a future week"
+[[ "$(echo "$BODY" | jq -r '.history[-1].weekStart')" == "$(echo "$BODY" | jq -r '.history[-1].weekStart')" && "$(echo "$BODY" | jq -r '.history|length')" == "8" ]] || fail "history for the viewed week"
+pass "week view: current/past/future, weekly budgets"
+
 # ---------------------------------------------------------------------------------------------
 # v3: bank sync, review inbox, CSV import
 #   SMOKE_SIMPLEFIN_PORT=<port>  start scripts/fake-simplefin.py on that port and run the full SimpleFIN flow.
@@ -534,8 +588,25 @@ if [[ -n "${SMOKE_SIMPLEFIN_PORT:-}" ]]; then
   request POST /v1/inbox/bulk "$A_TOKEN" "$(jq -nc --arg a "$TX_PAYROLL" '{action:"ignore",ids:[$a]}')"; expect 200 "bulk ignore by id"
   echo "$BODY" | jq -e '.ignored==1' >/dev/null || fail "bulk ignore: $BODY"
 
+  echo "--- v4: the Bridge clears the planned one-off (phase 3: JIFFY LUBE #42 −54.20 today)"
+  curl -fs -X POST "$FAKE/__phase/3" >/dev/null || fail "could not enable phase 3 on the fake Bridge"
   request POST "/v1/banks/$LINK/sync" "$A_TOKEN"; expect 200 "manual sync (allowed right after linking)"
-  echo "$BODY" | jq -e --arg l "$LINK" '.linkId==$l and .newTransactions==0 and .autoMatched==0 and (.errors|length==0)' >/dev/null || fail "second sync dedupes everything: $BODY"
+  echo "$BODY" | jq -e --arg l "$LINK" '.linkId==$l and .newTransactions==1 and .autoMatched==1 and (.errors|length==0)' >/dev/null || fail "sync should import only JIFFY LUBE and auto-match it via the payee hint: $BODY"
+  request GET "/v1/inbox?status=confirmed" "$A_TOKEN"
+  echo "$BODY" | jq -e '.items[] | select(.description=="JIFFY LUBE #42") | .confirmed.auto==true and .confirmed.by==null and .confirmed.itemName=="Oil change" and .amountCents==-5420' >/dev/null || fail "JIFFY LUBE row should be auto-confirmed against the one-off: $(echo "$BODY" | jq -c '.items[]|select(.description=="JIFFY LUBE #42")')"
+  request GET "/v1/week?start=$TODAY_UTC" "$A_TOKEN"; expect 200 "week view after the bank cleared the one-off"
+  echo "$BODY" | jq -e --arg id "$ONEOFF" --arg d "$TODAY_UTC" '.days[] | select(.date==$d) | .planned[] | select(.itemId==$id) | .status=="cleared" and .paid.amountCents==5420 and .paid.source=="bank" and .paid.auto==true and .varianceCents==-580' >/dev/null || fail "one-off should be cleared at 54.20 with variance −5.80: $(echo "$BODY" | jq -c --arg id "$ONEOFF" '.days[].planned[]|select(.itemId==$id)')"
+  pass "one-off cleared · actual 54.20 · variance −5.80"
+  TRANSPORT_ROW="$(echo "$BODY" | jq -c --arg c "$TRANSPORT" '.budget.categories[] | select(.categoryId==$c)')"
+  GROCERIES_ROW="$(echo "$BODY" | jq -c --arg g "$GROCERIES" '.budget.categories[] | select(.categoryId==$g)')"
+  echo "$TRANSPORT_ROW" | jq -e '.budgetCents==5000 and .spentCents==5420 and .varianceCents==420 and .percent==108' >/dev/null || fail "Transportation weekly row over by 4.20: $TRANSPORT_ROW"
+  echo "$GROCERIES_ROW" | jq -e '.budgetCents==10000 and .spentCents>0 and .varianceCents==(.spentCents-10000) and .varianceCents<0' >/dev/null || fail "Groceries weekly row under (confirmed Kroger expenses): $GROCERIES_ROW"
+  GROC_SPENT="$(echo "$GROCERIES_ROW" | jq -r .spentCents)"
+  echo "$BODY" | jq -e --argjson g "$GROC_SPENT" '.budget.overall.spentCents==(185000+5420+$g) and .budget.overall.varianceCents==(.budget.overall.spentCents-20000) and .budget.overall.varianceCents>0 and .budget.totalSpentCents==(5420+$g)' >/dev/null || fail "overall weekly spent = paid Rent + Oil change actual + Kroger expenses: $(echo "$BODY" | jq -c .budget.overall)"
+  [[ "$(echo "$BODY" | jq -r .paidOutCents)" -ge $((185000 + 5420)) ]] || fail "paidOutCents carries actuals"
+  pass "weekly budgets: overall over (+ sign), Transportation over by 4.20, Groceries under"
+  request GET "/v1/budgets/week?start=$TODAY_UTC" "$A_TOKEN"; expect 200 "GET /budgets/week equals WeekView.budget"
+  [[ "$(echo "$BODY" | jq -c .)" == "$(request GET "/v1/week?start=$TODAY_UTC" "$A_TOKEN" >/dev/null; echo "$BODY" | jq -c .budget)" ]] || fail "/budgets/week should equal /week .budget"
   request POST "/v1/banks/$LINK/sync" "$A_TOKEN"; expect 429 "manual sync again inside the cooldown → 429"
   RETRY_AFTER="$(curl -s -o /dev/null -D - -X POST "$BASE/v1/banks/$LINK/sync" -H "Authorization: Bearer $A_TOKEN" | tr -d '\r' | awk 'tolower($1)=="retry-after:" {print $2}')"
   [[ "$RETRY_AFTER" =~ ^[0-9]+$ && "$RETRY_AFTER" -ge 1 ]] || fail "Retry-After header missing: '$RETRY_AFTER'"
@@ -604,6 +675,21 @@ else
     *) fail "claim: unexpected $STATUS $BODY" ;;
   esac
 fi
+
+echo "--- v4: cleanup"
+request DELETE "/v1/budgets/$TRANSPORT?period=weekly" "$A_TOKEN"; expect 204 "clear weekly Transportation budget"
+request DELETE "/v1/budgets/$TRANSPORT?period=weekly" "$A_TOKEN"; expect 404 "clear again → 404"
+request DELETE "/v1/budgets/$TRANSPORT" "$A_TOKEN"; expect 404 "no monthly Transportation budget to clear (periods are independent)"
+request GET /v1/budgets/week "$A_TOKEN"; [[ "$(echo "$BODY" | jq -r '.categories|length')" == "1" ]] || fail "one weekly category budget left"
+request DELETE "/v1/budgets/$GROCERIES?period=weekly" "$A_TOKEN"; expect 204 "clear weekly Groceries budget"
+request PATCH /v1/couple "$A_TOKEN" '{"weeklySpendCents":null}'; expect 200 "clear weekly target with null"
+[[ "$(echo "$BODY" | jq -r .weeklySpendCents)" == "null" ]] || fail "weeklySpendCents cleared"
+request GET /v1/budgets/week "$A_TOKEN"; expect 200 "weekly budget view without budgets"
+echo "$BODY" | jq -e '.overall==null and (.categories|length==0) and (.history|length==0) and .totalBudgetCents==0' >/dev/null || fail "empty weekly budget view: $BODY"
+request DELETE "/v1/recurring/$ONEOFF" "$A_TOKEN"; expect 204 "archive the one-off (drops its payee rule)"
+request GET "/v1/activity?limit=100" "$A_TOKEN"
+echo "$BODY" | jq -e '.events[] | select(.kind=="budget.set" and .data.period=="weekly")' >/dev/null || fail "budget.set activity carries period=weekly"
+echo "$BODY" | jq -e '.events[] | select(.kind=="couple.settings" and .data.weeklySpendCents==20000)' >/dev/null || fail "couple.settings activity carries weeklySpendCents"
 
 request POST /v1/auth/password "$A_TOKEN" "$(jq -nc --arg p "$PASSWORD" '{currentPassword:$p,newPassword:"a brand new passphrase"}')"; expect 204 "change password"
 request POST /v1/auth/refresh '' "$(jq -nc --arg r "$A_REFRESH" '{refreshToken:$r}')"; expect 401 "all refresh tokens revoked after password change"

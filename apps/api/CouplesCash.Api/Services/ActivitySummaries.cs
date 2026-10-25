@@ -46,9 +46,13 @@ public static class ActivitySummaries
     public static string ExpenseDeleted(ExpenseRow e, string currency) => $"removed expense {Bold(e.Name)} · {Money(e.AmountCents, currency)}";
 
     // Budgets
-    public static string BudgetSet(string categoryName, long amountCents, string currency) => $"set {Bold(categoryName)} budget to {Money(amountCents, currency)}";
+    public static string BudgetSet(string categoryName, long amountCents, string currency, BudgetPeriod period = BudgetPeriod.Monthly) =>
+        $"set {Bold(categoryName)} {PeriodName(period)}budget to {Money(amountCents, currency)}";
 
-    public static string BudgetCleared(string categoryName) => $"cleared {Bold(categoryName)} budget";
+    public static string BudgetCleared(string categoryName, BudgetPeriod period = BudgetPeriod.Monthly) => $"cleared {Bold(categoryName)} {PeriodName(period)}budget";
+
+    /// <summary>Monthly budgets keep their v2 wording; weekly ones say so.</summary>
+    private static string PeriodName(BudgetPeriod period) => period == BudgetPeriod.Weekly ? "weekly " : "";
 
     // To-pay
     public static string TodoCreated(TodoRow t, string currency) => $"added to-pay {Bold(t.Title)}{AmountSuffix(t.AmountCents, currency)}";

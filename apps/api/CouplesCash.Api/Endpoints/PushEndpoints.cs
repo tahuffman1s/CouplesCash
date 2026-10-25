@@ -65,7 +65,7 @@ public static class PushEndpoints
     {
         var userId = principal.GetUserId();
         var days = (request.DaysBefore ?? []).Distinct().OrderBy(d => d).Select(d => (short)d).ToArray();
-        var prefs = await pushes.UpsertPrefsAsync(userId, request.RemindersEnabled, days, request.HourLocal, request.ActivityEnabled, time.Now(), ct);
+        var prefs = await pushes.UpsertPrefsAsync(userId, request.RemindersEnabled, days, request.HourLocal, request.ActivityEnabled, request.WeekSummaryEnabled ?? true, time.Now(), ct);
         var subscriptions = await pushes.SubscriptionsForUserAsync(userId, ct);
         return TypedResults.Ok(prefs.ToDto(subscriptions));
     }

@@ -18,7 +18,7 @@ public static class RecurringEndpoints
         var group = v1.MapGroup("/recurring").WithTags("Recurring").RequireAuthorization().RequireHousehold();
 
         group.MapGet("", List).WithSummary("Recurring items, optionally filtered by kind");
-        group.MapPost("", Create).WithValidation<RecurringRequest>().WithSummary("Create a bill, subscription or income");
+        group.MapPost("", Create).WithValidation<RecurringRequest>().WithSummary("Create a bill, subscription or income (frequency 'once' = a planned one-off; payeeHint seeds a bank payee rule)");
         group.MapGet("/{id:guid}", Get).WithSummary("Get a recurring item");
         group.MapPut("/{id:guid}", Update).WithValidation<RecurringRequest>().WithSummary("Replace a recurring item");
         group.MapDelete("/{id:guid}", Archive).WithSummary("Archive (soft delete) a recurring item");
@@ -59,6 +59,7 @@ public static class RecurringEndpoints
         ClaimsPrincipal principal,
         NpgsqlDataSource db,
         RecurringRepository items,
+        ImportRepository imports,
         CategoryRepository categories,
         AccountRepository accounts,
         HouseholdRepository households,
@@ -75,7 +76,9 @@ public static class RecurringEndpoints
 
         var currency = await households.CurrencyAsync(householdId, ct);
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
-        var row = await items.CreateAsync(uow.Connection, householdId, userId, ToFields(request), time.Now(), ct);
+        var now = time.Now();
+        var row = await items.CreateAsync(uow.Connection, householdId, userId, ToFields(request), now, ct);
+        await SyncPayeeRuleAsync(imports, uow.Connection, householdId, row.Id, previousHint: null, row.PayeeHint, now, ct);
         await activity.RecordAsync(uow, householdId, userId, "recurring.created", "recurring", row.Id,
             ActivitySummaries.RecurringCreated(row, currency), new { itemId = row.Id, kind = row.Kind.ToDb(), amountCents = row.AmountCents }, ct, principal.GetDisplayName());
         await uow.CommitAsync(ct);
@@ -95,6 +98,7 @@ public static class RecurringEndpoints
         ClaimsPrincipal principal,
         NpgsqlDataSource db,
         RecurringRepository items,
+        ImportRepository imports,
         CategoryRepository categories,
         AccountRepository accounts,
         ActivityService activity,
@@ -103,7 +107,7 @@ public static class RecurringEndpoints
     {
         var householdId = principal.GetHouseholdId();
         var userId = principal.GetUserId();
-        if (await items.GetAsync(householdId, id, ct) is null)
+        if (await items.GetAsync(householdId, id, ct) is not { } existing)
         {
             return TypedResults.NotFound();
         }
@@ -114,11 +118,14 @@ public static class RecurringEndpoints
         }
 
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
-        var row = await items.UpdateAsync(uow.Connection, householdId, id, ToFields(request), time.Now(), ct);
+        var now = time.Now();
+        var row = await items.UpdateAsync(uow.Connection, householdId, id, ToFields(request), now, ct);
         if (row is null)
         {
             return TypedResults.NotFound();
         }
+
+        await SyncPayeeRuleAsync(imports, uow.Connection, householdId, row.Id, existing.PayeeHint, row.PayeeHint, now, ct);
 
         await activity.RecordAsync(uow, householdId, userId, "recurring.updated", "recurring", row.Id,
             ActivitySummaries.RecurringUpdated(row), new { itemId = row.Id, kind = row.Kind.ToDb(), amountCents = row.AmountCents }, ct, principal.GetDisplayName());
@@ -131,6 +138,7 @@ public static class RecurringEndpoints
         ClaimsPrincipal principal,
         NpgsqlDataSource db,
         RecurringRepository items,
+        ImportRepository imports,
         ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
@@ -144,6 +152,9 @@ public static class RecurringEndpoints
         {
             return TypedResults.NotFound();
         }
+
+        // An archived item must not keep auto-applying bank transactions.
+        await imports.ClearItemRuleAsync(uow.Connection, householdId, payeeNorm: null, row.Id, ct);
 
         await activity.RecordAsync(uow, householdId, userId, "recurring.deleted", "recurring", row.Id,
             ActivitySummaries.RecurringDeleted(row), new { itemId = row.Id, kind = row.Kind.ToDb() }, ct, principal.GetDisplayName());
@@ -180,7 +191,7 @@ public static class RecurringEndpoints
             ActivitySummaries.OccurrencePaid(item.Name, amount, currency), new { itemId = item.Id, dueDate = date, amountCents = amount }, ct, principal.GetDisplayName());
         await uow.CommitAsync(ct);
 
-        return TypedResults.Ok(item.ToOccurrence(date, payment));
+        return TypedResults.Ok(item.ToOccurrence(date, payment, time.Today()));
     }
 
     private static async Task<Results<Ok<OccurrenceDto>, NotFound>> MarkUnpaid(
@@ -221,7 +232,7 @@ public static class RecurringEndpoints
         }
 
         await uow.CommitAsync(ct);
-        return TypedResults.Ok(item.ToOccurrence(date, null));
+        return TypedResults.Ok(item.ToOccurrence(date, null, time.Today()));
     }
 
     /// <summary>categoryId / accountId must belong to the caller's household; otherwise a field-level 400 (not a 404, which is reserved for the route id).</summary>
@@ -240,6 +251,33 @@ public static class RecurringEndpoints
         return null;
     }
 
+    /// <summary>
+    /// v4 payee hint → learned item rule: a (new or changed) hint upserts <c>payee_rules(payee_norm(hint), item_id)</c>; a cleared or
+    /// changed hint removes the previous rule when it still points at this item. Hints that normalise to nothing are ignored.
+    /// </summary>
+    internal static async Task SyncPayeeRuleAsync(ImportRepository imports, NpgsqlConnection conn, Guid householdId, Guid itemId, string? previousHint, string? hint, DateTime now, CancellationToken ct)
+    {
+        var previousNorm = Norm(previousHint);
+        var norm = Norm(hint);
+        if (previousNorm == norm)
+        {
+            return;
+        }
+
+        if (previousNorm is not null)
+        {
+            await imports.ClearItemRuleAsync(conn, householdId, previousNorm, itemId, ct);
+        }
+
+        if (norm is not null)
+        {
+            await imports.SetItemRuleAsync(conn, householdId, norm, itemId, now, ct);
+        }
+
+        static string? Norm(string? value) =>
+            string.IsNullOrWhiteSpace(value) ? null : TransactionMatcher.NormalisePayee(value, null) is { Length: > 0 } n ? n : null;
+    }
+
     private static RecurringFields ToFields(RecurringRequest r) => new(
         r.Name.Trim(),
         r.Kind!.Value,
@@ -251,5 +289,6 @@ public static class RecurringEndpoints
         r.EndDate,
         r.AutoPay ?? false,
         string.IsNullOrWhiteSpace(r.Notes) ? null : r.Notes.Trim(),
-        string.IsNullOrWhiteSpace(r.Url) ? null : r.Url.Trim());
+        string.IsNullOrWhiteSpace(r.Url) ? null : r.Url.Trim(),
+        string.IsNullOrWhiteSpace(r.PayeeHint) ? null : r.PayeeHint.Trim());
 }
