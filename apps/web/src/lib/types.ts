@@ -15,6 +15,8 @@ export type Household = {
 	defaultAccountId: string | null;
 	payPeriod: PayPeriod;
 	payAnchorDate: string | null;
+	// v4
+	weeklySpendCents: number | null;
 };
 export type AuthResult = {
 	user: User;
@@ -68,8 +70,11 @@ export type RecurringItem = {
 	nextDueDate: string | null;
 	createdAt: string;
 	updatedAt: string;
+	/** v4: what the bank calls it, so a one-off reconciles itself on the first match. */
+	payeeHint: string | null;
 };
 
+export type OccurrenceStatus = 'planned' | 'cleared' | 'overdue';
 export type Occurrence = {
 	itemId: string;
 	name: string;
@@ -83,6 +88,10 @@ export type Occurrence = {
 	accountId: string | null;
 	accountName: string | null;
 	paid: Paid | null;
+	/** v4: paid.amountCents − amountCents when paid, else null (positive = cost more). */
+	varianceCents: number | null;
+	/** v4: cleared when paid, overdue when unpaid and past due, otherwise planned. */
+	status: OccurrenceStatus;
 };
 export type Paid = {
 	paidAt: string;
@@ -215,6 +224,8 @@ export type PushPrefs = {
 	daysBefore: number[];
 	hourLocal: number;
 	activityEnabled: boolean;
+	/** v4: "Week ahead" / "left this week" summaries. */
+	weekSummaryEnabled: boolean;
 	subscriptions: PushSubscriptionInfo[];
 };
 
@@ -425,3 +436,59 @@ export type CsvImportRecord = {
 	createdByName: string;
 };
 export const INBOX_STATUSES: readonly InboxStatus[] = ['pending', 'confirmed', 'ignored'];
+
+// ---- v4 ----------------------------------------------------------------------------------
+
+export type BudgetPeriod = 'monthly' | 'weekly';
+export type WeekDay = {
+	date: string;
+	planned: Occurrence[];
+	expenses: Expense[];
+	plannedOutCents: number;
+	plannedInCents: number;
+	unplannedCents: number;
+};
+export type WeekBudgetRow = {
+	categoryId: string | null /* null = overall */;
+	name: string;
+	color: string;
+	icon: string;
+	budgetCents: number;
+	spentCents: number;
+	varianceCents: number /* spent − budget, + = over */;
+	percent: number;
+};
+export type WeekBudgetHistory = {
+	weekStart: string;
+	budgetCents: number;
+	spentCents: number;
+	varianceCents: number;
+}[]; // last 8 weeks incl. current, oldest first
+export type WeekBudget = {
+	overall: WeekBudgetRow | null;
+	categories: WeekBudgetRow[];
+	totalBudgetCents: number;
+	totalSpentCents: number;
+	history: WeekBudgetHistory;
+};
+export type WeekView = {
+	start: string;
+	end: string;
+	weekStart: 0 | 1;
+	isCurrent: boolean;
+	isPast: boolean;
+	today: string;
+	spendableNowCents: number;
+	startingBalanceCents: number | null /* past weeks: snapshots at/before start */;
+	incomeExpectedCents: number;
+	incomeReceivedCents: number;
+	plannedOutCents: number;
+	paidOutCents: number;
+	remainingOutCents: number;
+	unplannedCents: number;
+	leftAtEndCents: number | null /* null for past weeks without a starting balance */;
+	projected: boolean;
+	days: WeekDay[];
+	overdue: Occurrence[] /* unpaid planned before `start` still open, shown once at the top */;
+	budget: WeekBudget;
+};

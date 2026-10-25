@@ -5,13 +5,21 @@
  * Test-only helpers (never in the real API):
  *   POST /__reset                 wipe everything
  *   POST /__mock/autopay?date=    run the autopay scheduler for that day (default: today)
- *   POST /__mock/bank-sync        run the bank-sync scheduler phase for every link (ignores cooldown)
- * Env: MOCK_PUSH=1 serves a fake VAPID key (default: 503 push_not_configured).
+ *   POST /__mock/bank-sync        run the bank-sync scheduler phase for every link (ignores cooldown);
+ *                                 the first call also posts "JIFFY LUBE #42" −54.20 (today) to the
+ *                                 demo checking account, so an e2e can plan a one-off first
+ * Env: MOCK_PUSH=1 serves a fake VAPID key (default: 503 push_not_configured). Users whose email
+ *      starts with `push-` always get push, so one e2e can cover the prefs form while the rest of
+ *      the suite keeps the not-configured state.
  *      MOCK_BANKS_DISABLED=1 → POST /v1/banks/simplefin/claim answers 503 bank_sync_not_configured
  *      (the setup token `demo-not-configured` does the same per request, so one e2e can cover it).
  *
  * v3: a fake SimpleFIN Bridge lives in memory. The setup token `demo-token` claims a link with two
  * accounts (checking + credit card) and a handful of transactions; anything else is 400.
+ *
+ * v4: `/v1/week`, `/v1/budgets/week`, weekly budget rows (`?period=weekly`), `weeklySpendCents`,
+ * `payeeHint` (seeds an item payee rule), `weekSummaryEnabled`, occurrence `varianceCents` + `status`,
+ * and the wider matcher window for one-offs (±7 days, max(15 %, $10)).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -38,6 +46,7 @@ type Household = {
 	defaultAccountId: string | null;
 	payPeriod: 'weekly' | 'biweekly' | 'bimonthly' | 'monthly';
 	payAnchorDate: string | null;
+	weeklySpendCents: number | null;
 };
 type Account = {
 	id: string;
@@ -77,6 +86,7 @@ type Item = {
 	autoPay: boolean;
 	notes: string | null;
 	url: string | null;
+	payeeHint: string | null;
 	createdAt: string;
 	updatedAt: string;
 	archived: boolean;
@@ -164,6 +174,7 @@ type Prefs = {
 	daysBefore: number[];
 	hourLocal: number;
 	activityEnabled: boolean;
+	weekSummaryEnabled: boolean;
 };
 
 // ---- v3 types -----------------------------------------------------------------------------
@@ -286,7 +297,8 @@ const refreshTokens = new Map<string, { userId: string; family: string; revoked:
 const codes: Code[] = [];
 const activity: Activity[] = [];
 const expenses = new Map<string, Expense>();
-const budgets = new Map<string, number>(); // `${hh}:${categoryId}`
+const budgets = new Map<string, number>(); // `${hh}:${categoryId}` (monthly)
+const weeklyBudgets = new Map<string, number>(); // `${hh}:${categoryId}` (v4 weekly)
 const todos = new Map<string, Todo>();
 const goals = new Map<string, Goal>();
 const pushSubs = new Map<string, PushSub>(); // by endpoint
@@ -301,6 +313,7 @@ const bridge = new Map<string, BridgeAccount[]>(); // by bank link id
 const PORT = Number(process.env.MOCK_API_PORT ?? 8099);
 const ACCESS_TTL = Number(process.env.MOCK_ACCESS_TTL ?? 900);
 const PUSH_ENABLED = process.env.MOCK_PUSH === '1';
+const pushFor = (u: User) => PUSH_ENABLED || u.email.startsWith('push-');
 const BANKS_DISABLED = process.env.MOCK_BANKS_DISABLED === '1';
 const SYNC_COOLDOWN_MS = 15 * 60_000;
 
@@ -341,7 +354,8 @@ function householdView(h: Household | null) {
 		timezone: h.timezone,
 		defaultAccountId: h.defaultAccountId,
 		payPeriod: h.payPeriod,
-		payAnchorDate: h.payAnchorDate
+		payAnchorDate: h.payAnchorDate,
+		weeklySpendCents: h.weeklySpendCents
 	};
 }
 
@@ -389,7 +403,8 @@ function createHousehold(name: string, owner: User): Household {
 		timezone: 'UTC',
 		defaultAccountId: null,
 		payPeriod: 'monthly',
-		payAnchorDate: null
+		payAnchorDate: null,
+		weeklySpendCents: null
 	};
 	households.set(h.id, h);
 	owner.householdId = h.id;
@@ -542,12 +557,32 @@ function itemView(i: Item) {
 		monthlyEquivalentCents: monthlyEq(i.amountCents, i.frequency),
 		nextDueDate: nextDue(i),
 		createdAt: i.createdAt,
-		updatedAt: i.updatedAt
+		updatedAt: i.updatedAt,
+		payeeHint: i.payeeHint
 	};
+}
+/** v4: a payee hint seeds an item payee rule so the first bank match auto-applies; clearing removes it. */
+function applyPayeeHint(i: Item, hint: string | null) {
+	// drop the rule the previous hint created (only if it still points at this item)
+	for (const [key, rule] of payeeRules)
+		if (rule.householdId === i.householdId && rule.itemId === i.id && rule.hits <= 1)
+			payeeRules.delete(key);
+	i.payeeHint = hint && hint.trim() ? hint.trim().slice(0, 80) : null;
+	if (!i.payeeHint) return;
+	const norm = normPayee(i.payeeHint);
+	if (!norm) return;
+	payeeRules.set(`${i.householdId}:${norm}`, {
+		householdId: i.householdId,
+		payeeNorm: norm,
+		categoryId: null,
+		itemId: i.id,
+		hits: 1
+	});
 }
 function occurrence(i: Item, date: string) {
 	const c = i.categoryId ? categories.get(i.categoryId) : undefined;
 	const a = i.accountId ? accounts.get(i.accountId) : undefined;
+	const paid = payments.get(`${i.id}:${date}`) ?? null;
 	return {
 		itemId: i.id,
 		name: i.name,
@@ -560,7 +595,14 @@ function occurrence(i: Item, date: string) {
 		categoryColor: c?.color ?? null,
 		accountId: a?.id ?? null,
 		accountName: a?.name ?? null,
-		paid: payments.get(`${i.id}:${date}`) ?? null
+		paid,
+		// v4
+		varianceCents: paid ? paid.amountCents - i.amountCents : null,
+		status: paid
+			? ('cleared' as const)
+			: date < todayIso()
+				? ('overdue' as const)
+				: ('planned' as const)
 	};
 }
 type Occ = ReturnType<typeof occurrence>;
@@ -802,7 +844,13 @@ function goalView(g: Goal) {
 function prefsFor(userId: string): Prefs {
 	let p = prefs.get(userId);
 	if (!p) {
-		p = { remindersEnabled: true, daysBefore: [1], hourLocal: 9, activityEnabled: true };
+		p = {
+			remindersEnabled: true,
+			daysBefore: [1],
+			hourLocal: 9,
+			activityEnabled: true,
+			weekSummaryEnabled: true
+		};
 		prefs.set(userId, p);
 	}
 	return p;
@@ -853,6 +901,238 @@ function runAutopay(date: string) {
 		n++;
 	}
 	return n;
+}
+
+// ---- v4: week view + weekly budgets (PLAN-V4 "Concepts") ------------------------------------
+const addDaysIso = (iso: string, n: number) => {
+	const d = parse(iso);
+	d.setDate(d.getDate() + n);
+	return toIso(d);
+};
+function weekStartFor(iso: string, weekStart: 0 | 1): string {
+	const col = (parse(iso).getDay() - weekStart + 7) % 7;
+	return addDaysIso(iso, -col);
+}
+const isLiquid = (a: Account) => a.type === 'checking' || a.type === 'cash';
+function liquidNow(hh: string): number {
+	return [...accounts.values()]
+		.filter((a) => a.householdId === hh && !a.archived && isLiquid(a))
+		.reduce((s, a) => s + a.balanceCents, 0);
+}
+/** Latest checking + cash snapshots at or before local midnight of `iso`; null when there are none. */
+function liquidAt(hh: string, iso: string): number | null {
+	const at = parse(iso).toISOString();
+	let total = 0;
+	let any = false;
+	for (const a of accounts.values()) {
+		if (a.householdId !== hh || a.archived || !isLiquid(a)) continue;
+		const snap = (snapshots.get(a.id) ?? []).find((s) => s.recordedAt <= at);
+		if (!snap) continue;
+		any = true;
+		total += snap.balanceCents;
+	}
+	return any ? total : null;
+}
+type WeekBudgetRow = {
+	categoryId: string | null;
+	name: string;
+	color: string;
+	icon: string;
+	budgetCents: number;
+	spentCents: number;
+	varianceCents: number;
+	percent: number;
+};
+function weekRow(
+	categoryId: string | null,
+	name: string,
+	color: string,
+	icon: string,
+	budgetCents: number,
+	spentCents: number
+): WeekBudgetRow {
+	return {
+		categoryId,
+		name,
+		color,
+		icon,
+		budgetCents,
+		spentCents,
+		varianceCents: spentCents - budgetCents,
+		percent:
+			budgetCents > 0 ? Math.round((spentCents / budgetCents) * 100) : spentCents > 0 ? 100 : 0
+	};
+}
+/** Spent in a week = expenses + paid bill/subscription occurrences (actual amounts) due in the week. */
+function weekSpent(hh: string, start: string, categoryId: string | null) {
+	const end = addDaysIso(start, 6);
+	const exp = hhExpenses(hh, start, end)
+		.filter((e) => categoryId === null || e.categoryId === categoryId)
+		.reduce((s, e) => s + e.amountCents, 0);
+	const occ = calendar(hh, start, end)
+		.filter(
+			(o) => o.kind !== 'income' && o.paid && (categoryId === null || o.categoryId === categoryId)
+		)
+		.reduce((s, o) => s + (o.paid?.amountCents ?? 0), 0);
+	return exp + occ;
+}
+function weekBudgetFor(hh: string, start: string) {
+	const h = households.get(hh)!;
+	const cats = [...categories.values()]
+		.filter((c) => c.householdId === hh && weeklyBudgets.has(`${hh}:${c.id}`))
+		.sort((a, b) => a.sortOrder - b.sortOrder);
+	const rows = cats.map((c) =>
+		weekRow(
+			c.id,
+			c.name,
+			c.color,
+			c.icon,
+			weeklyBudgets.get(`${hh}:${c.id}`)!,
+			weekSpent(hh, start, c.id)
+		)
+	);
+	const overallBudget = h.weeklySpendCents;
+	const totalBudgetCents = rows.reduce((s, r) => s + r.budgetCents, 0);
+	// judged against today's budgets: the overall target when set, else the budgeted categories only
+	const historyBudget = overallBudget ?? totalBudgetCents;
+	const history =
+		overallBudget === null && cats.length === 0
+			? []
+			: Array.from({ length: 8 }, (_, i) => {
+					const ws = addDaysIso(start, -7 * (7 - i));
+					const spentCents =
+						overallBudget !== null
+							? weekSpent(hh, ws, null)
+							: cats.reduce((sum, c) => sum + weekSpent(hh, ws, c.id), 0);
+					return {
+						weekStart: ws,
+						budgetCents: historyBudget,
+						spentCents,
+						varianceCents: spentCents - historyBudget
+					};
+				});
+	return {
+		overall:
+			overallBudget === null
+				? null
+				: weekRow(
+						null,
+						'Weekly spending',
+						'#2a78d6',
+						'target',
+						overallBudget,
+						weekSpent(hh, start, null)
+					),
+		categories: rows,
+		totalBudgetCents,
+		totalSpentCents: rows.reduce((s, r) => s + r.spentCents, 0),
+		history
+	};
+}
+function weekViewFor(hh: string, start: string) {
+	const h = households.get(hh)!;
+	const end = addDaysIso(start, 6);
+	const today = todayIso();
+	const isCurrent = start <= today && today <= end;
+	const isPast = end < today;
+	const occ = calendar(hh, start, end);
+	const days = Array.from({ length: 7 }, (_, i) => {
+		const date = addDaysIso(start, i);
+		const planned = occ.filter((o) => o.dueDate === date);
+		const exp = hhExpenses(hh, date, date).map(expenseView);
+		return {
+			date,
+			planned,
+			expenses: exp,
+			plannedOutCents: planned
+				.filter((o) => o.kind !== 'income')
+				.reduce((s, o) => s + o.amountCents, 0),
+			plannedInCents: planned
+				.filter((o) => o.kind === 'income')
+				.reduce((s, o) => s + o.amountCents, 0),
+			unplannedCents: exp.reduce((s, e) => s + e.amountCents, 0)
+		};
+	});
+	const income = occ.filter((o) => o.kind === 'income');
+	const out = occ.filter((o) => o.kind !== 'income');
+	const sum = (list: Occ[], f: (o: Occ) => number) => list.reduce((s, o) => s + f(o), 0);
+	const incomeExpectedCents = sum(income, (o) => o.amountCents);
+	const incomeReceivedCents = sum(
+		income.filter((o) => o.paid),
+		(o) => o.paid?.amountCents ?? 0
+	);
+	const plannedOutCents = sum(out, (o) => o.amountCents);
+	const paidOutCents = sum(
+		out.filter((o) => o.paid),
+		(o) => o.paid?.amountCents ?? 0
+	);
+	const remainingOutCents = sum(
+		out.filter((o) => !o.paid),
+		(o) => o.amountCents
+	);
+	const unplannedCents = days.reduce((s, d) => s + d.unplannedCents, 0);
+	const spendableNowCents = liquidNow(hh);
+	const startingBalanceCents = isPast ? liquidAt(hh, start) : null;
+	let leftAtEndCents: number | null;
+	if (isPast) {
+		leftAtEndCents =
+			startingBalanceCents === null
+				? null
+				: startingBalanceCents + incomeReceivedCents - paidOutCents - unplannedCents;
+	} else if (isCurrent) {
+		// only what is still due from today on; unpaid items earlier in the week show as overdue rows
+		const ahead = occ.filter((o) => !o.paid && o.dueDate >= today);
+		leftAtEndCents =
+			spendableNowCents +
+			sum(
+				ahead.filter((o) => o.kind === 'income'),
+				(o) => o.amountCents
+			) -
+			sum(
+				ahead.filter((o) => o.kind !== 'income'),
+				(o) => o.amountCents
+			);
+	} else {
+		const ahead = calendar(hh, today, end).filter((o) => !o.paid);
+		leftAtEndCents =
+			spendableNowCents +
+			sum(
+				ahead.filter((o) => o.kind === 'income'),
+				(o) => o.amountCents
+			) -
+			sum(
+				ahead.filter((o) => o.kind !== 'income'),
+				(o) => o.amountCents
+			);
+	}
+	// open items (any kind) due before the viewed week and before today, oldest first, max 50
+	const overdueTo = addDaysIso(start < today ? start : today, -1);
+	const overdue = isPast
+		? []
+		: calendar(hh, addDaysIso(overdueTo, -90), overdueTo)
+				.filter((o) => !o.paid)
+				.slice(0, 50);
+	return {
+		start,
+		end,
+		weekStart: h.weekStart,
+		isCurrent,
+		isPast,
+		today,
+		spendableNowCents,
+		startingBalanceCents,
+		incomeExpectedCents,
+		incomeReceivedCents,
+		plannedOutCents,
+		paidOutCents,
+		remainingOutCents,
+		unplannedCents,
+		leftAtEndCents,
+		projected: start > today,
+		days,
+		overdue,
+		budget: weekBudgetFor(hh, start)
+	};
 }
 
 // ---- v3: fake SimpleFIN Bridge, matcher, inbox ----------------------------------------------
@@ -949,14 +1229,20 @@ function suggest(
 	const outflow = tx.amountCents < 0;
 	const norm = normPayee(tx.payee ?? tx.description);
 	const rule = payeeRules.get(`${hh}:${norm}`);
-	// 1. recurring occurrence within ±5 days, amount within max(2 %, $1), kind matches sign
-	const from = toIso(new Date(parse(tx.postedOn).getTime() - 5 * 86400_000));
-	const to = toIso(new Date(parse(tx.postedOn).getTime() + 5 * 86400_000));
+	// 1. recurring occurrence within ±5 days, amount within max(2 %, $1), kind matches sign;
+	//    v4: one-offs get ±7 days and max(15 %, $10)
 	let best: { item: Item; date: string; distance: number } | null = null;
 	for (const i of items.values()) {
 		if (i.householdId !== hh || i.archived) continue;
 		if ((i.kind === 'income') === outflow) continue;
-		if (Math.abs(i.amountCents - abs) > Math.max(Math.round(i.amountCents * 0.02), 100)) continue;
+		const once = i.frequency === 'once';
+		const tolerance = once
+			? Math.max(Math.round(i.amountCents * 0.15), 1000)
+			: Math.max(Math.round(i.amountCents * 0.02), 100);
+		if (Math.abs(i.amountCents - abs) > tolerance) continue;
+		const window = once ? 7 : 5;
+		const from = toIso(new Date(parse(tx.postedOn).getTime() - window * 86400_000));
+		const to = toIso(new Date(parse(tx.postedOn).getTime() + window * 86400_000));
 		for (const d of expand(i, from, to)) {
 			if (payments.has(`${i.id}:${d}`)) continue;
 			const distance = Math.abs(parse(d).getTime() - parse(tx.postedOn).getTime());
@@ -1471,6 +1757,7 @@ const server = createServer(async (req, res) => {
 				refreshTokens,
 				expenses,
 				budgets,
+				weeklyBudgets,
 				todos,
 				goals,
 				pushSubs,
@@ -1491,6 +1778,15 @@ const server = createServer(async (req, res) => {
 			let synced = 0;
 			for (const link of bankLinks.values()) {
 				if (!link.syncEnabled) continue;
+				// v4: a later statement line only the scheduler ever sees (lets an e2e plan first)
+				const checking = (bridge.get(link.id) ?? []).find((a) => a.id === 'demo-checking');
+				if (checking && !checking.transactions.some((t) => t.id === 'tx-jiffy'))
+					checking.transactions.push({
+						id: 'tx-jiffy',
+						posted: todayIso(),
+						amount: -5420,
+						description: 'JIFFY LUBE #42'
+					});
 				syncLink(link, null);
 				synced++;
 			}
@@ -1594,7 +1890,7 @@ const server = createServer(async (req, res) => {
 
 		// --- push (per user)
 		if (p === '/v1/push/vapid-public-key' && m === 'GET') {
-			if (!PUSH_ENABLED)
+			if (!pushFor(user))
 				return problem(
 					res,
 					503,
@@ -1632,14 +1928,20 @@ const server = createServer(async (req, res) => {
 			}
 			return send(res, 204);
 		}
-		if (p === '/v1/push/prefs' && m === 'GET') return send(res, 200, prefsView(user.id));
+		if (p === '/v1/push/prefs' && m === 'GET') {
+			if (!pushFor(user)) return problem(res, 503, 'Push not configured');
+			return send(res, 200, prefsView(user.id));
+		}
 		if (p === '/v1/push/prefs' && m === 'PUT') {
+			if (!pushFor(user)) return problem(res, 503, 'Push not configured');
 			const b = await readJson(req);
 			prefs.set(user.id, {
 				remindersEnabled: Boolean(b.remindersEnabled),
 				daysBefore: Array.isArray(b.daysBefore) ? (b.daysBefore as number[]).slice(0, 5) : [1],
 				hourLocal: Number(b.hourLocal ?? 9),
-				activityEnabled: Boolean(b.activityEnabled)
+				activityEnabled: Boolean(b.activityEnabled),
+				weekSummaryEnabled:
+					b.weekSummaryEnabled === undefined ? true : Boolean(b.weekSummaryEnabled)
 			});
 			return send(res, 200, prefsView(user.id));
 		}
@@ -1714,6 +2016,17 @@ const server = createServer(async (req, res) => {
 			}
 			if ('payAnchorDate' in b) {
 				h.payAnchorDate = (b.payAnchorDate as string | null) || null;
+			}
+			if ('weeklySpendCents' in b) {
+				const v = b.weeklySpendCents;
+				if (v !== null && (typeof v !== 'number' || !Number.isInteger(v) || v < 0))
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { weeklySpendCents: ['Must be a whole number of cents, 0 or more'] }
+					});
+				h.weeklySpendCents = v as number | null;
+				changed.push('weekly target');
 			}
 			if (changed.length)
 				record(
@@ -1931,6 +2244,7 @@ const server = createServer(async (req, res) => {
 				for (const i of items.values()) if (i.categoryId === c.id) i.categoryId = null;
 				for (const e of expenses.values()) if (e.categoryId === c.id) e.categoryId = null;
 				budgets.delete(`${hh}:${c.id}`);
+				weeklyBudgets.delete(`${hh}:${c.id}`);
 				return send(res, 204);
 			}
 		}
@@ -1964,11 +2278,13 @@ const server = createServer(async (req, res) => {
 				autoPay: Boolean(b.autoPay),
 				notes: (b.notes as string | null) ?? null,
 				url: (b.url as string | null) ?? null,
+				payeeHint: null,
 				createdAt: nowIso(),
 				updatedAt: nowIso(),
 				archived: false
 			};
 			items.set(i.id, i);
+			applyPayeeHint(i, (b.payeeHint as string | null | undefined) ?? null);
 			record(
 				hh,
 				user,
@@ -2036,6 +2352,7 @@ const server = createServer(async (req, res) => {
 						url: b.url ?? null,
 						updatedAt: nowIso()
 					});
+					if ('payeeHint' in b) applyPayeeHint(i, (b.payeeHint as string | null) ?? null);
 					record(hh, user, 'recurring.updated', 'recurring', i.id, `updated ${i.name}`);
 					return send(res, 200, itemView(i));
 				}
@@ -2175,11 +2492,40 @@ const server = createServer(async (req, res) => {
 			const month = url.searchParams.get('month') ?? todayIso().slice(0, 7);
 			return send(res, 200, budgetRows(hh, month));
 		}
+		// v4: the budget section of the week view on its own
+		if (p === '/v1/budgets/week' && m === 'GET') {
+			const h = households.get(hh)!;
+			const start = weekStartFor(url.searchParams.get('start') ?? todayIso(), h.weekStart);
+			return send(res, 200, weekBudgetFor(hh, start));
+		}
 		mm = /^\/v1\/budgets\/([^/]+)$/.exec(p);
 		if (mm) {
 			const c = categories.get(mm[1]);
 			if (!c || c.householdId !== hh) return problem(res, 404, 'Not found');
 			const month = url.searchParams.get('month') ?? todayIso().slice(0, 7);
+			const weekly = url.searchParams.get('period') === 'weekly';
+			if (weekly && m === 'PUT') {
+				const b = await readJson(req);
+				if (typeof b.amountCents !== 'number' || b.amountCents < 0)
+					return problem(res, 400, 'Validation failed');
+				weeklyBudgets.set(`${hh}:${c.id}`, b.amountCents);
+				record(
+					hh,
+					user,
+					'budget.set',
+					'budget',
+					c.id,
+					`set the ${c.name} weekly budget to ${$(b.amountCents)}`
+				);
+				const start = weekStartFor(todayIso(), households.get(hh)!.weekStart);
+				const row = weekBudgetFor(hh, start).categories.find((r) => r.categoryId === c.id);
+				return send(res, 200, row);
+			}
+			if (weekly && m === 'DELETE') {
+				weeklyBudgets.delete(`${hh}:${c.id}`);
+				record(hh, user, 'budget.cleared', 'budget', c.id, `cleared the ${c.name} weekly budget`);
+				return send(res, 204);
+			}
 			if (m === 'PUT') {
 				const b = await readJson(req);
 				if (typeof b.amountCents !== 'number' || b.amountCents < 0)
@@ -2202,6 +2548,14 @@ const server = createServer(async (req, res) => {
 				record(hh, user, 'budget.cleared', 'budget', c.id, `cleared the ${c.name} budget`);
 				return send(res, 204);
 			}
+		}
+
+		// --- v4: week view
+		if (p === '/v1/week' && m === 'GET') {
+			const h = households.get(hh)!;
+			const start = url.searchParams.get('start') ?? todayIso();
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return problem(res, 400, 'Validation failed');
+			return send(res, 200, weekViewFor(hh, weekStartFor(start, h.weekStart)));
 		}
 
 		// --- pay period

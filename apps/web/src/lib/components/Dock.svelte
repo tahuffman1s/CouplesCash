@@ -34,6 +34,7 @@
 				p.startsWith('/activity') ||
 				p.startsWith('/todos') ||
 				p.startsWith('/payperiod') ||
+				p.startsWith('/week') ||
 				p.startsWith('/inbox') ||
 				p.startsWith('/imports')
 		}

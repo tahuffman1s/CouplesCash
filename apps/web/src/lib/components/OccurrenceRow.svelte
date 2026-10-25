@@ -2,17 +2,21 @@
 	import type { Occurrence } from '#lib/types.ts';
 	import { formatMoney } from '#lib/utils/money.ts';
 	import { relativeDay, formatDate, today } from '#lib/utils/dates.ts';
+	import { formatVariance, varianceTone } from '#lib/utils/week.ts';
 	import Icon from './Icon.svelte';
 
 	let {
 		occ,
 		onToggle,
 		showDate = true,
+		showStatus = false,
 		busy = false
 	}: {
 		occ: Occurrence;
 		onToggle?: (occ: Occurrence) => void;
 		showDate?: boolean;
+		/** v4: render the Planned / Cleared / Overdue chip from `occ.status` (week view) */
+		showStatus?: boolean;
 		busy?: boolean;
 	} = $props();
 
@@ -20,9 +24,25 @@
 	const colour = $derived(occ.categoryColor ?? 'var(--color-base-300)');
 	const fromBank = $derived(occ.paid?.source === 'bank');
 	const autoPaid = $derived(!!occ.paid?.auto);
+	// v4: the API says what the row is; fall back to the local rule for older builds
+	const status = $derived(occ.status ?? (occ.paid ? 'cleared' : overdue ? 'overdue' : 'planned'));
+	const variance = $derived(
+		occ.paid ? formatVariance(occ.varianceCents ?? null, (c) => formatMoney(c)) : null
+	);
+	const varianceClass = $derived(
+		varianceTone(occ.varianceCents ?? null, occ.kind) === 'success'
+			? 'bg-success/15 text-success'
+			: 'bg-error/15 text-error'
+	);
+	const STATUS_CLASS = {
+		planned: 'bg-base-200 text-base-content/70',
+		cleared: 'bg-success/15 text-success',
+		overdue: 'bg-error/15 text-error'
+	} as const;
+	const STATUS_LABEL = { planned: 'Planned', cleared: 'Cleared', overdue: 'Overdue' } as const;
 </script>
 
-<li class="flex items-center gap-3 py-2.5">
+<li class="flex items-center gap-3 py-2.5" data-testid="occurrence-row" data-status={status}>
 	<span class="h-10 w-1.5 shrink-0 rounded-full" style:background={colour} aria-hidden="true"
 	></span>
 	<a href="/bills/{occ.itemId}" class="min-w-0 flex-1 rounded-lg">
@@ -45,6 +65,16 @@
 					<Icon name="landmark" size={10} strokeWidth={2.5} /> From bank
 				</span>
 			{/if}
+			{#if showStatus}
+				<span
+					class="badge shrink-0 border-0 px-1.5 badge-xs text-[0.65rem] font-medium {STATUS_CLASS[
+						status
+					]}"
+					data-testid="status-chip"
+				>
+					{STATUS_LABEL[status]}
+				</span>
+			{/if}
 		</p>
 		<p class="truncate text-xs text-base-content/60">
 			{#if autoPaid}
@@ -62,14 +92,26 @@
 			{/if}
 		</p>
 	</a>
-	<span
-		class="shrink-0 text-sm font-semibold tabular {occ.kind === 'income'
-			? 'text-success'
-			: occ.paid
-				? 'text-base-content/50'
-				: ''}"
-	>
-		{occ.kind === 'income' ? '+' : ''}{formatMoney(occ.paid?.amountCents ?? occ.amountCents)}
+	<span class="flex shrink-0 flex-col items-end">
+		<span
+			class="text-sm font-semibold tabular {occ.kind === 'income'
+				? 'text-success'
+				: occ.paid
+					? 'text-base-content/50'
+					: ''}"
+			data-testid="occurrence-amount"
+		>
+			{occ.kind === 'income' ? '+' : ''}{formatMoney(occ.paid?.amountCents ?? occ.amountCents)}
+		</span>
+		{#if variance}
+			<span
+				class="rounded-full px-1.5 text-[0.65rem] leading-4 font-medium tabular {varianceClass}"
+				data-testid="variance-pill"
+				aria-label="{variance} versus the planned {formatMoney(occ.amountCents)}"
+			>
+				{variance}
+			</span>
+		{/if}
 	</span>
 	{#if onToggle}
 		{#if autoPaid}

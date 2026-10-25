@@ -238,6 +238,24 @@
 						/>
 						<span class="label-text">Partner activity (payments, auto-pay, new expenses)</span>
 					</label>
+					<div class="form-control">
+						<label class="label cursor-pointer justify-start gap-3 px-0">
+							<input
+								type="checkbox"
+								name="weekSummaryEnabled"
+								class="toggle toggle-secondary"
+								defaultChecked={prefs.weekSummaryEnabled ?? true}
+								data-testid="week-summary-toggle"
+							/>
+							<span class="label-text">Weekly summary</span>
+						</label>
+						<p class="pl-15 text-xs text-base-content/60">
+							Two pushes a week, at the hour above: the day before your week starts – <em
+								>“Week ahead: $1,240 planned, $860 expected left”</em
+							>
+							– and on day five – <em>“You have $312 left this week · budget $40 under”</em>.
+						</p>
+					</div>
 					<button class="btn min-h-12 rounded-full btn-primary">Save preferences</button>
 				</form>
 			</section>

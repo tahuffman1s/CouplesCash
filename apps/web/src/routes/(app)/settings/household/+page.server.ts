@@ -26,6 +26,7 @@ async function save(event: Parameters<Actions[string]>[0], section: string) {
 				e.field('timezone') ??
 				e.field('payAnchorDate') ??
 				e.field('defaultAccountId') ??
+				e.field('weeklySpendCents') ??
 				e.message)
 			: 'Could not save. Try again.';
 		return fail(isApiError(e) ? e.status : 500, { section, error: message, values: echo(data) });
@@ -36,5 +37,6 @@ async function save(event: Parameters<Actions[string]>[0], section: string) {
 export const actions: Actions = {
 	general: (event) => save(event, 'general'),
 	payperiod: (event) => save(event, 'payperiod'),
-	timezone: (event) => save(event, 'timezone')
+	timezone: (event) => save(event, 'timezone'),
+	weekly: (event) => save(event, 'weekly')
 };

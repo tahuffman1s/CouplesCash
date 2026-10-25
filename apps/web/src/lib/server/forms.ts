@@ -1,8 +1,8 @@
 import type { AccountType, Frequency, Kind, PayPeriod } from '#lib/types.ts';
 import { ACCOUNT_TYPES, FREQUENCIES, KINDS, PAY_PERIODS } from '#lib/types.ts';
-import type { ExpenseBody, GoalBody, HouseholdPatch, TodoBody } from './api';
+import type { ExpenseBody, GoalBody, HouseholdPatch, RecurringBody, TodoBody } from './api';
 import { parseMoney } from '#lib/utils/money.ts';
-import { isValidISODate } from '#lib/utils/dates.ts';
+import { addDays, isValidISODate, today } from '#lib/utils/dates.ts';
 
 export function str(data: FormData, key: string): string {
 	return String(data.get(key) ?? '').trim();
@@ -54,6 +54,7 @@ export function parseRecurringForm(data: FormData): Parsed<{
 	autoPay: boolean;
 	notes: string | null;
 	url: string | null;
+	payeeHint: string | null;
 }> {
 	const name = str(data, 'name');
 	const kind = str(data, 'kind') as Kind;
@@ -85,9 +86,68 @@ export function parseRecurringForm(data: FormData): Parsed<{
 			endDate,
 			autoPay: data.get('autoPay') === 'on',
 			notes: optional(data, 'notes'),
-			url
+			url,
+			// v4: only one-offs carry a bank payee hint
+			payeeHint: frequency === 'once' ? optional(data, 'payeeHint') : null
 		}
 	};
+}
+
+/**
+ * v4 "Plan a one-off": name, amount, date, kind (expense → bill, income), account, optional
+ * bank payee hint and notes. Becomes `POST /recurring` with `frequency: 'once'`.
+ */
+export function parseOneOffForm(data: FormData): Parsed<RecurringBody> {
+	const name = str(data, 'name');
+	const amountCents = parseMoney(str(data, 'amount'));
+	const date = str(data, 'date');
+	const kindRaw = str(data, 'kind') || 'expense';
+	if (!name) return { ok: false, error: 'Give it a name.' };
+	if (amountCents === null || amountCents <= 0)
+		return { ok: false, error: 'Enter an amount greater than zero.' };
+	if (!isValidISODate(date)) return { ok: false, error: 'Pick the date.' };
+	if (date < addDays(today(), -7))
+		return { ok: false, error: 'A one-off can be at most a week in the past.' };
+	if (kindRaw !== 'expense' && kindRaw !== 'income' && kindRaw !== 'bill')
+		return { ok: false, error: 'Pick expense or income.' };
+	return {
+		ok: true,
+		value: {
+			name,
+			kind: kindRaw === 'income' ? 'income' : 'bill',
+			amountCents,
+			categoryId: optional(data, 'categoryId'),
+			accountId: optional(data, 'accountId'),
+			frequency: 'once',
+			anchorDate: date,
+			endDate: null,
+			autoPay: false,
+			notes: optional(data, 'notes'),
+			url: null,
+			payeeHint: optional(data, 'payeeHint')
+		}
+	};
+}
+
+/** The weekly-budgets sheet: overall target + one amount per category (blank = clear). */
+export function parseWeeklyBudgetsForm(data: FormData): Parsed<{
+	overallCents: number | null;
+	categories: { categoryId: string; amountCents: number | null; had: boolean }[];
+}> {
+	const overallRaw = str(data, 'overall');
+	const overallCents = overallRaw ? parseMoney(overallRaw) : null;
+	if (overallRaw && (overallCents === null || overallCents < 0))
+		return { ok: false, error: 'Enter the weekly target as a number, like 300.' };
+	const categories: { categoryId: string; amountCents: number | null; had: boolean }[] = [];
+	for (const id of data.getAll('categoryId').map(String)) {
+		if (!/^[0-9a-fA-F-]{8,}$/.test(id)) continue;
+		const raw = str(data, `cat_${id}`);
+		const cents = raw ? parseMoney(raw) : null;
+		if (raw && (cents === null || cents < 0))
+			return { ok: false, error: 'Budgets must be numbers, like 120.' };
+		categories.push({ categoryId: id, amountCents: cents, had: data.get(`had_${id}`) === '1' });
+	}
+	return { ok: true, value: { overallCents, categories } };
 }
 
 /** Echo submitted values back to the form on failure. */
@@ -182,6 +242,16 @@ export function parseHouseholdSettings(data: FormData): Parsed<HouseholdPatch> {
 		if (anchor && !isValidISODate(anchor))
 			return { ok: false, error: 'Pick the date of a recent payday.' };
 		patch.payAnchorDate = anchor;
+	}
+	if (data.has('weeklySpend')) {
+		const raw = str(data, 'weeklySpend');
+		if (!raw) patch.weeklySpendCents = null;
+		else {
+			const cents = parseMoney(raw);
+			if (cents === null || cents < 0)
+				return { ok: false, error: 'Enter the weekly target as a number, like 300.' };
+			patch.weeklySpendCents = cents;
+		}
 	}
 	return { ok: true, value: patch };
 }

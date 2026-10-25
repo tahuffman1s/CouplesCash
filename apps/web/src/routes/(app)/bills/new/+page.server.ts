@@ -11,7 +11,14 @@ export const load: PageServerLoad = async (event) => {
 		client.get<Category[]>('/categories'),
 		client.get<Account[]>('/accounts')
 	]);
-	return { categories, accounts, kind: event.url.searchParams.get('kind') };
+	const q = event.url.searchParams;
+	return {
+		categories,
+		accounts,
+		kind: q.get('kind'),
+		frequency: q.get('frequency') === 'once' ? 'once' : null,
+		anchor: q.get('anchor')
+	};
 };
 
 export const actions: Actions = {

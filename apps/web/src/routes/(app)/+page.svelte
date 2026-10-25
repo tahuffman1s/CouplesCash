@@ -13,6 +13,8 @@
 	import TodoRow from '#lib/components/TodoRow.svelte';
 	import BottomSheet from '#lib/components/BottomSheet.svelte';
 	import PaydayCard from '#lib/components/PaydayCard.svelte';
+	import WeekCard from '#lib/components/WeekCard.svelte';
+	import OneOffForm from '#lib/components/OneOffForm.svelte';
 	import Donut from '#lib/charts/Donut.svelte';
 	import { currencySymbol, formatMoney } from '#lib/utils/money.ts';
 	import { formatMonth, relativeTime, today } from '#lib/utils/dates.ts';
@@ -100,7 +102,7 @@
 
 	// --- quick add sheet
 	let sheet = $state(false);
-	let quickMode = $state<'menu' | 'expense'>('menu');
+	let quickMode = $state<'menu' | 'expense' | 'oneoff'>('menu');
 	let quickSubmitting = $state(false);
 	function openSheet() {
 		quickMode = 'menu';
@@ -110,6 +112,17 @@
 		if (form?.expenseAdded) {
 			toasts.show(`${form.expenseAdded} added`, 'success');
 			sheet = false;
+		}
+		if (form?.oneOffAdded) {
+			toasts.show(`${form.oneOffAdded} planned`, 'success');
+			sheet = false;
+		}
+	});
+	// a failed submit reopens the sheet on the form that failed
+	$effect(() => {
+		if (form?.error && form.sheet === 'oneoff') {
+			quickMode = 'oneoff';
+			sheet = true;
 		}
 	});
 
@@ -244,6 +257,11 @@
 					<Icon name="chevron-right" size={18} class="text-base-content/40" />
 				</div>
 			</a>
+		{/if}
+
+		<!-- This week (v4) – hidden until the household has an account -->
+		{#if data.week && s.accounts.length > 0}
+			<WeekCard view={data.week} />
 		{/if}
 
 		<!-- Until payday -->
@@ -397,7 +415,14 @@
 		</button>
 	</div>
 
-	<BottomSheet bind:open={sheet} title={quickMode === 'expense' ? 'Add an expense' : 'Quick add'}>
+	<BottomSheet
+		bind:open={sheet}
+		title={quickMode === 'expense'
+			? 'Add an expense'
+			: quickMode === 'oneoff'
+				? 'Plan a one-off'
+				: 'Quick add'}
+	>
 		{#if quickMode === 'menu'}
 			<ul class="flex flex-col gap-2">
 				<li>
@@ -414,6 +439,26 @@
 						<span class="text-left">
 							<span class="block font-medium">Expense</span>
 							<span class="block text-xs font-normal text-base-content/60">A one-off purchase</span>
+						</span>
+					</button>
+				</li>
+				<li>
+					<button
+						type="button"
+						class="btn min-h-14 w-full justify-start gap-3 rounded-2xl border border-base-300 btn-ghost"
+						data-testid="quick-one-off"
+						onclick={() => (quickMode = 'oneoff')}
+					>
+						<span
+							class="flex h-9 w-9 items-center justify-center rounded-xl bg-success/15 text-success"
+						>
+							<Icon name="calendar-check" size={18} />
+						</span>
+						<span class="text-left">
+							<span class="block font-medium">Plan a one-off</span>
+							<span class="block text-xs font-normal text-base-content/60"
+								>Something coming up this week, not recurring</span
+							>
 						</span>
 					</button>
 				</li>
@@ -454,6 +499,30 @@
 					</a>
 				</li>
 			</ul>
+		{:else if quickMode === 'oneoff'}
+			<form
+				method="POST"
+				action="?/planOneOff"
+				class="flex flex-col gap-3"
+				use:enhance={() => {
+					quickSubmitting = true;
+					return async ({ update }) => {
+						await update();
+						quickSubmitting = false;
+					};
+				}}
+			>
+				<OneOffForm
+					accounts={data.accounts}
+					defaultAccountId={data.household?.defaultAccountId ?? null}
+					values={form?.sheet === 'oneoff' ? form.values : undefined}
+					error={form?.sheet === 'oneoff' ? form.error : undefined}
+				/>
+				<button class="btn min-h-12 rounded-full btn-primary" disabled={quickSubmitting}>
+					{#if quickSubmitting}<span class="loading loading-sm loading-spinner"></span>{/if}
+					Plan it
+				</button>
+			</form>
 		{:else}
 			<form
 				method="POST"
@@ -472,7 +541,7 @@
 					<input type="hidden" name="accountId" value={data.household.defaultAccountId} />
 					<input type="hidden" name="deduct" value="on" />
 				{/if}
-				{#if form?.error}
+				{#if form?.error && !form.sheet}
 					<div class="alert text-sm alert-error" role="alert">{form.error}</div>
 				{/if}
 				<label class="form-control">

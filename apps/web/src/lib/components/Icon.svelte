@@ -103,6 +103,8 @@
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
 	import FileSpreadsheet from '@lucide/svelte/icons/file-spreadsheet';
 	import CheckCheck from '@lucide/svelte/icons/check-check';
+	import CalendarCheck from '@lucide/svelte/icons/calendar-check';
+	import CalendarRange from '@lucide/svelte/icons/calendar-range';
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const ICONS: Record<string, Component<any>> = {
@@ -212,7 +214,9 @@
 		unlink: Unlink,
 		'ellipsis-vertical': EllipsisVertical,
 		'file-spreadsheet': FileSpreadsheet,
-		'check-check': CheckCheck
+		'check-check': CheckCheck,
+		'calendar-check': CalendarCheck,
+		'calendar-range': CalendarRange
 	};
 
 	export const ICON_NAMES = Object.keys(ICONS);

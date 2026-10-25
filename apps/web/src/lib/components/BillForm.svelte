@@ -109,7 +109,7 @@
 	<div class="grid grid-cols-2 gap-3">
 		<label class="form-control">
 			<span class="label-text mb-1 text-sm font-medium"
-				>{frequency === 'once' ? 'Due date' : 'First due date'}</span
+				>{frequency === 'once' ? 'Date' : 'First due date'}</span
 			>
 			<input
 				name="anchorDate"
@@ -164,6 +164,26 @@
 			</select>
 		</label>
 	</div>
+
+	{#if frequency === 'once'}
+		<label class="form-control">
+			<span class="label-text mb-1 text-sm font-medium"
+				>Bank shows it as <span class="text-base-content/50">(optional)</span></span
+			>
+			<input
+				name="payeeHint"
+				type="text"
+				maxlength="80"
+				autocapitalize="characters"
+				class="input-bordered input min-h-12 w-full"
+				placeholder="JIFFY LUBE"
+				defaultValue={values?.payeeHint ?? item?.payeeHint ?? ''}
+			/>
+			<span class="label-text-alt mt-1 text-base-content/60">
+				The payee on your statement, so it reconciles itself when the transaction clears.
+			</span>
+		</label>
+	{/if}
 
 	{#if kind !== 'income'}
 		<label class="label cursor-pointer justify-start gap-3 px-0">

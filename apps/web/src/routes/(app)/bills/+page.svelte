@@ -9,19 +9,33 @@
 	import NoHousehold from '#lib/components/NoHousehold.svelte';
 	import { FREQUENCY_SUFFIX, KIND_LABEL_PLURAL } from '#lib/utils/labels.ts';
 	import { formatMoney } from '#lib/utils/money.ts';
-	import { addMonths, dayHeading, formatDate, formatMonth, relativeDay } from '#lib/utils/dates.ts';
+	import {
+		addMonths,
+		dayHeading,
+		formatDate,
+		formatMonth,
+		relativeDay,
+		today
+	} from '#lib/utils/dates.ts';
 	import { apiFetch } from '#lib/utils/client.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 
 	let { data }: PageProps = $props();
 
-	type Filter = Kind | 'all' | 'expenses';
-	let filter = $state<Filter>(untrack(() => (data.tab === 'expenses' ? 'expenses' : 'all')));
+	type Filter = Kind | 'all' | 'expenses' | 'once';
+	let filter = $state<Filter>(
+		untrack(() => (data.tab === 'expenses' ? 'expenses' : data.tab === 'once' ? 'once' : 'all'))
+	);
 	const items = $derived(data.items ?? []);
+	// v4: planned one-offs get their own chip and stay out of the recurring lists
+	const oneOffs = $derived(items.filter((i: RecurringItem) => i.frequency === 'once'));
+	const recurring = $derived(items.filter((i: RecurringItem) => i.frequency !== 'once'));
 	const visible = $derived(
-		(filter === 'all' || filter === 'expenses'
-			? items
-			: items.filter((i: RecurringItem) => i.kind === filter)
+		(filter === 'once'
+			? oneOffs
+			: filter === 'all' || filter === 'expenses'
+				? recurring
+				: recurring.filter((i: RecurringItem) => i.kind === filter)
 		).toSorted(
 			(a: RecurringItem, b: RecurringItem) =>
 				(a.nextDueDate ?? '9999').localeCompare(b.nextDueDate ?? '9999') ||
@@ -44,8 +58,12 @@
 		{ value: 'bill', label: 'Bills' },
 		{ value: 'subscription', label: 'Subscriptions' },
 		{ value: 'income', label: 'Income' },
+		{ value: 'once', label: 'One-offs' },
 		{ value: 'expenses', label: 'Expenses' }
 	];
+	const oneOffPaid = $derived(new Set(data.oneOffPaid));
+	const oneOffStatus = (item: RecurringItem) =>
+		oneOffPaid.has(item.id) ? 'Cleared' : item.anchorDate < today() ? 'Overdue' : 'Planned';
 
 	// --- expenses: month navigation through the proxy
 	let month = $derived(data.month);
@@ -83,11 +101,21 @@
 
 <svelte:head><title>Bills · CouplesCash</title></svelte:head>
 
-<AppBar title={filter === 'expenses' ? 'Expenses' : 'Bills & subscriptions'}>
+<AppBar
+	title={filter === 'expenses'
+		? 'Expenses'
+		: filter === 'once'
+			? 'Planned one-offs'
+			: 'Bills & subscriptions'}
+>
 	{#snippet action()}
 		{#if data.items}
 			<a
-				href={filter === 'expenses' ? '/expenses/new' : '/bills/new'}
+				href={filter === 'expenses'
+					? '/expenses/new'
+					: filter === 'once'
+						? '/bills/new?frequency=once'
+						: '/bills/new'}
 				class="btn min-h-11 rounded-full px-4 btn-primary btn-sm"
 			>
 				<Icon name="plus" size={18} strokeWidth={2.5} /> Add
@@ -202,7 +230,65 @@
 					</section>
 				{/each}
 			{/if}
-		{:else if items.length === 0}
+		{:else if filter === 'once'}
+			{#if oneOffs.length === 0}
+				<EmptyState
+					icon="calendar-check"
+					title="No one-offs planned"
+					body="A one-off is something coming up that isn't recurring – an oil change, a gift, a tax refund. Plan it and the week view counts it until the bank clears it."
+					cta="Plan a one-off"
+					href="/week"
+				/>
+			{:else}
+				<ul
+					class="card divide-y divide-base-300/60 border border-base-300/60 bg-base-100 shadow-sm"
+					data-testid="one-offs"
+				>
+					{#each visible as item (item.id)}
+						{@const cat = item.categoryId ? categoryById.get(item.categoryId) : undefined}
+						{@const status = oneOffStatus(item)}
+						<li>
+							<a href="/bills/{item.id}" class="flex items-center gap-3 px-4 py-3">
+								<span
+									class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-white"
+									style:background={cat?.color ?? 'var(--color-neutral)'}
+								>
+									<Icon
+										name={cat?.icon ?? (item.kind === 'income' ? 'banknote' : 'calendar-check')}
+										size={18}
+									/>
+								</span>
+								<div class="min-w-0 flex-1">
+									<p class="flex items-center gap-1.5">
+										<span class="truncate font-medium">{item.name}</span>
+										<span
+											class="badge shrink-0 border-0 px-1.5 badge-xs text-[0.65rem] font-medium {status ===
+											'Cleared'
+												? 'bg-success/15 text-success'
+												: status === 'Overdue'
+													? 'bg-error/15 text-error'
+													: 'bg-base-200 text-base-content/70'}"
+											data-testid="one-off-status"
+										>
+											{status}
+										</span>
+									</p>
+									<p class="truncate text-xs text-base-content/60">
+										{relativeDay(item.anchorDate)} · {formatDate(item.anchorDate)}
+										{#if item.payeeHint}
+											· bank: {item.payeeHint}{/if}
+									</p>
+								</div>
+								<p class="font-semibold tabular {item.kind === 'income' ? 'text-success' : ''}">
+									{item.kind === 'income' ? '+' : ''}{formatMoney(item.amountCents)}
+								</p>
+								<Icon name="chevron-right" size={18} class="text-base-content/40" />
+							</a>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		{:else if recurring.length === 0}
 			<EmptyState
 				icon="receipt"
 				title="Nothing recurring yet"

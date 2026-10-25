@@ -6,7 +6,16 @@
 
 	let { data, form }: PageProps = $props();
 	let submitting = $state(false);
-	const values = $derived(form?.values ?? (data.kind ? { kind: data.kind } : undefined));
+	const values = $derived(
+		form?.values ??
+			(data.kind || data.frequency || data.anchor
+				? {
+						...(data.kind ? { kind: data.kind } : {}),
+						...(data.frequency ? { frequency: data.frequency } : {}),
+						...(data.anchor ? { anchorDate: data.anchor } : {})
+					}
+				: undefined)
+	);
 </script>
 
 <svelte:head><title>New bill · CouplesCash</title></svelte:head>

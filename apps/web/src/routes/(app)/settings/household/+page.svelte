@@ -6,7 +6,7 @@
 	import type { PageProps } from './$types';
 	import AppBar from '#lib/components/AppBar.svelte';
 	import Icon from '#lib/components/Icon.svelte';
-	import { formatMoney } from '#lib/utils/money.ts';
+	import { centsToInput, currencySymbol, formatMoney } from '#lib/utils/money.ts';
 	import { formatWeekdayDate, isValidISODate, today, diffDays } from '#lib/utils/dates.ts';
 	import { nextPayday } from '#lib/utils/payperiod.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
@@ -217,6 +217,49 @@
 				{/if}
 			</p>
 			<button class="btn min-h-12 rounded-full btn-primary">Save pay period</button>
+		</form>
+	</section>
+
+	<!-- Weekly spending target (v4) -->
+	<section
+		id="weekly"
+		class="card scroll-mt-20 border border-base-300/60 bg-base-100 shadow-sm"
+		aria-labelledby="weeklyh"
+	>
+		<form method="POST" action="?/weekly" class="card-body gap-3 p-5" use:enhance>
+			<div>
+				<h2 id="weeklyh" class="font-semibold">Weekly spending target</h2>
+				<p class="text-xs text-base-content/60">
+					Everything you spend in a week – expenses plus bills as they're paid – against one number.
+					Shown on the week view and the dashboard.
+				</p>
+			</div>
+			{#if errorFor('weekly')}
+				<div class="alert text-sm alert-error" role="alert">{errorFor('weekly')}</div>
+			{/if}
+			<label class="form-control">
+				<span class="label-text mb-1 text-sm font-medium">Target per week</span>
+				<div class="input-bordered input flex min-h-12 w-full items-center gap-2">
+					<span class="text-base-content/50">{currencySymbol()}</span>
+					<input
+						name="weeklySpend"
+						type="text"
+						inputmode="decimal"
+						class="grow tabular"
+						placeholder="Blank for none"
+						aria-label="Weekly spending target"
+						defaultValue={form?.values?.weeklySpend ??
+							(hh.weeklySpendCents !== null && hh.weeklySpendCents !== undefined
+								? centsToInput(hh.weeklySpendCents)
+								: '')}
+					/>
+				</div>
+				<span class="label-text-alt mt-1 text-base-content/60">
+					Leave blank to clear it. Per-category weekly amounts live on the
+					<a href="/week" class="link link-primary">week view</a>.
+				</span>
+			</label>
+			<button class="btn min-h-12 rounded-full btn-primary">Save weekly target</button>
 		</form>
 	</section>
 

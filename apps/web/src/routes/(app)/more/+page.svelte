@@ -13,6 +13,12 @@
 			badge: data.inboxPending > 0 ? data.inboxPending : 0
 		},
 		{
+			href: '/week',
+			icon: 'calendar-range',
+			label: 'This week',
+			body: "What's left at the end of the week, planned one-offs, weekly budgets"
+		},
+		{
 			href: '/insights',
 			icon: 'chart-pie',
 			label: 'Insights',

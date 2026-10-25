@@ -8,6 +8,8 @@
 	import Donut from '#lib/charts/Donut.svelte';
 	import KindBars from '#lib/charts/KindBars.svelte';
 	import BudgetList from '#lib/components/BudgetList.svelte';
+	import WeekBudgetBars from '#lib/components/WeekBudgetBars.svelte';
+	import { untrack } from 'svelte';
 	import { formatMoney } from '#lib/utils/money.ts';
 	import { addMonths, formatMonth } from '#lib/utils/dates.ts';
 	import { FREQUENCY_SUFFIX } from '#lib/utils/labels.ts';
@@ -39,6 +41,9 @@
 	const subsTotal = $derived(
 		data.subscriptions.reduce((a: number, i: RecurringItem) => a + i.monthlyEquivalentCents, 0)
 	);
+	// v4: budgets segment – monthly rows (v2) or this week's weekly rows
+	let period = $state<'monthly' | 'weekly'>(untrack(() => data.period));
+	const showBudgets = $derived(!!data.budgets || !!data.weekBudget);
 	const hasData = $derived(
 		!!s && (s.byKind.some((k) => k.count > 0) || s.byCategory.some((c) => c.amountCents > 0))
 	);
@@ -134,19 +139,52 @@
 				</div>
 			</section>
 
-			{#if data.budgets}
+			{#if showBudgets}
 				<section
 					class="card border border-base-300/60 bg-base-100 shadow-sm"
 					aria-labelledby="budgets"
 				>
 					<div class="card-body gap-3 p-5">
-						<div>
-							<h2 id="budgets" class="font-semibold">Budgets</h2>
-							<p class="text-xs text-base-content/60">
-								Monthly amount per category · tap a row to set or change it
-							</p>
+						<div class="flex items-start justify-between gap-3">
+							<div>
+								<h2 id="budgets" class="font-semibold">Budgets</h2>
+								<p class="text-xs text-base-content/60">
+									{#if period === 'monthly'}
+										Monthly amount per category · tap a row to set or change it
+									{:else}
+										This week's spending against your weekly amounts
+									{/if}
+								</p>
+							</div>
+							<div class="join" role="radiogroup" aria-label="Budget period">
+								{#each [{ v: 'monthly', l: 'Monthly' }, { v: 'weekly', l: 'Weekly' }] as const as o (o.v)}
+									<button
+										type="button"
+										role="radio"
+										aria-checked={period === o.v}
+										class="btn join-item min-h-10 px-3 btn-sm {period === o.v
+											? 'btn-neutral'
+											: 'border border-base-300 btn-ghost'}"
+										onclick={() => (period = o.v)}
+									>
+										{o.l}
+									</button>
+								{/each}
+							</div>
 						</div>
-						<BudgetList budgets={data.budgets} month={data.month} />
+						{#if period === 'monthly'}
+							{#if data.budgets}
+								<BudgetList budgets={data.budgets} month={data.month} />
+							{:else}
+								<p class="text-sm text-base-content/60">
+									Monthly budgets are unavailable right now.
+								</p>
+							{/if}
+						{:else if data.weekBudget}
+							<WeekBudgetBars budget={data.weekBudget} history={false} />
+						{:else}
+							<p class="text-sm text-base-content/60">Weekly budgets are unavailable right now.</p>
+						{/if}
 					</div>
 				</section>
 			{/if}

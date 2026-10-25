@@ -13,8 +13,10 @@ import type {
 	CsvImportRow,
 	Expense,
 	ExternalAccount,
+	Frequency,
 	Goal,
 	Household,
+	Kind,
 	InboxItem,
 	InboxPage,
 	InboxStatus,
@@ -26,8 +28,12 @@ import type {
 	PayPeriodView,
 	Problem,
 	PushPrefs,
+	RecurringItem,
 	SyncResult,
-	Todo
+	Todo,
+	WeekBudget,
+	WeekBudgetRow,
+	WeekView
 } from '#lib/types.ts';
 import { ACCESS_COOKIE, REFRESH_COOKIE, clearAuthCookies, setAuthCookies } from './cookies';
 
@@ -185,7 +191,22 @@ export type HouseholdPatch = Partial<{
 	defaultAccountId: string | null;
 	payPeriod: PayPeriod;
 	payAnchorDate: string | null;
+	weeklySpendCents: number | null;
 }>;
+export type RecurringBody = {
+	name: string;
+	kind: Kind;
+	amountCents: number;
+	categoryId: string | null;
+	accountId: string | null;
+	frequency: Frequency;
+	anchorDate: string;
+	endDate: string | null;
+	autoPay: boolean;
+	notes: string | null;
+	url: string | null;
+	payeeHint: string | null;
+};
 export type ExpenseBody = {
 	name: string;
 	amountCents: number;
@@ -246,7 +267,22 @@ export function endpoints(event: RequestEvent) {
 			list: (m?: string | null) => c.get<BudgetsResponse>(`/budgets${month(m)}`),
 			set: (categoryId: string, amountCents: number) =>
 				c.put<BudgetRow>(`/budgets/${categoryId}`, { amountCents }),
-			clear: (categoryId: string) => c.del(`/budgets/${categoryId}`)
+			clear: (categoryId: string) => c.del(`/budgets/${categoryId}`),
+			// v4: weekly rows live beside the monthly ones (`?period=weekly`)
+			week: (start?: string | null) =>
+				c.get<WeekBudget>(`/budgets/week${start ? `?start=${encodeURIComponent(start)}` : ''}`),
+			setWeekly: (categoryId: string, amountCents: number) =>
+				c.put<WeekBudgetRow>(`/budgets/${categoryId}?period=weekly`, { amountCents }),
+			clearWeekly: (categoryId: string) => c.del(`/budgets/${categoryId}?period=weekly`)
+		},
+		recurring: {
+			create: (body: RecurringBody) => c.post<RecurringItem>('/recurring', body),
+			update: (id: string, body: RecurringBody) => c.put<RecurringItem>(`/recurring/${id}`, body)
+		},
+		// ---- v4 (docs/API-CONTRACT.md § v4 additions)
+		week: {
+			view: (start?: string | null) =>
+				c.get<WeekView>(`/week${start ? `?start=${encodeURIComponent(start)}` : ''}`)
 		},
 		payperiod: {
 			/** Resolves to null when the household has not configured a pay period (409). */

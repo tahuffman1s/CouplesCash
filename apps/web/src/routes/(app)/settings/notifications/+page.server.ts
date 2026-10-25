@@ -26,7 +26,8 @@ export const actions: Actions = {
 				remindersEnabled: data.get('remindersEnabled') === 'on',
 				daysBefore: daysBefore.length ? daysBefore : [1],
 				hourLocal,
-				activityEnabled: data.get('activityEnabled') === 'on'
+				activityEnabled: data.get('activityEnabled') === 'on',
+				weekSummaryEnabled: data.get('weekSummaryEnabled') === 'on'
 			});
 			return { prefs, saved: true };
 		} catch (e) {
