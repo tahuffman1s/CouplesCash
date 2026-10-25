@@ -446,3 +446,41 @@ Deviations and clarifications from the tables above, as built in `apps/api`:
 - **Without `Security__DataKey`**: `POST /banks/simplefin/claim` and `POST /banks/{id}/sync` → `503 bank_sync_not_configured`;
   `GET /banks` still works and reports `lastError: "encryption key missing"` on every link; the scheduler skips bank sync.
   `SimpleFin__BaseUrl` (tests) rewrites the scheme/host/port of the claim and access URLs and allows plain-http access URLs.
+
+---
+
+# v4 additions
+
+```ts
+type BudgetPeriod = 'monthly' | 'weekly';
+// RecurringItem gains: payeeHint: string | null
+// Household gains: weeklySpendCents: number | null
+// PushPrefs gains: weekSummaryEnabled: boolean
+// Occurrence gains: varianceCents: number | null   /* paid.amountCents − amountCents when paid, else null */
+//                   status: 'planned' | 'cleared' | 'overdue'
+type WeekDay = { date: string; planned: Occurrence[]; expenses: Expense[]; plannedOutCents: number; plannedInCents: number; unplannedCents: number };
+type WeekBudgetRow = { categoryId: string | null /* null = overall */; name: string; color: string; icon: string; budgetCents: number;
+  spentCents: number; varianceCents: number /* spent − budget, + = over */; percent: number };
+type WeekBudgetHistory = { weekStart: string; budgetCents: number; spentCents: number; varianceCents: number }[]; // last 8 weeks incl. current, oldest first
+type WeekView = {
+  start: string; end: string; weekStart: 0 | 1; isCurrent: boolean; isPast: boolean; today: string;
+  spendableNowCents: number; startingBalanceCents: number | null /* past weeks: snapshots at/before start */;
+  incomeExpectedCents: number; incomeReceivedCents: number; plannedOutCents: number; paidOutCents: number; remainingOutCents: number;
+  unplannedCents: number; leftAtEndCents: number | null /* null for past weeks without a starting balance */; projected: boolean;
+  days: WeekDay[]; overdue: Occurrence[] /* unpaid planned before `start` still open, shown once at the top */;
+  budget: { overall: WeekBudgetRow | null; categories: WeekBudgetRow[]; totalBudgetCents: number; totalSpentCents: number; history: WeekBudgetHistory };
+};
+```
+
+| Method | Route | Body / Query | Response |
+|---|---|---|---|
+| GET | `/v1/week?start=YYYY-MM-DD` (any date in the week; default today) | | `200 WeekView` |
+| GET | `/v1/budgets/week?start=` | | `200 WeekView['budget']` |
+| PUT | `/v1/budgets/{categoryId}?period=weekly\|monthly` (default monthly) | `{ amountCents }` | `200 BudgetRow` (monthly) or `200 WeekBudgetRow` (weekly) |
+| DELETE | `/v1/budgets/{categoryId}?period=` | | `204` |
+| PATCH | `/v1/couple` | `{ weeklySpendCents?: number \| null }` (added to the existing settings body) | `200 Household` |
+| PUT | `/v1/push/prefs` | `{ …, weekSummaryEnabled }` | `200 PushPrefs` |
+| POST/PUT | `/v1/recurring` | `{ …, payeeHint?: string \| null }` | unchanged shapes + `payeeHint` |
+`GET /v1/budgets?month=` is unchanged and returns monthly rows only.
+Matcher: `once` items match within ±7 days and max(15 %, $10); `payeeHint` seeds an item payee rule so the first bank match auto-applies.
+Week summaries: push kinds `week.ahead` (day before week start) and `week.left` (5th day of the week) at the user's `hourLocal`, once per week each, when `weekSummaryEnabled`.
