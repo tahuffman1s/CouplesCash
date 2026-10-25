@@ -583,3 +583,26 @@ type BillPayment = { dueDate: string; plannedCents: number; paid: Paid | null; v
 
 `GET /v1/inbox` excludes `ignoreReason ∈ {dropped, superseded}` unless `?includeHidden=1`. Existing `confirm` / `ignore` / `restore` stay.
 Activity kinds added: `transaction.posted`, `transaction.dropped`, `transaction.matched`, `transaction.unmatched`, `transfer.paired`, `transfer.auto`, `transfer.unpaired`, `recurring.from_transaction`.
+
+---
+
+# v6 additions
+
+```ts
+// RecurringItem gains: bankNames: string[] (user), bankNamesLearned: string[] (read-only), amountVaries: boolean   (payeeHint stays read-only = bankNames[0] ?? null)
+// Household gains: autoMatchLevel: 'off' | 'bills' | 'all'
+// InboxItem gains: matchScore: number | null; matchDetail: { name: number; amount: number; date: number; reason: string; engine: 'fuzzy' | 'builtin' } | null
+type PendingGroup = { accountId: string; accountName: string; institution: string; balanceCents: number; availableCents: number | null;
+  pendingCount: number; pendingOutCents: number; pendingInCents: number; items: InboxItem[] };
+type PendingView = { totalOutCents: number; totalInCents: number; count: number; groups: PendingGroup[] };
+```
+
+| Method | Route | Body / Query | Response |
+|---|---|---|---|
+| POST/PUT | `/v1/recurring` | `{ …, bankNames?: string[] (≤ 10, each 2–80 chars), amountVaries?: boolean }` | `RecurringItem` |
+| DELETE | `/v1/recurring/{id}/bank-names/learned/{index}` | — | `200 RecurringItem` (forget a learned name) |
+| GET | `/v1/pending` | — | `200 PendingView` (accounts with pending rows first, by pendingOutCents desc) |
+| POST | `/v1/inbox/rematch` | — | `202 { queued: true }` (re-score every To-review row now; rate-limited to 1/min) |
+| GET | `/v1/matcher/status` | — | `200 { engine: 'fuzzy' \| 'builtin', reachable: boolean, version: string \| null, lastRunAt: string \| null, lastAutoMatched: number }` |
+| PATCH | `/v1/couple` | `{ autoMatchLevel? }` | `200 Household` |
+WeekView gains `pendingOutCents`. Activity kinds: `transaction.automatched` carries `data.reason`; new `transaction.autocategorized`.
