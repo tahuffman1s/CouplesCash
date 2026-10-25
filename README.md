@@ -37,9 +37,9 @@ have balances and transactions pulled in instead of typing them).
 - **Bank sync** (v3): link your banks through [SimpleFIN Bridge](https://beta-bridge.simplefin.org) — read-only, flat $1.50/month, built for self-hosters. Balances and transactions arrive every 6 hours (or *Sync now*); credentials stay encrypted on the Pi. [docs/BANK-SYNC.md](docs/BANK-SYNC.md)
 - **CSV import** (v3): for banks the Bridge can't reach — pick a file, map columns (signed amount or debit/credit), duplicates are skipped.
 - **Review inbox** (v3): every imported transaction gets a suggestion — a category, a bill it pays ("Rent · due Nov 1", marks it paid), or "transfer" — and you confirm, ignore or bulk-confirm. Payees you've confirmed once are matched automatically next time, with Undo.
-- **Week view** — "Left at end of week" after planned bills, one-offs and income, Mon–Sun day list with Planned / Cleared / Overdue, variance when a one-off clears at a different amount.
-- **Planned one-offs** — two-tap "Plan a one-off" with an optional bank payee hint so it reconciles itself from SimpleFIN.
-- **Weekly budgets** — an overall weekly target plus per-category weekly amounts, under/over at a glance with an 8-week history.
+- **Week view** (v4): `/week` answers "how much is left at the end of this week?" — spendable now + income to come − planned to pay, with a Mon–Sun (or Sun–Sat) day list of Planned / Cleared / Overdue items, inline mark-paid and Undo, unplanned expenses under each day, and a "This week" card on the dashboard.
+- **Planned one-offs** (v4): "Plan a one-off" from the quick-add sheet or the week view — name, amount, date, expense/income, and an optional *Bank shows it as* hint. When the bank transaction arrives (±7 days, within 15 %) it reconciles itself; the row flips to Cleared with the actual amount and a "−$5.80" variance pill. Bills › **One-offs** lists them.
+- **Weekly budgets** (v4): one overall weekly spending target (Settings → Household) plus per-category weekly amounts, "under by $X" / "over by $X" bars, an 8-week over/under history, and a Monthly / Weekly switch on Insights. Optional **weekly summary** pushes: "Week ahead: $X planned" the day before the week starts and "You have $Z left this week" on day five.
 - **Installable PWA** on iOS Safari and Android Chrome; light/dark follows the device.
 - **Secure by default**: Argon2id, 15-minute JWTs with rotating refresh tokens, household-scoped SQL, rate limiting, strict headers, non-root read-only containers, API never exposed to the internet. See [docs/SECURITY.md](docs/SECURITY.md).
 - **Pi-sized**: the whole stack idles at ~300 MB RAM; prebuilt `arm64` images from GHCR.
@@ -67,7 +67,7 @@ have balances and transactions pulled in instead of typing them).
 | Edge | cloudflared (tunnel) · optional Cloudflare Access |
 | Ops | Docker Compose · Makefile · GitHub Actions → multi-arch images on GHCR |
 
-The API contract between web and api is [docs/API-CONTRACT.md](docs/API-CONTRACT.md); the build plans are [docs/PLAN.md](docs/PLAN.md), [PLAN-V2](docs/PLAN-V2.md) and [PLAN-V3](docs/PLAN-V3.md). The only outbound connections the stack makes are to Cloudflare (tunnel), the push services (if enabled) and — only if you link a bank — the SimpleFIN Bridge.
+The API contract between web and api is [docs/API-CONTRACT.md](docs/API-CONTRACT.md); the build plans are [docs/PLAN.md](docs/PLAN.md), [PLAN-V2](docs/PLAN-V2.md), [PLAN-V3](docs/PLAN-V3.md) and [PLAN-V4](docs/PLAN-V4.md). The only outbound connections the stack makes are to Cloudflare (tunnel), the push services (if enabled) and — only if you link a bank — the SimpleFIN Bridge.
 
 ## Quick start (development on Linux)
 
