@@ -37,6 +37,9 @@ have balances and transactions pulled in instead of typing them).
 - **Bank sync** (v3): link your banks through [SimpleFIN Bridge](https://beta-bridge.simplefin.org) — read-only, flat $1.50/month, built for self-hosters. Balances and transactions arrive every 6 hours (or *Sync now*); credentials stay encrypted on the Pi. [docs/BANK-SYNC.md](docs/BANK-SYNC.md)
 - **CSV import** (v3): for banks the Bridge can't reach — pick a file, map columns (signed amount or debit/credit), duplicates are skipped.
 - **Review inbox** (v3): every imported transaction gets a suggestion — a category, a bill it pays ("Rent · due Nov 1", marks it paid), or "transfer" — and you confirm, ignore or bulk-confirm. Payees you've confirmed once are matched automatically next time, with Undo.
+- **Week view** — "Left at end of week" after planned bills, one-offs and income, Mon–Sun day list with Planned / Cleared / Overdue, variance when a one-off clears at a different amount.
+- **Planned one-offs** — two-tap "Plan a one-off" with an optional bank payee hint so it reconciles itself from SimpleFIN.
+- **Weekly budgets** — an overall weekly target plus per-category weekly amounts, under/over at a glance with an 8-week history.
 - **Installable PWA** on iOS Safari and Android Chrome; light/dark follows the device.
 - **Secure by default**: Argon2id, 15-minute JWTs with rotating refresh tokens, household-scoped SQL, rate limiting, strict headers, non-root read-only containers, API never exposed to the internet. See [docs/SECURITY.md](docs/SECURITY.md).
 - **Pi-sized**: the whole stack idles at ~300 MB RAM; prebuilt `arm64` images from GHCR.

@@ -4,13 +4,14 @@ Couples' shared-finance PWA. Two users per household; manual accounts, recurring
 bills/subscriptions/income, calendar, donut chart; v2 adds push reminders, autopay
 auto-marking, activity feed, expenses + budgets, pay-period view, savings goals,
 month report, to-pay checklist, household settings and passkeys; v3 adds bank sync
-(SimpleFIN Bridge), CSV import and a review inbox. Runs on a Raspberry Pi 4 via Docker
+(SimpleFIN Bridge), CSV import and a review inbox; v4 adds the week view, planned one-offs
+and weekly budgets. Runs on a Raspberry Pi 4 via Docker
 Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` (v2) and
-`docs/PLAN-V3.md` (v3) for the why.
+`docs/PLAN-V3.md` (v3), `docs/PLAN-V4.md` (v4) for the why.
 
 ## Source of truth
 - **`docs/API-CONTRACT.md` defines every route, shape and error** (v2 routes under
-  "# v2 additions", v3 under "# v3 additions"). Web and API are built against it
+  "# v2 additions", v3 under "# v3 additions", v4 under "# v4 additions"). Web and API are built against it
   independently. Change the contract first, then both sides.
 - `docs/PLAN.md` §5 + `docs/PLAN-V2.md` "Data model additions" + `docs/PLAN-V3.md` "Data
   model" are the data model; `docs/PLAN.md` §7 the security checklist (non-negotiable).
@@ -33,18 +34,19 @@ Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` 
 | Endpoints | `apps/api/CouplesCash.Api/Endpoints/*Endpoints.cs` (one file per resource, `MapXxx(this RouteGroupBuilder)`) |
 | SQL / repositories | `apps/api/CouplesCash.Api/Data/` |
 | Auth, tokens, Argon2, couple codes, **passkeys (Fido2)** | `apps/api/CouplesCash.Api/Auth/` |
-| Pure engines (unit-tested, no I/O) | `apps/api/CouplesCash.Api/Domain/` — `RecurrenceEngine`, `PayPeriodEngine`, `GoalProjection`, `SchedulerRules`, `BudgetMath`, **`TransactionMatcher`** (+ `BankSyncRules`, `Fingerprint`: suggestions, dedupe fingerprints, payee normalisation) |
+| Pure engines (unit-tested, no I/O) | `apps/api/CouplesCash.Api/Domain/` — `RecurrenceEngine`, `PayPeriodEngine`, `GoalProjection`, `SchedulerRules`, `BudgetMath`, **`WeekEngine`** (week bounds, left-at-end, variance, weekly budget rows/history), **`TransactionMatcher`** (+ `BankSyncRules`, `Fingerprint`: suggestions, dedupe fingerprints, payee normalisation) |
 | Web Push (VAPID keys, sender, payloads, `--vapid` CLI) | `apps/api/CouplesCash.Api/Push/` |
 | **SimpleFIN client** (claim token, fetch accounts; protocol-shaped DTOs) | `apps/api/CouplesCash.Api/SimpleFin/` |
 | **Encryption at rest** (AES-256-GCM, `Security__DataKey`) | `apps/api/CouplesCash.Api/Security/DataProtector.cs` |
 | **Banks / inbox / CSV endpoints** | `Endpoints/BankEndpoints.cs`, `Endpoints/InboxEndpoints.cs`, `Endpoints/ImportEndpoints.cs` |
 | Background job (autopay, reminders, hygiene, **bank sync + auto-match**) | `apps/api/CouplesCash.Api/Scheduler/` (`SchedulerService` hosted service; selection logic lives in `Domain/SchedulerRules.cs`) |
-| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = all v2 tables, `0003_imports.sql` = v3) |
+| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4) |
 | API tests | `apps/api/CouplesCash.Api.Tests/` (xunit) |
 | Routes (pages + form actions) | `apps/web/src/routes/**/+page.svelte`, `+page.server.ts` |
 | API client + types | `apps/web/src/lib/server/api.ts`, `apps/web/src/lib/types.ts` |
 | Settings routes (profile, notifications, passkeys, household) | `apps/web/src/routes/(app)/settings/**`, `(app)/settings/household` |
 | v2 feature routes | `(app)/activity`, `expenses`, `todos`, `goals`, `payperiod`, `insights/report` |
+| **v4 routes** (week view) | `(app)/week` (+ `WeekCard` on the dashboard, "Plan a one-off" in the quick-add sheet, weekly budgets on `/week` and Insights) |
 | **v3 routes** (linked banks, review inbox, CSV import) | `(app)/settings/banks`, `(app)/inbox`, `(app)/imports/csv`; client-side CSV parsing/mapping in `src/lib/utils/csv.ts` |
 | Service worker (push display + click → `url`) | `apps/web/src/service-worker/index.ts` |
 | Components | `apps/web/src/lib/components/` |
@@ -113,6 +115,11 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   **never log or return an access URL** or a setup token — logs carry link names and counts.
   Rotating the key = re-link; no re-encryption path. Bridge `errors` are surfaced (link
   `last_error` + `bank.error` activity), never swallowed.
+- **Week view**: a *planned item* is any occurrence due in the week (incl. `frequency: once` one-offs);
+  `varianceCents = paid.amountCents − amountCents`; left-at-end = spendable (checking+cash) + unpaid income
+  − unpaid planned outflow for the rest of the week; weekly budgets are separate `budgets` rows with
+  `period = 'weekly'` plus `households.weekly_spend_cents`; variance `+` = over. One-offs match bank
+  transactions within ±7 days / max(15 %, $10); `payeeHint` seeds an item payee rule.
 - **Inbox**: confirm-as-expense creates the expense with **`deduct = false`** (the synced balance
   already includes it); confirm-as-occurrence marks it paid with the bank amount; auto-match
   writes `paid_by NULL, auto true` and unpaying restores the inbox row. Bulk confirm only takes
