@@ -5,13 +5,14 @@ bills/subscriptions/income, calendar, donut chart; v2 adds push reminders, autop
 auto-marking, activity feed, expenses + budgets, pay-period view, savings goals,
 month report, to-pay checklist, household settings and passkeys; v3 adds bank sync
 (SimpleFIN Bridge), CSV import and a review inbox; v4 adds the week view, planned one-offs
-and weekly budgets. Runs on a Raspberry Pi 4 via Docker
+and weekly budgets; v5 adds the pending lifecycle, transfer detection/analysis, per-account
+transactions and matching any transaction to bills. Runs on a Raspberry Pi 4 via Docker
 Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` (v2) and
-`docs/PLAN-V3.md` (v3), `docs/PLAN-V4.md` (v4) for the why.
+`docs/PLAN-V3.md` (v3), `docs/PLAN-V4.md` (v4), `docs/PLAN-V5.md` (v5) for the why.
 
 ## Source of truth
 - **`docs/API-CONTRACT.md` defines every route, shape and error** (v2 routes under
-  "# v2 additions", v3 under "# v3 additions", v4 under "# v4 additions"). Web and API are built against it
+  "# v2 additions", v3 under "# v3 additions", v4 under "# v4 additions", v5 under "# v5 additions"). Web and API are built against it
   independently. Change the contract first, then both sides.
 - `docs/PLAN.md` §5 + `docs/PLAN-V2.md` "Data model additions" + `docs/PLAN-V3.md` "Data
   model" are the data model; `docs/PLAN.md` §7 the security checklist (non-negotiable).
@@ -40,12 +41,13 @@ Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` 
 | **Encryption at rest** (AES-256-GCM, `Security__DataKey`) | `apps/api/CouplesCash.Api/Security/DataProtector.cs` |
 | **Banks / inbox / CSV endpoints** | `Endpoints/BankEndpoints.cs`, `Endpoints/InboxEndpoints.cs`, `Endpoints/ImportEndpoints.cs` |
 | Background job (autopay, reminders, hygiene, **bank sync + auto-match**) | `apps/api/CouplesCash.Api/Scheduler/` (`SchedulerService` hosted service; selection logic lives in `Domain/SchedulerRules.cs`) |
-| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4) |
+| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4, `0005_transactions.sql` = v5) |
 | API tests | `apps/api/CouplesCash.Api.Tests/` (xunit) |
 | Routes (pages + form actions) | `apps/web/src/routes/**/+page.svelte`, `+page.server.ts` |
 | API client + types | `apps/web/src/lib/server/api.ts`, `apps/web/src/lib/types.ts` |
 | Settings routes (profile, notifications, passkeys, household) | `apps/web/src/routes/(app)/settings/**`, `(app)/settings/household` |
 | v2 feature routes | `(app)/activity`, `expenses`, `todos`, `goals`, `payperiod`, `insights/report` |
+| **v5** pending reconciliation, transfers, matching | API `Domain/PendingReconciler.cs`, `GET /accounts/{id}/transactions`, `/inbox/{id}/candidates|match|transfer|unmatch`, `/recurring/from-transaction`, `/recurring/{id}/payments`, `/transfers`; web `TransactionSheet.svelte` (the one place a transaction is acted on), account Transactions tab, `(app)/transfers`, bill Payments |
 | **v4 routes** (week view) | `(app)/week` (+ `WeekCard` on the dashboard, "Plan a one-off" in the quick-add sheet, weekly budgets on `/week` and Insights) |
 | **v3 routes** (linked banks, review inbox, CSV import) | `(app)/settings/banks`, `(app)/inbox`, `(app)/imports/csv`; client-side CSV parsing/mapping in `src/lib/utils/csv.ts` |
 | Service worker (push display + click → `url`) | `apps/web/src/service-worker/index.ts` |
@@ -120,6 +122,13 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   − unpaid planned outflow for the rest of the week; weekly budgets are separate `budgets` rows with
   `period = 'weekly'` plus `households.weekly_spend_cents`; variance `+` = over. One-offs match bank
   transactions within ±7 days / max(15 %, $10); `payeeHint` seeds an item payee rule.
+- **Pending lifecycle**: a posted transaction with a new id replaces the absent pending row **in place**
+  (±1/+7 days, max(25 %, $5), description overlap) keeping its status and confirmation; pending rows absent
+  inside the fetch window for > 5 days become `ignored/dropped` and their confirmation is reversed. Spendable
+  uses `availableCents ?? balanceCents`.
+- **Transfers**: detected pairs are auto-ignored (`ignore_reason='transfer'`, peers linked) when
+  `households.auto_ignore_transfers`; keyword one-sided transfers are suggestions (60, never bulk); learned
+  `payee_rules.is_transfer` auto-applies. Transfers never count as spending, budgets or income.
 - **Inbox**: confirm-as-expense creates the expense with **`deduct = false`** (the synced balance
   already includes it); confirm-as-occurrence marks it paid with the bank amount; auto-match
   writes `paid_by NULL, auto true` and unpaying restores the inbox row. Bulk confirm only takes
