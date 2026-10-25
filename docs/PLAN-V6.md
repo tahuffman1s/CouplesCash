@@ -5,8 +5,7 @@ Contract: [API-CONTRACT.md](./API-CONTRACT.md) "# v6 additions" (API ↔ web) an
 
 ## 1. Week is the home page
 - `/` redirects to `/week`; login, register, passkey login and couple join land on `/week`; the PWA manifest
-  `start_url` is `/week`. The v1 dashboard moves to `/overview` (link in the week header and the More menu).
-- Dock: **Week** · Accounts · Bills · Calendar · More. The "This week" card is removed from Overview (it *is* the page).
+  `start_url` is `/week`. Navigation is defined in §4.
 
 ## 2. Fuzzy auto-reconcile with a Python matcher service
 A small stateless **Python service** (`apps/matcher`, FastAPI + RapidFuzz) scores bank transactions against
@@ -28,11 +27,56 @@ category rule (fuzzy ≥ 90, rule hits ≥ 2). Every automatic action is visible
 1 day early"), recorded in the activity feed and reversible with Undo/Unmatch.
 
 ## 3. Pending per bank account
-- `/pending` page: every pending transaction grouped by bank account, account subtotal, overall total, and the
-  balance → available difference per account. Tap → Transaction sheet.
+- Money tab "Pending" section (see §4): every pending transaction grouped by bank account, account subtotal, overall
+  total, and the balance → available difference per account. Tap → Transaction sheet.
 - Accounts list: linked accounts show "N pending · $X" linking to the account's Transactions tab with the Pending filter.
 - Week view: a "Pending $X" stat beside Spendable; pending outflows that matched a planned item show "Pending" on that row.
 - Pending transactions are matched like posted ones; when they post (v5 lifecycle) the match carries over.
+
+## 4. Simplify — one obvious place for everything
+The app grew to 3 overlapping "home" screens (dashboard, week, pay period), a 14-item More menu and 5 separate
+settings pages. v6 collapses it so a first-time user can explain every tab in one sentence.
+
+**Five tabs, each with one job**
+| Tab | Route | One sentence |
+|---|---|---|
+| **Week** | `/week` (home) | "How much is left this week, and what's coming." |
+| **Review** | `/inbox` | "Bank transactions the app couldn't match on its own." Badge = count; hidden from the dock when bank sync and CSV were never used. |
+| **Money** | `/accounts` | "Every account, what's pending, and your savings goals." |
+| **Bills** | `/bills` | "Everything that repeats, plus one-offs." List ⇄ Calendar toggle in the app bar. |
+| **More** | `/more` | Insights, To-pay list, Activity, Settings — four rows. |
+
+**Removed or folded in**
+- **Dashboard** (`/`) — removed; `/` → `/week`. Its pieces move: net worth + accounts → Money header; activity →
+  More; quick-add FAB → a single **+** in the Week and Bills app bars (sheet: *Plan a one-off* · *Add a bill* · *Add an expense*).
+  The plan's `/overview` is **not** built.
+- **Pay period** (`/payperiod`, PaydayCard) — removed; the week header shows "Next payday Fri Nov 6 · $3,200" when a
+  pay period is configured. The pay-period settings stay (they drive that line and the income projection).
+- **Calendar tab** — becomes the Calendar view inside Bills (`/bills?view=calendar`; `/calendar` redirects).
+- **Pending** — not a separate page; Money shows a "Pending" section at the top grouping every pending transaction by
+  account (the `/pending` API powers it), each account row shows "N pending · $X", and the account Transactions tab keeps
+  its Pending filter. `/pending` redirects to `/accounts#pending`.
+- **Transfers** — a section in Money ("Moved between accounts this month", link to the full `/transfers` view), not a menu item.
+- **Goals** — a section in Money, not a separate list page (detail pages stay).
+- **Settings** — one `/settings` page with grouped sections: *You* (name, password, passkeys, theme, notifications),
+  *Household* (name, currency, week start, pay period, weekly target, partner / Couple Code, auto-match level,
+  auto-ignore transfers), *Banks* (linked banks, import CSV). Subpages stay only where a section needs a full screen
+  (linked banks, passkeys, couple code); everything else edits inline.
+- **Monthly vs weekly budgets** — Week shows weekly budgets; Insights shows monthly. Same editor component, period fixed by
+  where you are. No toggle.
+- **Month report** — a "Share this month" button on Insights, not a separate menu entry (route stays).
+
+**Language** — one vocabulary everywhere: *Planned* (expected), *Paid* (cleared, replaces "Cleared"), *Late* (replaces
+"Overdue"), *To review* (inbox), *Pending* (bank hasn't posted), *Matched* (linked to a bill), *Left this week* (hero).
+Money always shows a sign and colour: money out "−$12.49", money in "+$3,200.00". Every screen has one-line helper text
+under its title on first visit (dismissible, remembered per device).
+
+**First run** — an empty Week shows a 3-step checklist instead of zeros: *Add your accounts or link a bank* →
+*Add your bills* → *Invite your partner*. Each step ticks itself off and the checklist disappears when done.
+
+**Code** — delete the removed routes/components (dashboard page, PaydayCard, WeekCard, payperiod route, standalone
+calendar route body, More entries), keep redirects for old URLs, keep API endpoints (they're still used or harmless).
+e2e updated to the new navigation; no test may rely on removed screens.
 
 ## Data model (`0006_matcher.sql`)
 ```
