@@ -30,7 +30,7 @@ public sealed record HouseholdSettingsRequest(
     Optional<DateOnly?> PayAnchorDate,
     Optional<long?> WeeklySpendCents,
     Optional<bool?> AutoIgnoreTransfers,
-    Optional<AutoMatchLevel?> AutoMatchLevel = default);
+    Optional<AutoMatchLevel?> AutoMatchLevel);
 
 public sealed record AccountRequest(
     string Name,

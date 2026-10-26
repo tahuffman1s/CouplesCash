@@ -294,7 +294,7 @@ public class V5Tests
     [Fact]
     public void Auto_ignore_transfers_setting_accepts_booleans_only()
     {
-        static HouseholdSettingsRequest Settings(Optional<bool?> value) => new(default, default, default, default, default, default, default, default, value);
+        static HouseholdSettingsRequest Settings(Optional<bool?> value) => new(default, default, default, default, default, default, default, default, value, default);
 
         Assert.Empty(Fields(new HouseholdSettingsRequestValidator(), Settings(Optional<bool?>.Of(false))));
         Assert.Empty(Fields(new HouseholdSettingsRequestValidator(), Settings(Optional<bool?>.Missing)));

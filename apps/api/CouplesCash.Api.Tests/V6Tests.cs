@@ -431,4 +431,19 @@ public class V6Tests
         ];
         Assert.Equal(625, WeekService.PendingOut(accounts));
     }
+
+    [Fact]
+    public void Request_records_have_no_default_parameter_values()
+    {
+        // ASP.NET OpenAPI serialises parameter defaults into the schema; an Optional<T> default makes
+        // GET /openapi/v1.json throw (happened in v5 and v6). Keep request constructors default-free.
+        var offenders = typeof(HouseholdSettingsRequest).Assembly.GetTypes()
+            .Where(t => t.Namespace == typeof(HouseholdSettingsRequest).Namespace && t.Name.EndsWith("Request", StringComparison.Ordinal))
+            .SelectMany(t => t.GetConstructors().SelectMany(c => c.GetParameters())
+                .Where(p => p.HasDefaultValue && p.ParameterType.IsGenericType
+                            && p.ParameterType.GetGenericTypeDefinition() == typeof(Optional<>))
+                .Select(p => $"{t.Name}.{p.Name}"))
+            .ToList();
+        Assert.Empty(offenders);
+    }
 }
