@@ -27,6 +27,9 @@ Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` 
   v2: Web Push (VAPID) sender, WebAuthn via Fido2NetLib, `SchedulerService` hosted
   service (60 s tick: autopay, reminders, hygiene, v3 bank sync) inside the api process — no
   extra container. v3: SimpleFIN client, AES-256-GCM `DataProtector`, `TransactionMatcher`.
+- `apps/matcher` — Python 3.13, FastAPI + RapidFuzz, `uv` (`uv.lock`), pytest + ruff. Stateless, internal-only on
+  `:8090` (no `ports:`), one uvicorn worker, 96 MB limit. Fuzzy bill/one-off matching + found-bills detection.
+  Contract: `docs/MATCHER-CONTRACT.md`. The API falls back to its built-in C# matcher on any matcher error.
 - Postgres 16. Compose/Make/CI/docs at repo root (`compose.yml`, `Makefile`, `infra/`, `.github/`).
 
 ## Where things live
@@ -50,6 +53,7 @@ Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` 
 | **v5** pending reconciliation, transfers, matching | API `Domain/PendingReconciler.cs`, `GET /accounts/{id}/transactions`, `/inbox/{id}/candidates|match|transfer|unmatch`, `/recurring/from-transaction`, `/recurring/{id}/payments`, `/transfers`; web `TransactionSheet.svelte` (the one place a transaction is acted on), account Transactions tab, `(app)/transfers`, bill Payments |
 | **v4 routes** (week view) | `(app)/week` (+ `WeekCard` on the dashboard, "Plan a one-off" in the quick-add sheet, weekly budgets on `/week` and Insights) |
 | **v3 routes** (linked banks, review inbox, CSV import) | `(app)/settings/banks`, `(app)/inbox`, `(app)/imports/csv`; client-side CSV parsing/mapping in `src/lib/utils/csv.ts` |
+| **Matcher service** (scoring, found bills, normalisation) | `apps/matcher/src/matcher/scoring.py`, `recurring.py`, `normalize.py`; tests `apps/matcher/tests/` |
 | Service worker (push display + click → `url`) | `apps/web/src/service-worker/index.ts` |
 | Components | `apps/web/src/lib/components/` |
 | Browser proxy to API | `apps/web/src/routes/api/[...path]/+server.ts` (needs `X-Requested-With: CouplesCash`) |
@@ -65,7 +69,9 @@ make scheduler-logs                      # api logs filtered to the background j
 make vapid                               # fill empty VAPID_* in .env (part of make secrets; FORCE=1 rotates)
 make secrets                             # fill empty JWT_SECRET / POSTGRES_PASSWORD / DATA_KEY (FORCE=1 rotates — breaks bank links)
 make backup                              # DB dump + .env copy (DATA_KEY) → backups/
-make test | lint | fmt                   # all languages
+make test | lint | fmt                   # all languages (incl. matcher)
+make dev-matcher | test-matcher | matcher-logs
+cd apps/matcher && uv sync && uv run pytest && uv run ruff check . && uv run ruff format --check .
 make pi | backup | restore FILE=…        # Raspberry Pi ops
 cd apps/web && pnpm dev | check | lint | format | build | exec playwright test
 cd apps/api && dotnet build CouplesCash.slnx -warnaserror && dotnet test CouplesCash.slnx
@@ -82,7 +88,9 @@ localhost), `WebAuthn__RelyingPartyId` (optional, derived from origin host),
 `WebAuthn__RelyingPartyName` (`CouplesCash`) · `Scheduler__Enabled` (default true) ·
 `Security__DataKey` (base64 32 bytes = `.env` `DATA_KEY`; empty → bank sync disabled, claim
 503 `bank_sync_not_configured`, existing links report decrypt errors) · `Sync__IntervalHours`
-(6, = `SYNC_INTERVAL_HOURS`) · `Sync__ManualCooldownMinutes` (15) · `SimpleFin__BaseUrl` (tests only).
+(6, = `SYNC_INTERVAL_HOURS`) · `Sync__ManualCooldownMinutes` (15) · `SimpleFin__BaseUrl` (tests only) ·
+`Matcher__BaseUrl` (`http://matcher:8090`; dev `http://localhost:8090`), `Matcher__Key` (= `.env` `MATCHER_KEY`, also given
+to the matcher container; empty → the matcher refuses to start and the API uses the built-in matcher).
 Compose maps `.env` → these in `compose.yml` `x-api-env`; `scripts/dev-env.sh` does the same
 for native dev. `--migrate` and `--vapid` must exit before any config validation.
 
@@ -133,7 +141,9 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   already includes it); confirm-as-occurrence marks it paid with the bank amount; auto-match
   writes `paid_by NULL, auto true` and unpaying restores the inbox row. Bulk confirm only takes
   confidence ≥ 70. `credit`/`loan` balances from the Bridge are stored as positive owed.
-- Containers: non-root, read-only FS, listen on 8080 (api) / 3000 (web). Don't add `ports:` to api/db.
+- **Matcher**: every call except `/health` sends `X-Matcher-Key`; it never logs descriptions; the API treats 401/413/422/5xx/
+  timeouts as "use the built-in matcher" and never fails a sync because of it.
+- Containers: non-root, read-only FS, listen on 8080 (api) / 3000 (web) / 8090 (matcher, internal). Don't add `ports:` to api/db.
 - Commit messages: conventional (`feat(api): …`, `fix(web): …`, `chore(infra): …`).
 
 ## Adding an endpoint end-to-end
@@ -156,4 +166,5 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
 - Push/passkey UI hidden when the API answers 503 (not configured / insecure context);
   Linked banks shows a "not configured" state on 503 `bank_sync_not_configured`.
 - Contract updated if the API surface changed; `CLAUDE.md`/docs updated if commands or paths moved.
+- Touching `apps/matcher`: `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .` ✅
 - No secrets, no `console.log`/`Console.WriteLine` debugging left behind, no new `ports:` on api/db.

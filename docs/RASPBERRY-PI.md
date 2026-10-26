@@ -1,8 +1,8 @@
 # Running CouplesCash on a Raspberry Pi 4
 
-The whole stack — Postgres, the .NET API, the SvelteKit web app and the
-Cloudflare tunnel — fits comfortably on a Pi 4 and idles at roughly 600–700 MB
-of RAM and a few percent CPU. This guide takes a Pi from a blank SD card to a
+The whole stack — Postgres, the .NET API, the SvelteKit web app, the Python
+matcher and the Cloudflare tunnel — fits comfortably on a Pi 4 and idles at
+roughly 650–750 MB of RAM and a few percent CPU. This guide takes a Pi from a blank SD card to a
 public `https://` URL.
 
 ## 1. Hardware & OS
@@ -115,6 +115,13 @@ Optional, for bank sync (v3, `docs/BANK-SYNC.md`):
 - Bank sync does **not** need `https://`; it works in LAN mode. The Pi needs outbound HTTPS
   to `beta-bridge.simplefin.org`.
 
+Automatic matching (v6, `docs/BANK-SYNC.md` → "Automatic matching"):
+
+- `MATCHER_KEY` — 64 hex chars (`openssl rand -hex 32`) shared by `api` and the internal
+  `matcher` container. `install.sh` and `make secrets` fill it (and `make up` fills it if it is
+  still empty). Empty = the matcher refuses to start and the API matches with its built-in
+  rules. Nothing stored depends on it, so changing it is harmless.
+
 Leave `ASPNETCORE_ENVIRONMENT=Production` and `API_ENABLE_DOCS=false`.
 
 ## 4. First boot
@@ -126,10 +133,12 @@ make pi
 `make pi` = `make pull` (download the prebuilt arm64 images from GHCR) +
 `make tunnel-up` (start everything with the `tunnel` profile) + prune old
 images. Startup order is enforced by compose: `db` becomes healthy → `migrate`
-runs the DbUp migrations and exits 0 → `api` starts → `web` starts →
-`cloudflared` connects.
+runs the DbUp migrations and exits 0 → `matcher` starts → `api` starts →
+`web` starts → `cloudflared` connects. `api` only waits for `matcher` to be
+*started*, not healthy: if the matcher is down the API still runs and matches
+with its built-in rules.
 
-First pull is ~250 MB. On a 2 GB Pi the first start takes about a minute.
+First pull is ~300 MB. On a 2 GB Pi the first start takes about a minute.
 
 ### Verify
 
@@ -137,12 +146,13 @@ First pull is ~250 MB. On a 2 GB Pi the first start takes about a minute.
 make ps
 ```
 
-Every service should show `Up … (healthy)` (`migrate` shows `Exited (0)`,
+Every service (including `matcher`) should show `Up … (healthy)` (`migrate` shows `Exited (0)`,
 `cloudflared` has no healthcheck). Then:
 
 ```bash
 curl -s http://localhost:3000/login -o /dev/null -w '%{http_code}\n'   # 200
 make logs S=api                                                       # "Now listening on: http://[::]:8080"
+make logs S=matcher                                                   # "matcher 1.0.0 ready", then one line per batch
 make logs S=cloudflared                                               # "Registered tunnel connection"
 make scheduler-logs                                                   # background job: autopay / reminders ticks
 ```
@@ -167,7 +177,7 @@ To stop typing balances in, *Settings → Linked banks* with a SimpleFIN Bridge 
 |---|---|
 | Update to the latest images | `make pi` (pull + recreate changed containers; data is kept) |
 | Status / health | `make ps` |
-| Logs (all / one service) | `make logs` / `make logs S=web` |
+| Logs (all / one service) | `make logs` / `make logs S=web` / `make logs S=matcher` (or `make matcher-logs`) |
 | Stop everything | `make down` |
 | Start again | `make tunnel-up` (or `make up` without the tunnel) |
 | Backup | `make backup` → `backups/couplescash-YYYYmmdd-HHMMSS.sql.gz` **+** `couplescash-YYYYmmdd-HHMMSS.env` (the `.env` copy carries `DATA_KEY`; keeps 14 pairs) |
@@ -176,6 +186,7 @@ To stop typing balances in, *Settings → Linked banks* with a SimpleFIN Bridge 
 | Generate / rotate Web Push keys | `make vapid` (fills empty keys) · `make vapid FORCE=1` (rotate; every phone re-enables notifications), then `make up` |
 | Enable bank sync on an older install | `make secrets` (fills an empty `DATA_KEY`, leaves set values alone) then `make up`; *Settings → Linked banks* appears |
 | Watch the background job (autopay, reminders, bank sync) | `make scheduler-logs` |
+| Enable automatic matching on an older install | `make pull && make up` — `make up` fills an empty `MATCHER_KEY` and starts the new `matcher` container |
 
 ### Automatic nightly backups
 
@@ -221,8 +232,9 @@ make tunnel-up
 | db | 256 MB | 60–120 MB |
 | api | 192 MB (GC heap hard limit 128 MB) | 90–140 MB |
 | web | 160 MB | 60–90 MB |
+| matcher | 96 MB | 50–60 MB idle, ≈ 80 MB during a 5000-transaction batch |
 | cloudflared | 64 MB | 20–30 MB |
-| **total** | **672 MB** | ~300 MB |
+| **total** | **768 MB** | ~350 MB |
 
 A 2 GB Pi has plenty of headroom; the limits exist so a bug cannot take the
 whole Pi down.
@@ -260,7 +272,7 @@ reboot once and the warning disappears. To do it by hand:
 
 **`docker compose pull` says `denied` / `unauthorized`** — the GHCR packages that
 CI publishes are **private by default**. One-time fix on GitHub: your profile →
-*Packages* → `couplescash-api` and `couplescash-web` → *Package settings* →
+*Packages* → `couplescash-api`, `couplescash-web` and `couplescash-matcher` → *Package settings* →
 *Change visibility* → Public. (Or `docker login ghcr.io` on the Pi with a
 read-only personal access token.) Images are published from the repository's
 default branch and from `v*` tags.
@@ -316,6 +328,11 @@ check greps `/proc/net/tcp*` for a listener on port 8080 (`0x1F90`). It needs
 `sh` and `grep` inside the image, which the Debian/Alpine `aspnet` images have
 but *chiseled* images do not. If the Dockerfile switches to a chiseled base,
 replace the healthcheck with a tiny health probe binary or drop it.
+
+**`matcher` keeps restarting** — `make logs S=matcher`. "refusing to start: MATCHER_KEY is
+empty" → `make secrets && make up` (fills only empty values). `Exited (137)` = OOM: a single
+very large CSV import can approach the 96 MB limit; raise `mem_limit` for `matcher` to `128m`.
+While it is down, matching silently uses the API's built-in rules (rows say `builtin`).
 
 **Slow first page load after a restart** — .NET tiered compilation warming
 up; it settles after a few requests. Not a Pi problem.

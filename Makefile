@@ -10,10 +10,13 @@ COMPOSE      := docker compose
 COMPOSE_DEV  := docker compose -f compose.yml -f compose.dev.yml
 DOTNET       ?= dotnet
 PNPM         ?= pnpm
+UV           ?= uv
+UV_RUN       := $(UV) run --frozen
 API_DIR      := apps/api
 API_HOST_DIR := apps/api/CouplesCash.Api
 API_SLN      := apps/api/CouplesCash.slnx
 WEB_DIR      := apps/web
+MATCHER_DIR  := apps/matcher
 DB_SERVICE   := db
 DB_USER      := couplescash
 DB_NAME      := couplescash
@@ -22,8 +25,9 @@ STAMP        := $(shell date +%Y%m%d-%H%M%S)
 # Guard against an api build that does not know `--vapid` yet and would start Kestrel instead of exiting.
 TIMEOUT      := $(shell command -v timeout >/dev/null 2>&1 && echo 'timeout 600' || true)
 
-.PHONY: help setup secrets vapid dev-env dev-db dev-api dev-web dev migrate up down logs scheduler-logs ps build pull \
-        tunnel-up tunnel-down pi backup restore test test-api test-web lint fmt clean
+.PHONY: help setup secrets matcher-key vapid dev-env dev-db dev-api dev-web dev-matcher dev migrate up down logs \
+        scheduler-logs matcher-logs ps build pull tunnel-up tunnel-down pi backup restore test test-api test-web \
+        test-matcher lint fmt clean
 
 ##@ Getting started
 
@@ -34,20 +38,22 @@ help: ## Show this help
 	@echo
 
 setup: ## Check tools, create .env with fresh secrets, install deps (one-time)
-	@for t in docker $(DOTNET) node $(PNPM) openssl; do \
+	@for t in docker $(DOTNET) node $(PNPM) $(UV) openssl; do \
 	  command -v $$t >/dev/null 2>&1 && printf '  ok   %s\n' "$$t" || { printf '  MISSING %s\n' "$$t"; missing=1; }; \
 	done; \
 	docker compose version >/dev/null 2>&1 && echo '  ok   docker compose' || { echo '  MISSING docker compose plugin'; missing=1; }; \
-	[ -z "$${missing:-}" ] || { echo; echo 'Install the missing tools and re-run `make setup`.'; exit 1; }
+	[ -z "$${missing:-}" ] || { echo; echo 'Install the missing tools and re-run `make setup`.'; \
+	  echo '(uv: curl -LsSf https://astral.sh/uv/install.sh | sh — it also provides Python 3.13 for the matcher)'; exit 1; }
 	@$(MAKE) .env secrets dev-env
 	@echo '→ dotnet restore'; $(DOTNET) restore $(API_SLN)
 	@echo '→ pnpm install';   cd $(WEB_DIR) && $(PNPM) install
+	@echo '→ uv sync';        cd $(MATCHER_DIR) && $(UV) sync --frozen
 	@echo; echo 'Done. Next: `make dev` (db in Docker, api + web natively) — web on http://localhost:5173'
 
 .env:
 	@[ -f .env ] || { cp .env.example .env && chmod 600 .env && echo "Created .env from .env.example"; }
 
-secrets: .env ## Fill empty JWT_SECRET / POSTGRES_PASSWORD / DATA_KEY in .env (FORCE=1 regenerates all three — breaks existing bank links)
+secrets: .env ## Fill empty JWT_SECRET / POSTGRES_PASSWORD / DATA_KEY / MATCHER_KEY in .env (FORCE=1 regenerates all — breaks existing bank links)
 	@fill() { \
 	  key=$$1; val=$$2; \
 	  if [ -n "$${FORCE:-}" ] || grep -qE "^$$key=\s*$$" .env; then \
@@ -61,9 +67,15 @@ secrets: .env ## Fill empty JWT_SECRET / POSTGRES_PASSWORD / DATA_KEY in .env (F
 	fi; \
 	fill JWT_SECRET        "$$(openssl rand -base64 48 | tr -d '\n')"; \
 	fill POSTGRES_PASSWORD "$$(openssl rand -hex 24)"; \
-	fill DATA_KEY          "$$(openssl rand -base64 32 | tr -d '\n')"
+	fill DATA_KEY          "$$(openssl rand -base64 32 | tr -d '\n')"; \
+	fill MATCHER_KEY       "$$(openssl rand -hex 32)"
 	@$(MAKE) vapid
 	@$(MAKE) dev-env
+
+matcher-key: .env ## Fill an empty MATCHER_KEY (api ↔ matcher shared key) in .env; `make up` runs this
+	@if grep -qE '^MATCHER_KEY=.+' .env; then :; \
+	elif grep -qE '^#?\s*MATCHER_KEY=' .env; then sed -i "s|^#\?\s*MATCHER_KEY=.*|MATCHER_KEY=$$(openssl rand -hex 32)|" .env; echo '  set  MATCHER_KEY'; \
+	else printf 'MATCHER_KEY=%s\n' "$$(openssl rand -hex 32)" >> .env; echo '  set  MATCHER_KEY'; fi
 
 vapid: .env ## Fill empty VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY (Web Push) in .env; FORCE=1 rotates (every phone must re-enable notifications)
 	@set_kv() { \
@@ -98,9 +110,9 @@ vapid: .env ## Fill empty VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY (Web Push) in .en
 dev-env: .env ## Write .env.dev (derived env for running api/web natively & VS Code debugging)
 	@scripts/dev-env.sh
 
-##@ Development (db in Docker, api + web natively with hot reload)
+##@ Development (db in Docker, api + web + matcher natively with hot reload)
 
-dev: ## Start db, then api (dotnet watch) + web (vite) together; Ctrl-C stops both
+dev: ## Start db, then api (dotnet watch) + web (vite) + matcher (uvicorn) together; Ctrl-C stops them
 	@scripts/dev.sh
 
 dev-db: .env ## Start only Postgres, published on 127.0.0.1:5432
@@ -112,12 +124,16 @@ dev-api: dev-env ## Run the API natively with hot reload on http://localhost:808
 dev-web: dev-env ## Run the SvelteKit dev server on http://localhost:5173
 	@set -a; source .env.dev; set +a; cd $(WEB_DIR) && $(PNPM) dev --host
 
+dev-matcher: dev-env ## Run the fuzzy matcher natively with hot reload on http://localhost:8090
+	@set -a; source .env.dev; set +a; cd $(MATCHER_DIR) && \
+	  $(UV_RUN) uvicorn matcher.app:app --reload --reload-dir src --host 127.0.0.1 --port 8090
+
 migrate: .env ## Run database migrations (DbUp) using the api image
 	$(COMPOSE) run --rm migrate
 
 ##@ Stack (Docker Compose, production-like)
 
-up: .env ## Build/pull as needed and start db + migrate + api + web
+up: .env matcher-key ## Build/pull as needed and start db + migrate + matcher + api + web
 	$(COMPOSE) up -d --remove-orphans
 	@$(MAKE) ps
 
@@ -130,16 +146,19 @@ logs: ## Tail logs of all services (S=api to filter)
 scheduler-logs: ## Tail api logs from the background scheduler only (autopay, reminders, hygiene)
 	$(COMPOSE) logs -f --tail=1000 api | grep --line-buffered -i 'scheduler'
 
+matcher-logs: ## Tail the fuzzy matcher's logs (one line per batch: counts and timings, never descriptions)
+	$(COMPOSE) logs -f --tail=200 matcher
+
 ps: ## Show service status and health
 	$(COMPOSE) --profile tunnel ps
 
-build: ## Build api + web images locally (slow on a Pi; prefer `make pull`)
-	$(COMPOSE) build --pull api web
+build: ## Build api + web + matcher images locally (slow on a Pi; prefer `make pull`)
+	$(COMPOSE) build --pull api web matcher
 
 pull: ## Pull the latest published images from GHCR
 	$(COMPOSE) --profile tunnel pull
 
-tunnel-up: .env ## Start everything including the Cloudflare tunnel
+tunnel-up: .env matcher-key ## Start everything including the Cloudflare tunnel
 	$(COMPOSE) --profile tunnel up -d --remove-orphans
 	@$(MAKE) ps
 
@@ -173,7 +192,7 @@ restore: ## Restore a dump: make restore FILE=backups/couplescash-….sql.gz (re
 
 ##@ Quality
 
-test: test-api test-web ## Run all tests (dotnet test + Playwright e2e)
+test: test-api test-web test-matcher ## Run all tests (dotnet test + Playwright e2e + pytest)
 
 test-api: ## dotnet test
 	$(DOTNET) test $(API_SLN)
@@ -181,14 +200,21 @@ test-api: ## dotnet test
 test-web: ## Playwright e2e (installs chromium on first run)
 	cd $(WEB_DIR) && $(PNPM) exec playwright install chromium && $(PNPM) exec playwright test
 
-lint: ## dotnet format --verify-no-changes + pnpm check + pnpm lint
+test-matcher: ## pytest for the fuzzy matcher
+	cd $(MATCHER_DIR) && $(UV_RUN) pytest
+
+lint: ## dotnet format --verify-no-changes + pnpm check + pnpm lint + ruff check/format --check
 	$(DOTNET) format $(API_SLN) --verify-no-changes
 	cd $(WEB_DIR) && $(PNPM) check && $(PNPM) lint
+	cd $(MATCHER_DIR) && $(UV_RUN) ruff check . && $(UV_RUN) ruff format --check .
 
-fmt: ## Auto-format C# (dotnet format) and web (prettier)
+fmt: ## Auto-format C# (dotnet format), web (prettier) and matcher (ruff)
 	$(DOTNET) format $(API_SLN)
 	cd $(WEB_DIR) && $(PNPM) format
+	cd $(MATCHER_DIR) && $(UV_RUN) ruff check --fix . && $(UV_RUN) ruff format .
 
-clean: ## Remove build artefacts (bin/obj, .svelte-kit, build, reports). Keeps node_modules and data
+clean: ## Remove build artefacts (bin/obj, .svelte-kit, build, reports, Python caches). Keeps node_modules, .venv, data
 	find $(API_DIR) -type d \( -name bin -o -name obj -o -name TestResults \) -prune -exec rm -rf {} +
 	rm -rf $(WEB_DIR)/.svelte-kit $(WEB_DIR)/build $(WEB_DIR)/playwright-report $(WEB_DIR)/test-results
+	find $(MATCHER_DIR) -type d -name __pycache__ -not -path '*/.venv/*' -prune -exec rm -rf {} +
+	rm -rf $(MATCHER_DIR)/.pytest_cache $(MATCHER_DIR)/.ruff_cache

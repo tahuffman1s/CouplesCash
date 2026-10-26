@@ -112,6 +112,35 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------- Python matcher
+  matcher:
+    name: Matcher (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/matcher
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: apps/matcher/uv.lock
+
+      - name: Install (locked)
+        run: uv sync --frozen
+
+      - name: Lint (ruff)
+        run: uv run --frozen ruff check --output-format=github .
+
+      - name: Format check (ruff)
+        run: uv run --frozen ruff format --check .
+
+      - name: Test (pytest)
+        run: uv run --frozen pytest
+
   # ---------------------------------------------------------------- Infra
   infra:
     name: Infra (compose, scripts, workflows)
@@ -128,7 +157,7 @@ jobs:
       - name: Validate compose files
         run: |
           cp .env.example .env
-          export POSTGRES_PASSWORD=ci JWT_SECRET=ci-secret-ci-secret-ci-secret-ci-secret PUBLIC_URL=https://ci.example.com TUNNEL_TOKEN=ci
+          export POSTGRES_PASSWORD=ci JWT_SECRET=ci-secret-ci-secret-ci-secret-ci-secret PUBLIC_URL=https://ci.example.com TUNNEL_TOKEN=ci MATCHER_KEY=ci
           docker compose -f compose.yml config -q
           docker compose -f compose.yml -f compose.dev.yml config -q
           docker compose -f compose.yml --profile tunnel config -q
@@ -139,14 +168,14 @@ jobs:
           ./actionlint -color
 
   # ---------------------------------------------------------------- Docker build check
-  # Every branch/PR proves both Dockerfiles still build (amd64 only, nothing pushed).
+  # Every branch/PR proves every Dockerfile still builds (amd64 only, nothing pushed).
   docker:
     name: Build ${{ matrix.app }} image
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        app: [api, web]
+        app: [api, web, matcher]
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -165,7 +194,7 @@ jobs:
   # .NET and Node on an SD card.
   images:
     name: Publish ${{ matrix.app }} image
-    needs: [api, web, infra, docker]
+    needs: [api, web, matcher, infra, docker]
     if: >-
       github.event_name == 'push' &&
       (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
@@ -177,7 +206,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [api, web]
+        app: [api, web, matcher]
     steps:
       - uses: actions/checkout@v7
 

@@ -1,8 +1,9 @@
 # Development override: `docker compose -f compose.yml -f compose.dev.yml up -d db`
 # (that is what `make dev-db` / `make dev` run).
 #
-# In development only Postgres runs in Docker; the API (`dotnet watch`) and the
-# web app (`vite dev`) run natively for hot reload. This file therefore only
+# In development only Postgres runs in Docker; the API (`dotnet watch`), the
+# web app (`vite dev`) and the matcher (`uvicorn --reload` on 127.0.0.1:8090,
+# `make dev-matcher`) run natively for hot reload. This file therefore only
 # publishes the database on loopback so the native processes can reach it.
 services:
   db:

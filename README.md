@@ -40,9 +40,10 @@ have balances and transactions pulled in instead of typing them).
 - **Week view** (v4): `/week` answers "how much is left at the end of this week?" — spendable now + income to come − planned to pay, with a Mon–Sun (or Sun–Sat) day list of Planned / Cleared / Overdue items, inline mark-paid and Undo, unplanned expenses under each day, and a "This week" card on the dashboard.
 - **Planned one-offs** (v4): "Plan a one-off" from the quick-add sheet or the week view — name, amount, date, expense/income, and an optional *Bank shows it as* hint. When the bank transaction arrives (±7 days, within 15 %) it reconciles itself; the row flips to Cleared with the actual amount and a "−$5.80" variance pill. Bills › **One-offs** lists them.
 - **Weekly budgets** (v4): one overall weekly spending target (Settings → Household) plus per-category weekly amounts, "under by $X" / "over by $X" bars, an 8-week over/under history, and a Monthly / Weekly switch on Insights. Optional **weekly summary** pushes: "Week ahead: $X planned" the day before the week starts and "You have $Z left this week" on day five.
+- **Automatic matching** (v6): a small fuzzy matcher (Python + RapidFuzz, its own container, internal only) reads each bank transaction by name, amount and date — `ACH DEBIT OAKWOOD PROPERTY MGMT RENT` is your Rent, `SQ *BLUE BOTTLE COFFEE` is Coffee — and marks bills paid / categorises expenses by itself at the auto-match level you choose, always with the reason shown ("name 94 % · amount exact · 1 day early") and Undo. It also spots regular payments you haven't added yet ("We found 3 regular payments → Add"). If it is down the API falls back to its built-in rules. [docs/BANK-SYNC.md](docs/BANK-SYNC.md#automatic-matching)
 - **Installable PWA** on iOS Safari and Android Chrome; light/dark follows the device.
 - **Secure by default**: Argon2id, 15-minute JWTs with rotating refresh tokens, household-scoped SQL, rate limiting, strict headers, non-root read-only containers, API never exposed to the internet. See [docs/SECURITY.md](docs/SECURITY.md).
-- **Pi-sized**: the whole stack idles at ~300 MB RAM; prebuilt `arm64` images from GHCR.
+- **Pi-sized**: the whole stack idles at ~350 MB RAM; prebuilt `arm64` images from GHCR.
 
 ## Architecture
 
@@ -53,40 +54,46 @@ have balances and transactions pulled in instead of typing them).
                                    ┌──────────────┐  server-side fetch   ┌──────────────┐      ┌────────────┐
                                    │  web (Kit)   │ ───────────────────▶ │  api (.NET)  │ ───▶ │  postgres  │
                                    │  :3000       │   http://api:8080    │  :8080       │      │  :5432     │
-                                   └──────────────┘                      └──────────────┘      └────────────┘
-                                   BFF: owns the httpOnly cookies         JWT bearer auth,       only on the
-                                   and talks to the API on the            household-scoped       internal network
-                                   internal docker network                SQL, rate limits
+                                   └──────────────┘                      └──────┬───────┘      └────────────┘
+                                   BFF: owns the httpOnly cookies         JWT bearer auth,│      only on the
+                                   and talks to the API on the            household-scoped│      internal network
+                                   internal docker network                SQL, rate limits│
+                                                                                          ▼ X-Matcher-Key
+                                                                         ┌──────────────────┐
+                                                                         │ matcher (Python) │  stateless fuzzy scoring,
+                                                                         │ :8090            │  internal only
+                                                                         └──────────────────┘
 ```
 
 | Layer | Tech |
 |---|---|
 | Web | SvelteKit 2 · Svelte 5 runes · TypeScript · Tailwind 4 + daisyUI 5 · adapter-node · Playwright |
 | API | .NET 10 Minimal APIs · Npgsql + Dapper · DbUp migrations · Scalar docs · xunit |
+| Matcher | Python 3.13 · FastAPI · RapidFuzz · pydantic 2 · uv · pytest + ruff |
 | Data | PostgreSQL 16 |
 | Edge | cloudflared (tunnel) · optional Cloudflare Access |
 | Ops | Docker Compose · Makefile · GitHub Actions → multi-arch images on GHCR |
 
-The API contract between web and api is [docs/API-CONTRACT.md](docs/API-CONTRACT.md); the build plans are [docs/PLAN.md](docs/PLAN.md), [PLAN-V2](docs/PLAN-V2.md), [PLAN-V3](docs/PLAN-V3.md) and [PLAN-V4](docs/PLAN-V4.md). The only outbound connections the stack makes are to Cloudflare (tunnel), the push services (if enabled) and — only if you link a bank — the SimpleFIN Bridge.
+The API contract between web and api is [docs/API-CONTRACT.md](docs/API-CONTRACT.md), between api and matcher [docs/MATCHER-CONTRACT.md](docs/MATCHER-CONTRACT.md); the build plans are [docs/PLAN.md](docs/PLAN.md), [PLAN-V2](docs/PLAN-V2.md), [PLAN-V3](docs/PLAN-V3.md) and [PLAN-V4](docs/PLAN-V4.md). The only outbound connections the stack makes are to Cloudflare (tunnel), the push services (if enabled) and — only if you link a bank — the SimpleFIN Bridge.
 
 ## Quick start (development on Linux)
 
-Prereqs: Docker (with the compose plugin), .NET 10 SDK, Node 22, pnpm 10.
+Prereqs: Docker (with the compose plugin), .NET 10 SDK, Node 22, pnpm 10, [uv](https://docs.astral.sh/uv/) (Python 3.13 for the matcher; uv fetches it if missing).
 
 ```bash
 git clone https://github.com/tahuffman1s/CouplesCash.git && cd CouplesCash
 make setup      # checks tools, creates .env with fresh secrets, restores deps
-make dev        # Postgres in Docker; API (dotnet watch) + web (vite) natively
+make dev        # Postgres in Docker; API (dotnet watch) + web (vite) + matcher (uvicorn --reload) natively
 ```
 
-`make setup` runs `make secrets`, which generates `JWT_SECRET`, `POSTGRES_PASSWORD` and
-`DATA_KEY` (bank-sync encryption key) and the Web Push (VAPID) key pair (`make vapid`, via
+`make setup` runs `make secrets`, which generates `JWT_SECRET`, `POSTGRES_PASSWORD`,
+`DATA_KEY` (bank-sync encryption key), `MATCHER_KEY` (api ↔ matcher shared key) and the Web Push (VAPID) key pair (`make vapid`, via
 `dotnet run -- --vapid`); without the VAPID keys push is simply disabled, without `DATA_KEY`
 bank sync is.
 Passkeys work on `http://localhost` without TLS.
 
-Open <http://localhost:5173>. API docs at <http://localhost:8080/scalar>.
-Ctrl-C stops api + web; `make down` stops the database. Everything else:
+Open <http://localhost:5173>. API docs at <http://localhost:8080/scalar>; matcher on
+<http://localhost:8090/health>. Ctrl-C stops api + web + matcher; `make down` stops the database. Everything else:
 `make help`.
 
 VS Code: open `CouplesCash.code-workspace`, install the recommended
@@ -127,15 +134,16 @@ Couple Code; Settings → **Install app** on both, then (from the installed app)
 CouplesCash/
 ├─ apps/
 │  ├─ api/                   .NET 10 solution (CouplesCash.Api, CouplesCash.Api.Tests, Dockerfile)
+│  ├─ matcher/               Python fuzzy matcher (src/matcher, tests, pyproject + uv.lock, Dockerfile)
 │  └─ web/                   SvelteKit app (src/routes, src/lib, e2e, static, Dockerfile)
 ├─ infra/
 │  ├─ cloudflared/README.md  Tunnel + Access setup
 │  └─ postgres/postgresql.conf   Pi-tuned Postgres config
 ├─ install.sh                one-line installer (any 64-bit Linux / Pi); generates secrets + VAPID keys
 ├─ scripts/                  dev.sh · dev-env.sh · backup.sh (DB dump + .env copy)
-├─ docs/                     PLAN · PLAN-V2 · PLAN-V3 · API-CONTRACT · RASPBERRY-PI · SECURITY · NOTIFICATIONS · PASSKEYS · BANK-SYNC
+├─ docs/                     PLAN · PLAN-V2…V6 · API-CONTRACT · MATCHER-CONTRACT · RASPBERRY-PI · SECURITY · NOTIFICATIONS · PASSKEYS · BANK-SYNC
 ├─ .vscode/ · .devcontainer/ · .github/
-├─ compose.yml               db · migrate · api · web (· cloudflared via --profile tunnel)
+├─ compose.yml               db · migrate · matcher · api · web (· cloudflared via --profile tunnel)
 ├─ compose.dev.yml           publishes db on 127.0.0.1:5432 for native dev
 ├─ Makefile                  make help
 ├─ .env.example              every variable, documented
@@ -144,7 +152,7 @@ CouplesCash/
 
 ## Documentation
 
-- [Build plan](docs/PLAN.md) · [v2 plan](docs/PLAN-V2.md) · [v3 plan](docs/PLAN-V3.md) · [API contract](docs/API-CONTRACT.md)
+- [Build plan](docs/PLAN.md) · [v2](docs/PLAN-V2.md) · [v3](docs/PLAN-V3.md) · [v4](docs/PLAN-V4.md) · [v5](docs/PLAN-V5.md) · [v6](docs/PLAN-V6.md) · [API contract](docs/API-CONTRACT.md) · [Matcher contract](docs/MATCHER-CONTRACT.md)
 - [Raspberry Pi guide](docs/RASPBERRY-PI.md) · [Cloudflare Tunnel](infra/cloudflared/README.md)
 - [Bank sync, CSV import & inbox](docs/BANK-SYNC.md) · [Push notifications](docs/NOTIFICATIONS.md) · [Passkeys](docs/PASSKEYS.md)
 - [Security](docs/SECURITY.md)

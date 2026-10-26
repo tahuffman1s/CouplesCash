@@ -142,10 +142,76 @@ matches that bill with confidence ≥ 90 the sync marks the occurrence paid **au
 (`auto`, no actor — the same mechanism as autopay) and files the inbox row as confirmed. The
 calendar shows a *matched from bank* badge, the activity feed says *"matched Rent · $1,850.00
 (auto)"*, and **Undo** on the occurrence puts the inbox row back to pending. Expenses are never
-auto-confirmed; only bill/income matches are.
+auto-confirmed; only bill/income matches are. *(v3 rule. Since v6 the fuzzy matcher below decides, and
+the household's auto-match level can also auto-confirm expenses.)*
 
 Everything the inbox does is recorded in the activity feed (`transaction.confirmed`,
 `ignored`, `restored`, `automatched`) so both partners can see what happened.
+
+## Automatic matching
+
+Since v6 a small **matcher** service (`apps/matcher`, Python + RapidFuzz, its own container) reads every new
+transaction like a person would — *who* was paid, *how much* and *when* — and either applies the obvious matches
+for you or puts one clear suggestion on the row. The inbox is now the **To review** section of the Transactions
+tab and only lists what still needs a human.
+
+**When it runs.** On every bank sync, after every CSV import, whenever a bill or one-off is created or edited, and
+on a scheduler sweep every 30 minutes over all To-review rows (`POST /v1/inbox/rematch` queues one at once).
+
+**What is scored.** Each transaction against every unpaid occurrence due near it, with three scores (0–100):
+
+| Score | How | Weight |
+|---|---|---|
+| **Name** | The bank text, cleaned up (`ACH DEBIT`, `POS`, card numbers, phone numbers, store numbers, dates, city/state, `SQ *` / `PAYPAL *` prefixes removed; `AMZN Mktp US*2K4H71` → `AMAZON`), compared fuzzily with the item's name **and its bank names** | 45 % |
+| **Amount** | Exact = 100; inside the tolerance it slides to 70; beyond it drops fast. Tolerance: bills max(2 %, $1) · one-offs max(15 %, $10) · *amount varies* max(35 %, $15). Money out only matches bills/subscriptions, money in only income. | 35 % |
+| **Date** | 100 on the due date, 60 at the edge of the window: ±5 days for bills, ±7 for one-offs, ±10 for *amount varies*. Early and late count the same. Outside the window: no match. | 20 % |
+
+Each transaction gets at most one occurrence and each occurrence at most one transaction (best total first, across
+the whole batch); occurrences already marked paid are never taken.
+
+**Bank names** ("Bank shows it as"). Every bill, income and one-off has a list of names the bank uses for it,
+editable as chips in the bill and one-off forms — `Rent` might add `OAKWOOD PROPERTY`. When a match is confirmed,
+by you or automatically, the cleaned-up bank text is **learned** into that list (up to 10; names you typed are never
+pushed out; learned ones can be removed). Tick **Amount varies** for utilities and card payments so a $112 water
+bill still matches a $90 estimate.
+
+**Auto-match level** (*Settings → Household*, default **All**):
+
+| Level | Applied automatically | Left as a suggestion |
+|---|---|---|
+| **Off** | nothing | everything |
+| **Bills** | bill, income and one-off matches, detected transfers | expense categories |
+| **All** | the above **plus** expenses whose payee strongly matches a category you have confirmed at least twice (name ≥ 90) | the rest |
+
+A bill match is applied automatically when the total is ≥ 85 **and** the name ≥ 70 **and** the amount is inside
+the tolerance — or when the amount is exact, it is within 3 days, the name is at least half-similar and no other
+occurrence nearby has that exact amount. Weaker matches (total ≥ 55) become the row's one-tap suggestion
+(**"It's Rent"**).
+
+**Why it matched.** Every automatic or suggested match carries its reason, shown on the row, in the Transaction
+sheet and in the activity feed: *"Auto-matched · name 94 % · amount exact · 1 day early"*, or for categories
+*"payee KROGER (3 confirmations)"*. The scores are stored on the transaction (`match_score`, `match_detail`), with
+`engine: fuzzy` or `builtin`.
+
+**Undo.** Every automatic action is an ordinary, reversible action: *Unmatch* on the transaction (or *Undo* in the
+toast / on the occurrence) marks the occurrence unpaid again and returns the row to To review; an auto-confirmed
+expense is deleted the same way. The activity feed records `transaction.automatched` / `transaction.autocategorized`
+with the reason, and the undo.
+
+**When the matcher is down.** The API never waits on it: if `matcher` is unreachable, slow or answers an error, the
+API uses its **built-in matcher** (the v5 C# rules: exact amount ±2 % / $1, ±5 days, learned payees) and logs a
+warning. Results are marked `engine: builtin`, and the matcher status (`GET /v1/matcher/status`) says which engine
+ran last. Nothing else
+changes, and the next sweep re-scores with the fuzzy engine once it is back. `make logs S=matcher` shows its log
+(request counts and timings only — never descriptions).
+
+**Found bills.** The matcher also looks for regular payments you have not set up yet: at least 3 payments to the
+same (fuzzy) name whose gaps fit weekly, every two weeks, monthly (same day ±3) or quarterly, with amounts within
+10 % (or within 35 % → *amount varies*). After each sync and once a day the week and bills pages show a card
+*"We found 3 regular payments"*: **Netflix · $15.49 every month · next Nov 7** with **Add** / **Not a bill**.
+**Add** creates the item with that bank name and immediately matches the past transactions it was found from;
+**Not a bill** never suggests it again. Names that already belong to an item (or its bank names), transfers,
+yearly payments and payments that stopped are not suggested.
 
 ## CSV import
 
@@ -193,6 +259,8 @@ plain CSV option. The last 20 imports are listed on the page with their counts.
 | Duplicate transactions in the inbox | A CSV imported for an account that is also linked (see *CSV import*), or the bank changed a pending transaction's id when it settled. Ignore the extras. |
 | Amounts have the wrong sign after a CSV import (charges show green) | Wrong sign convention. Ignore the batch in the inbox (*Ignore all* with the import's rows selected), re-import with the toggle flipped. |
 | Balance of a credit card shows negative | The account type in CouplesCash is not *credit*/*loan*. Edit the account's type; the next sync stores the owed amount as positive. |
+| Matches say `builtin` / Settings shows the matcher as unreachable | The `matcher` container is down or `MATCHER_KEY` differs between `api` and `matcher`. `make ps`, `make logs S=matcher` (an empty key makes it exit with "MATCHER_KEY is empty"). Fix: `make secrets && make up` (fills an empty `MATCHER_KEY`; both containers read the same value). Matching keeps working with the built-in rules meanwhile. |
+| A bill keeps landing in To review instead of matching | Its bank text is not close to the item's name: add a bank name to the item (or confirm one match — it is learned). For utilities with changing amounts tick *Amount varies*. Check the auto-match level is not *Off*. |
 | Nothing syncs and the activity feed is quiet | `SCHEDULER_ENABLED=false` in `.env`, or *sync enabled* is off on the link, or `api` is unhealthy (`make ps`). `make scheduler-logs` shows every sync decision. |
 
 Useful commands on the Pi:
@@ -202,6 +270,7 @@ make scheduler-logs | grep -i sync   # what the bank-sync phase did each tick (n
 grep -c '^DATA_KEY=.' .env           # 1 = key present (never paste the value anywhere)
 make secrets                         # fills an EMPTY DATA_KEY; FORCE=1 rotates it and breaks every link
 make backup                          # DB dump + .env copy (DATA_KEY) → backups/
+make logs S=matcher                  # fuzzy matcher: one line per request (counts, timings), never descriptions
 ```
 
 ## Backups
@@ -214,6 +283,8 @@ is a secret like the dump itself.
 
 ## Privacy and security notes
 
+- **The matcher** sees transaction descriptions and item names only for the duration of a request, over the
+  internal compose network (shared key, no published port). It stores nothing and logs only counts and timings.
 - **What leaves the Pi:** HTTPS requests to the SimpleFIN Bridge (claiming the token, then
   `GET …/accounts` each sync) — nothing else. No bank data goes to Cloudflare beyond the
   ordinary page traffic the tunnel already carries, and nothing is sent to us.

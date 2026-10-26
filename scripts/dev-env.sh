@@ -25,6 +25,7 @@ set +a
 
 API_PORT="${API_PORT:-8080}"
 WEB_PORT="${WEB_PORT:-5173}"
+MATCHER_PORT=8090
 
 umask 077
 cat > .env.dev <<ENV
@@ -48,8 +49,14 @@ Scheduler__Enabled=${SCHEDULER_ENABLED:-true}
 # Bank sync (SimpleFIN): empty key = disabled (503 bank_sync_not_configured). Fill it with \`make secrets\`.
 Security__DataKey=${DATA_KEY:-}
 Sync__IntervalHours=${SYNC_INTERVAL_HOURS:-6}
+# Fuzzy matcher (\`make dev-matcher\`, uvicorn on :${MATCHER_PORT}). Empty key = the matcher refuses to start and the
+# API uses its built-in matcher. \`make secrets\` (or \`make matcher-key\`) fills MATCHER_KEY in .env.
+Matcher__BaseUrl=http://localhost:${MATCHER_PORT}
+Matcher__Key=${MATCHER_KEY:-}
+# ---- Matcher (apps/matcher) ----
+MATCHER_KEY=${MATCHER_KEY:-}
 # ---- SvelteKit (apps/web) ----
 API_URL=http://localhost:${API_PORT}
 ORIGIN=http://localhost:${WEB_PORT}
 ENV
-echo "Wrote .env.dev (API → http://localhost:${API_PORT}, web → http://localhost:${WEB_PORT})"
+echo "Wrote .env.dev (API → http://localhost:${API_PORT}, web → http://localhost:${WEB_PORT}, matcher → http://localhost:${MATCHER_PORT})"

@@ -38,6 +38,31 @@
 			"envFile": "${workspaceFolder}/.env.dev"
 		},
 		{
+			"name": "Matcher (FastAPI)",
+			"type": "debugpy",
+			"request": "launch",
+			"module": "uvicorn",
+			"args": ["matcher.app:app", "--host", "127.0.0.1", "--port", "8090", "--workers", "1"],
+			"cwd": "${workspaceFolder}/apps/matcher",
+			"python": "${workspaceFolder}/apps/matcher/.venv/bin/python",
+			"envFile": "${workspaceFolder}/.env.dev",
+			"preLaunchTask": "matcher: sync",
+			"justMyCode": true,
+			"console": "integratedTerminal"
+		},
+		{
+			"name": "Matcher: pytest",
+			"type": "debugpy",
+			"request": "launch",
+			"module": "pytest",
+			"args": ["-q"],
+			"cwd": "${workspaceFolder}/apps/matcher",
+			"python": "${workspaceFolder}/apps/matcher/.venv/bin/python",
+			"preLaunchTask": "matcher: sync",
+			"justMyCode": false,
+			"console": "integratedTerminal"
+		},
+		{
 			"name": "Web (Chrome)",
 			"type": "pwa-chrome",
 			"request": "launch",
@@ -60,7 +85,7 @@
 	"compounds": [
 		{
 			"name": "Full stack",
-			"configurations": [".NET API", "Web: dev server"],
+			"configurations": [".NET API", "Web: dev server", "Matcher (FastAPI)"],
 			"preLaunchTask": "compose: up db",
 			"stopAll": true
 		}

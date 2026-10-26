@@ -36,6 +36,25 @@ updates:
       day: monday
     labels: [dependencies, docker]
 
+  # Python matcher: pyproject.toml + uv.lock (Dependabot's native uv support).
+  - package-ecosystem: uv
+    directory: /apps/matcher
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      matcher-dev:
+        dependency-type: development
+    open-pull-requests-limit: 5
+    labels: [dependencies, matcher]
+
+  - package-ecosystem: docker
+    directory: /apps/matcher
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

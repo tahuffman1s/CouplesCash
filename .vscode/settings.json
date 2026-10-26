@@ -9,7 +9,10 @@
 	"files.exclude": {
 		"**/bin": true,
 		"**/obj": true,
-		"**/.svelte-kit": true
+		"**/.svelte-kit": true,
+		"**/__pycache__": true,
+		"**/.pytest_cache": true,
+		"**/.ruff_cache": true
 	},
 	"search.exclude": {
 		"**/node_modules": true,
@@ -17,6 +20,8 @@
 		"**/obj": true,
 		"**/.svelte-kit": true,
 		"**/pnpm-lock.yaml": true,
+		"**/uv.lock": true,
+		"**/.venv": true,
 		"backups": true
 	},
 	"[svelte]": {
@@ -47,6 +52,18 @@
 	"[yaml]": {
 		"editor.defaultFormatter": "esbenp.prettier-vscode"
 	},
+	"[python]": {
+		"editor.defaultFormatter": "charliermarsh.ruff",
+		"editor.codeActionsOnSave": {
+			"source.fixAll.ruff": "explicit",
+			"source.organizeImports.ruff": "explicit"
+		}
+	},
+	"python.defaultInterpreterPath": "${workspaceFolder}/apps/matcher/.venv/bin/python",
+	"python.testing.pytestEnabled": true,
+	"python.testing.cwd": "${workspaceFolder}/apps/matcher",
+	"python.testing.pytestArgs": ["apps/matcher/tests"],
+	"ruff.nativeServer": "on",
 	"[csharp]": {
 		"editor.defaultFormatter": "ms-dotnettools.csharp",
 		"editor.tabSize": 4

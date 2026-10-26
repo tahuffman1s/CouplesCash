@@ -27,6 +27,9 @@ when something goes wrong.
    card) or of `.env` that lets someone read your bank transactions through the
    SimpleFIN Bridge; a sync error silently hiding a dead connection; an inbox
    action that creates or marks something in the wrong household.
+9. **The fuzzy matcher** (v6) — a second service that sees transaction
+   descriptions: someone on the compose network calling it, it leaking
+   descriptions into logs, or an automatic match nobody can see or undo.
 
 **Out of scope**: a fully compromised Pi (root access), a compromised
 Cloudflare account, or malware on the phone itself. Keep the OS updated, use
@@ -36,7 +39,7 @@ strong passwords on the Pi and Cloudflare, and enable 2FA on Cloudflare.
 
 | Threat | Control | Where |
 |---|---|---|
-| Exposed services on the internet | Only `web` is reachable, and only through the Cloudflare tunnel (outbound connection, no port forwarding). `api` and `db` have **no published ports**. | `compose.yml` (`ports:` only on `web`, bound to `127.0.0.1`), `infra/cloudflared/README.md` |
+| Exposed services on the internet | Only `web` is reachable, and only through the Cloudflare tunnel (outbound connection, no port forwarding). `api`, `matcher` and `db` have **no published ports**. | `compose.yml` (`ports:` only on `web`, bound to `127.0.0.1`), `infra/cloudflared/README.md` |
 | Open ports on the LAN | `web` binds `127.0.0.1:3000` on the Pi unless you opt in with `WEB_BIND=0.0.0.0`. | `.env.example`, `compose.yml` |
 | Password guessing / credential stuffing | Argon2id hashing (64 MB, 3 iterations); fixed-window rate limit **10 req/min/IP** on `/v1/auth/*` and `/v1/couple/join`, 120 req/min globally; identical error for wrong email vs wrong password. | API `Auth/`, rate-limiter middleware in `Program.cs`; contract: `docs/API-CONTRACT.md` |
 | Weak passwords | Minimum 10 characters enforced server-side (FluentValidation). | API validators |
@@ -52,7 +55,7 @@ strong passwords on the Pi and Cloudflare, and enable 2FA on Cloudflare.
 | Secrets in the repo / images | Secrets only via environment (`.env`, git-ignored, `chmod 600`); `make secrets` generates them; images contain no config. | `.gitignore`, `Makefile`, `.env.example` |
 | Leaking API docs | Scalar/OpenAPI only served when `Api__EnableDocs=true`; default `false` in production. | `.env.example` → `API_ENABLE_DOCS` |
 | Log leakage | Logs capped at 3 × 10 MB per container; no tokens or passwords are logged. | `compose.yml` logging, `/etc/docker/daemon.json` |
-| Supply chain | Pinned base images, Dependabot for npm/NuGet/Docker/Actions weekly, CI builds images from source and publishes to GHCR under your account. | `.github/dependabot.yml`, `.github/workflows/ci.yml` |
+| Supply chain | Pinned base images and lockfiles (`pnpm-lock.yaml`, NuGet, `uv.lock`), Dependabot for npm/NuGet/uv/Docker/Actions weekly, CI builds images from source and publishes to GHCR under your account. | `.github/dependabot.yml`, `.github/workflows/ci.yml` |
 | Optional second factor | Cloudflare Access with email one-time codes for exactly your two addresses in front of the hostname. | `infra/cloudflared/README.md` §5 |
 | Push payloads read in transit or by the push service | Payloads are encrypted end-to-end to the device (RFC 8291) and signed with VAPID (RFC 8292); they contain **only the item name, the amount, a tag and a relative URL** — never tokens, balances or account numbers. Push services (Apple/Google/Mozilla) see ciphertext and an endpoint. | API `Push/`, `docs/NOTIFICATIONS.md` |
 | Leaked VAPID private key (strangers could push to subscribed phones) | Key pair generated locally by the api image (`make vapid`), stored only in `.env` (`chmod 600`) and the api container environment; never logged or returned by the API (only the **public** key is served). **Rotate**: `make vapid FORCE=1 && make up` — every device must re-enable notifications. Subscriptions are per user; the server only sends to the subscriber's own household events. | `.env.example`, `Makefile`, `compose.yml` `x-api-env` |
@@ -63,6 +66,7 @@ strong passwords on the Pi and Cloudflare, and enable 2FA on Cloudflare.
 | Bank access URL read from a stolen database / backup | The SimpleFIN access URL (a read-only credential) is stored only as **AES-256-GCM ciphertext** (`access_url_enc`: nonce + tag + ciphertext) under `DATA_KEY`, a 32-byte key that lives **only in `.env`** (`chmod 600`) and the api container environment — never in the database, images or logs. The plaintext is never logged (logs carry link names and counts) and no route returns it. Without the key the claim endpoint is disabled (`503 bank_sync_not_configured`). The setup token is single-use and claimed server-side, so the browser never holds the credential either. | API `Security/DataProtector.cs`, `SimpleFin/`, `.env.example` `DATA_KEY`, `compose.yml` `x-api-env` |
 | Lost or rotated `DATA_KEY` | Fail closed: links that cannot be decrypted are reported as errors on the link card and in the activity feed; nothing falls back to plaintext. `make secrets FORCE=1` prints a loud warning before rotating; `make backup` copies `.env` next to the dump so a restore can decrypt. Recovery is always *re-link*, never *recover the key*. | `Makefile` `secrets`, `scripts/backup.sh`, `docs/BANK-SYNC.md` |
 | Bank connection quietly broken | The Bridge's per-connection `errors` and any sync failure are surfaced, not swallowed: `last_error` on the link, a `bank.error` activity row, and the error text on *Settings → Linked banks*. The job continues with the next link. | API `Scheduler/` bank-sync phase, web `/settings/banks` |
+| Fuzzy matcher (`matcher`, v6) misused or leaking | **Internal-only**: no `ports:`, reachable only as `http://matcher:8090` on the compose network, never behind the tunnel. Every route except `/health` needs `X-Matcher-Key` = `MATCHER_KEY` (64 hex chars from `openssl rand -hex 32`, shared with `api` as `Matcher__Key`, compared in constant time); an empty key makes the container **refuse to start**. **Stateless**: no database, no disk writes (read-only FS), nothing kept between requests; it never sees household ids, tokens or balances — only the transactions and items the API sends for one batch. Logs carry **counts and timings only, never descriptions, payees or names**; validation errors never echo input. 1 MB body / 5000 transactions / 2000 candidates limits (413), 96 MB memory limit, non-root. If it is down the API falls back to its built-in matcher. Automatic matches are `paid_by NULL, auto = true`, carry their reason, write an activity row and are undo-able. Rotate: clear `MATCHER_KEY=` in `.env`, `make secrets` (fills only empty values — never use `FORCE=1` for this, it also rotates `DATA_KEY`) and `make up`; nothing stored depends on it. | `apps/matcher/`, `compose.yml` `matcher` + `x-api-env`, `docs/BANK-SYNC.md` "Automatic matching" |
 | Inbox action touching the wrong household / untraceable | Inbox rows, links, external accounts, payee rules and CSV imports carry `household_id` and every statement filters on the JWT `hh` claim (foreign ids → 404). Confirm / ignore / restore / bulk / auto-match each write an `activity_events` row (`transaction.*`, `bank.*`, `import.csv`); auto-matched payments are `paid_by NULL, auto = true` and undo-able like autopay. | API `Endpoints/InboxEndpoints.cs`, `Data/`, migration `0003_imports.sql` |
 
 ## If a phone is lost or stolen
@@ -160,6 +164,16 @@ make up              # recreates api with the new keys
 Never share `VAPID_PRIVATE_KEY`; the API only ever exposes the public key
 (`GET /v1/push/vapid-public-key`). `make secrets FORCE=1` does **not** rotate
 VAPID keys — they have their own target because the blast radius is different.
+
+## Why the matcher has a key even though it has no port
+
+`matcher` is only reachable from containers on the compose network, so the key
+is defence in depth: a compromised `web` or `cloudflared` container (or any
+future service on that network) still cannot feed it data or probe it without
+`MATCHER_KEY`, which only `api` and `matcher` receive. The key protects no
+stored data, so rotating it is free: clear `MATCHER_KEY=` in `.env`, run
+`make secrets` (it fills only empty values) and `make up` restarts both with
+the new value.
 
 ## Why the API has no public port
 

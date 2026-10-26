@@ -86,6 +86,48 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "matcher: sync",
+			"type": "shell",
+			"command": "uv sync --frozen",
+			"options": { "cwd": "${workspaceFolder}/apps/matcher" },
+			"dependsOn": ["dev: write env"],
+			"presentation": { "reveal": "silent", "panel": "shared" },
+			"problemMatcher": []
+		},
+		{
+			"label": "matcher: dev",
+			"type": "shell",
+			"command": "make dev-matcher",
+			"isBackground": true,
+			"presentation": { "panel": "dedicated", "group": "dev" },
+			"problemMatcher": {
+				"owner": "python",
+				"pattern": { "regexp": "^\\s*File \"(.*)\", line (\\d+)", "file": 1, "line": 2 },
+				"background": { "activeOnStart": true, "beginsPattern": "Will watch for changes", "endsPattern": "Application startup complete" }
+			}
+		},
+		{
+			"label": "matcher: test",
+			"type": "shell",
+			"command": "uv run --frozen pytest",
+			"options": { "cwd": "${workspaceFolder}/apps/matcher" },
+			"group": "test",
+			"presentation": { "panel": "shared" },
+			"problemMatcher": []
+		},
+		{
+			"label": "matcher: lint",
+			"type": "shell",
+			"command": "uv run --frozen ruff check . && uv run --frozen ruff format --check .",
+			"options": { "cwd": "${workspaceFolder}/apps/matcher" },
+			"presentation": { "panel": "shared" },
+			"problemMatcher": {
+				"owner": "ruff",
+				"fileLocation": ["relative", "${workspaceFolder}/apps/matcher"],
+				"pattern": { "regexp": "^\\s*-->\\s+(.*):(\\d+):(\\d+)$", "file": 1, "line": 2, "column": 3, "message": 1 }
+			}
+		},
+		{
 			"label": "compose: up db",
 			"type": "shell",
 			"command": "make dev-db",
@@ -101,7 +143,7 @@
 		},
 		{
 			"label": "dev: all (db + api + web)",
-			"dependsOn": ["compose: up db", "api: watch", "web: dev"],
+			"dependsOn": ["compose: up db", "api: watch", "web: dev", "matcher: dev"],
 			"dependsOrder": "sequence",
 			"problemMatcher": []
 		}

@@ -9,9 +9,9 @@
 #   2. installs curl, git, openssl (+ ca-certificates) if missing
 #   3. installs Docker Engine + the compose plugin, starts it, adds you to the docker group
 #   4. clones (or updates) the repo into ~/couplescash
-#   5. writes .env with fresh secrets (JWT, Postgres, DATA_KEY for bank sync) and asks for your
-#      public URL + Cloudflare tunnel token
-#   6. pulls the arm64/amd64 images (or builds them if none are published)
+#   5. writes .env with fresh secrets (JWT, Postgres, DATA_KEY for bank sync, MATCHER_KEY for the
+#      fuzzy matcher) and asks for your public URL + Cloudflare tunnel token
+#   6. pulls the arm64/amd64 images — api, web, matcher (or builds them if none are published)
 #   7. generates the Web Push (VAPID) key pair with the api image, then starts the stack
 #
 # Options (flags or environment variables):
@@ -146,7 +146,7 @@ ok "package manager: $PKG"
 
 MEM_MB=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 ))
 if (( MEM_MB < 1800 )); then
-  warn "${MEM_MB} MB RAM — the stack needs ~700 MB; 2 GB is the minimum, 4 GB recommended"
+  warn "${MEM_MB} MB RAM — the stack needs ~750 MB; 2 GB is the minimum, 4 GB recommended"
 else
   ok "${MEM_MB} MB RAM"
 fi
@@ -343,6 +343,9 @@ fi
 # AES-256-GCM key for bank-sync credentials (SimpleFIN access URLs). Never regenerated on
 # re-runs: a new key would make every linked bank unreadable (docs/BANK-SYNC.md).
 [[ -n "$(get_env DATA_KEY)" ]]          || { set_env DATA_KEY "$(openssl rand -base64 32 | tr -d '\n')"; ok "generated DATA_KEY (bank sync; back up .env — losing it means re-linking banks)"; }
+# Shared key between the api and the internal fuzzy matcher (X-Matcher-Key). Generated once, never
+# regenerated on re-runs; nothing is stored under it, but both containers must agree.
+[[ -n "$(get_env MATCHER_KEY)" ]]       || { set_env MATCHER_KEY "$(openssl rand -hex 32)"; ok "generated MATCHER_KEY (api ↔ matcher)"; }
 if [[ -n "$WEB_PORT" ]]; then
   if ! [[ "$WEB_PORT" =~ ^[0-9]+$ ]] || (( WEB_PORT < 1 || WEB_PORT > 65535 )); then
     die "--port must be a number between 1 and 65535 (got '$WEB_PORT')"
@@ -429,12 +432,12 @@ else
     "${DOCKER[@]}" compose build
   elif ! "${DOCKER[@]}" compose --profile tunnel pull 2>/dev/null; then
     if [[ "${PI_PULL_ONLY:-0}" == 1 ]]; then
-      die "could not pull the images. Either CI has not published them yet, or the GHCR packages are private (GitHub → your profile → Packages → couplescash-api/web → Package settings → Change visibility → Public). Alternatively 'docker login ghcr.io' first, or re-run with --build to compile locally (15–30 min on a Pi)."
+      die "could not pull the images. Either CI has not published them yet, or the GHCR packages are private (GitHub → your profile → Packages → couplescash-api/web/matcher → Package settings → Change visibility → Public). Alternatively 'docker login ghcr.io' first, or re-run with --build to compile locally (15–30 min on a Pi)."
     fi
     warn "no published images found for this branch/arch — building locally"
     "${DOCKER[@]}" compose build
   else
-    ok "images pulled"
+    ok "images pulled (postgres, api, web, matcher)"
   fi
 fi
 
@@ -499,6 +502,7 @@ if [[ "$NO_START" != 1 ]]; then
   fi
   printf '  Settings → "Linked banks" pulls balances + transactions automatically via SimpleFIN Bridge\n'
   printf '  (%s/month, read-only; docs/BANK-SYNC.md). Prefer not to? Import CSV statements instead.\n' "\$1.50"
+  printf '  Imported transactions are matched to your bills automatically (Settings → Household → auto-match).\n'
   printf '\n'
 fi
 (( RELOGIN )) && printf '  Log out and back in (or run: newgrp docker) to use docker without sudo.\n\n'

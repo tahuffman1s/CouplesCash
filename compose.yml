@@ -1,11 +1,11 @@
 # CouplesCash — production stack for a Raspberry Pi 4 (or any Docker host).
 #
-#   make up          → db + migrate + api + web
+#   make up          → db + migrate + matcher + api + web
 #   make tunnel-up   → the same plus cloudflared (profile "tunnel")
 #
 # Only `web` publishes a port, and only on 127.0.0.1 (set WEB_BIND=0.0.0.0 in
-# .env to expose it on the LAN). The API and Postgres are reachable solely on
-# the internal compose network; the Cloudflare tunnel reaches `web` by service
+# .env to expose it on the LAN). The API, the matcher and Postgres are
+# reachable solely on the internal compose network; the Cloudflare tunnel reaches `web` by service
 # name over that same network.
 
 name: couplescash
@@ -51,6 +51,11 @@ x-api-env: &api-env
   # it means re-linking every bank (docs/BANK-SYNC.md).
   Security__DataKey: ${DATA_KEY:-}
   Sync__IntervalHours: ${SYNC_INTERVAL_HOURS:-6}
+  # Fuzzy matcher (v6, apps/matcher). Shared secret sent as X-Matcher-Key; the
+  # same MATCHER_KEY is passed to the `matcher` service. If the matcher is down
+  # or the key is empty/wrong, the API falls back to its built-in matcher.
+  Matcher__BaseUrl: http://matcher:8090
+  Matcher__Key: ${MATCHER_KEY:-}
   # Keep the .NET GC under the container limit: 0x8000000 = 128 MiB heap hard
   # limit inside a 192 MiB container. Workstation GC + tiered PGO for a Pi.
   DOTNET_GCHeapHardLimit: "0x8000000"
@@ -114,6 +119,35 @@ services:
         condition: service_healthy
 
   # -------------------------------------------------------------------------
+  # matcher — Python fuzzy matcher on :8090 (internal network only, no `ports:`)
+  # Stateless: scores transactions against bills/categories for the API and
+  # finds recurring payments. Refuses to start without MATCHER_KEY.
+  # -------------------------------------------------------------------------
+  matcher:
+    <<: *common
+    image: ${IMAGE_PREFIX:-ghcr.io/tahuffman1s}/couplescash-matcher:${IMAGE_TAG:-latest}
+    build: ./apps/matcher
+    environment:
+      MATCHER_KEY: ${MATCHER_KEY:-}
+      LOG_LEVEL: ${MATCHER_LOG_LEVEL:-INFO}
+      TZ: ${TZ:-UTC}
+    read_only: true
+    tmpfs:
+      - /tmp
+    # Idles at ~55 MB; a 5000-transaction batch peaks around 80 MB.
+    mem_limit: 96m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # -------------------------------------------------------------------------
   # api — .NET 10 Minimal API on :8080 (internal network only, no `ports:`)
   # -------------------------------------------------------------------------
   api:
@@ -133,6 +167,10 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # Started, not healthy: the API must come up even when the matcher is
+      # down (it falls back to the built-in matcher and logs a warning).
+      matcher:
+        condition: service_started
     # The aspnet base image ships neither curl nor wget, so instead of an HTTP
     # probe we check that Kestrel is listening on 8080. In /proc/net/tcp{,6}
     # the local port is hex (8080 = 0x1F90) and state 0A = LISTEN.
