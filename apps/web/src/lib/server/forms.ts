@@ -1,8 +1,8 @@
 import type { AccountType, Frequency, Kind, PayPeriod } from '#lib/types.ts';
 import { ACCOUNT_TYPES, FREQUENCIES, KINDS, PAY_PERIODS } from '#lib/types.ts';
-import type { ExpenseBody, GoalBody, HouseholdPatch, RecurringBody, TodoBody } from './api';
+import type { ExpenseBody, GoalBody, HouseholdPatch, TodoBody } from './api';
 import { parseMoney } from '#lib/utils/money.ts';
-import { addDays, isValidISODate, today } from '#lib/utils/dates.ts';
+import { isValidISODate } from '#lib/utils/dates.ts';
 
 export function str(data: FormData, key: string): string {
 	return String(data.get(key) ?? '').trim();
@@ -11,6 +11,24 @@ export function str(data: FormData, key: string): string {
 export function optional(data: FormData, key: string): string | null {
 	const v = str(data, key);
 	return v === '' ? null : v;
+}
+
+/**
+ * v6 "Bank shows it as": one hidden `bankName` input per chip, plus whatever is still typed in the
+ * chip field (`bankNameDraft`, comma separated) so it also works without JavaScript.
+ */
+export function parseBankNames(data: FormData): Parsed<string[]> {
+	const raw = [...data.getAll('bankName').map(String), ...str(data, 'bankNameDraft').split(',')]
+		.map((s) => s.trim().replace(/\s+/g, ' '))
+		.filter(Boolean);
+	const out: string[] = [];
+	for (const name of raw) {
+		if (name.length < 2 || name.length > 80)
+			return { ok: false, error: 'Bank names need 2 to 80 characters each.' };
+		if (!out.some((n) => n.toLowerCase() === name.toLowerCase())) out.push(name);
+	}
+	if (out.length > 10) return { ok: false, error: 'Up to 10 bank names per item.' };
+	return { ok: true, value: out };
 }
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -54,7 +72,8 @@ export function parseRecurringForm(data: FormData): Parsed<{
 	autoPay: boolean;
 	notes: string | null;
 	url: string | null;
-	payeeHint: string | null;
+	bankNames: string[];
+	amountVaries: boolean;
 }> {
 	const name = str(data, 'name');
 	const kind = str(data, 'kind') as Kind;
@@ -73,6 +92,8 @@ export function parseRecurringForm(data: FormData): Parsed<{
 		return { ok: false, error: 'The end date must be after the first due date.' };
 	if (url && !/^https?:\/\//i.test(url))
 		return { ok: false, error: 'Links must start with http:// or https://.' };
+	const bankNames = parseBankNames(data);
+	if (!bankNames.ok) return bankNames;
 	return {
 		ok: true,
 		value: {
@@ -87,44 +108,8 @@ export function parseRecurringForm(data: FormData): Parsed<{
 			autoPay: data.get('autoPay') === 'on',
 			notes: optional(data, 'notes'),
 			url,
-			// v4: only one-offs carry a bank payee hint
-			payeeHint: frequency === 'once' ? optional(data, 'payeeHint') : null
-		}
-	};
-}
-
-/**
- * v4 "Plan a one-off": name, amount, date, kind (expense → bill, income), account, optional
- * bank payee hint and notes. Becomes `POST /recurring` with `frequency: 'once'`.
- */
-export function parseOneOffForm(data: FormData): Parsed<RecurringBody> {
-	const name = str(data, 'name');
-	const amountCents = parseMoney(str(data, 'amount'));
-	const date = str(data, 'date');
-	const kindRaw = str(data, 'kind') || 'expense';
-	if (!name) return { ok: false, error: 'Give it a name.' };
-	if (amountCents === null || amountCents <= 0)
-		return { ok: false, error: 'Enter an amount greater than zero.' };
-	if (!isValidISODate(date)) return { ok: false, error: 'Pick the date.' };
-	if (date < addDays(today(), -7))
-		return { ok: false, error: 'A one-off can be at most a week in the past.' };
-	if (kindRaw !== 'expense' && kindRaw !== 'income' && kindRaw !== 'bill')
-		return { ok: false, error: 'Pick expense or income.' };
-	return {
-		ok: true,
-		value: {
-			name,
-			kind: kindRaw === 'income' ? 'income' : 'bill',
-			amountCents,
-			categoryId: optional(data, 'categoryId'),
-			accountId: optional(data, 'accountId'),
-			frequency: 'once',
-			anchorDate: date,
-			endDate: null,
-			autoPay: false,
-			notes: optional(data, 'notes'),
-			url: null,
-			payeeHint: optional(data, 'payeeHint')
+			bankNames: bankNames.value,
+			amountVaries: data.get('amountVaries') === 'on'
 		}
 	};
 }
@@ -153,7 +138,9 @@ export function parseWeeklyBudgetsForm(data: FormData): Parsed<{
 /** Echo submitted values back to the form on failure. */
 export function echo(data: FormData): Record<string, string> {
 	const out: Record<string, string> = {};
-	for (const [k, v] of data.entries()) if (typeof v === 'string') out[k] = v;
+	// repeated keys (one `bankName` per chip) come back newline-joined
+	for (const [k, v] of data.entries())
+		if (typeof v === 'string') out[k] = k in out ? `${out[k]}\n${v}` : v;
 	return out;
 }
 
@@ -246,6 +233,13 @@ export function parseHouseholdSettings(data: FormData): Parsed<HouseholdPatch> {
 	// v5: checkbox + marker (an unchecked box is absent from the form data)
 	if (data.has('autoIgnoreTransfersForm'))
 		patch.autoIgnoreTransfers = data.get('autoIgnoreTransfers') === 'on';
+	// v6: Off / Bills only / Everything
+	if (data.has('autoMatchLevel')) {
+		const level = str(data, 'autoMatchLevel');
+		if (level !== 'off' && level !== 'bills' && level !== 'all')
+			return { ok: false, error: 'Pick how much the app may match by itself.' };
+		patch.autoMatchLevel = level;
+	}
 	if (data.has('weeklySpend')) {
 		const raw = str(data, 'weeklySpend');
 		if (!raw) patch.weeklySpendCents = null;

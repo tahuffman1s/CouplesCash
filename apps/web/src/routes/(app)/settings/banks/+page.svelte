@@ -39,7 +39,7 @@
 
 <svelte:head><title>Linked banks · CouplesCash</title></svelte:head>
 
-<AppBar title="Linked banks" back="/settings" />
+<AppBar title="Linked banks" back="/settings#banks" />
 
 <main class="flex flex-col gap-4 px-4 pt-2">
 	<section class="card border border-base-300/60 bg-base-100 shadow-sm" aria-labelledby="how">
@@ -51,7 +51,7 @@
 				CouplesCash reads balances and transactions through <strong>SimpleFIN Bridge</strong>, a
 				read-only service built for self-hosters. It costs <strong>$1.50 a month</strong>, never
 				sees your CouplesCash login, and can't move money. Every pulled transaction lands in the
-				<a href="/inbox" class="link link-primary">Inbox</a> for you to confirm.
+				<a href="/transactions" class="link link-primary">To review</a> for you to confirm.
 			</p>
 			<ol class="list-inside list-decimal space-y-1 text-sm text-base-content/80">
 				<li>
@@ -150,7 +150,7 @@
 	{#if unlinking}
 		<p class="text-sm text-base-content/70">
 			Syncing stops and the accounts from this link disappear from this page. Transactions already
-			in the Inbox and the CouplesCash accounts you mapped to are kept.
+			in Transactions and the CouplesCash accounts you mapped to are kept.
 		</p>
 		<form method="POST" action="?/unlink" class="mt-4 flex gap-2" use:enhance>
 			<input type="hidden" name="id" value={unlinking.id} />

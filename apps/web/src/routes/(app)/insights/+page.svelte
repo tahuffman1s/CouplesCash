@@ -8,8 +8,7 @@
 	import Donut from '#lib/charts/Donut.svelte';
 	import KindBars from '#lib/charts/KindBars.svelte';
 	import BudgetList from '#lib/components/BudgetList.svelte';
-	import WeekBudgetBars from '#lib/components/WeekBudgetBars.svelte';
-	import { untrack } from 'svelte';
+	import HelperText from '#lib/components/HelperText.svelte';
 	import { formatMoney } from '#lib/utils/money.ts';
 	import { addMonths, formatMonth } from '#lib/utils/dates.ts';
 	import { FREQUENCY_SUFFIX } from '#lib/utils/labels.ts';
@@ -41,9 +40,7 @@
 	const subsTotal = $derived(
 		data.subscriptions.reduce((a: number, i: RecurringItem) => a + i.monthlyEquivalentCents, 0)
 	);
-	// v4: budgets segment – monthly rows (v2) or this week's weekly rows
-	let period = $state<'monthly' | 'weekly'>(untrack(() => data.period));
-	const showBudgets = $derived(!!data.budgets || !!data.weekBudget);
+	const showBudgets = $derived(!!data.budgets);
 	const hasData = $derived(
 		!!s && (s.byKind.some((k) => k.count > 0) || s.byCategory.some((c) => c.amountCents > 0))
 	);
@@ -56,16 +53,20 @@
 		{#if s}
 			<a
 				href="/insights/report?m={data.month}"
-				class="btn min-h-11 rounded-full btn-ghost px-3 btn-sm"
+				class="btn min-h-11 rounded-full px-4 btn-secondary btn-sm"
 				data-testid="report-link"
 			>
-				<Icon name="file-text" size={18} /> Month report
+				<Icon name="share" size={16} /> Share this month
 			</a>
 		{/if}
 	{/snippet}
 </AppBar>
 
 <main class="flex flex-col gap-4 px-4 pt-2">
+	<HelperText
+		id="insights"
+		text="Where the money goes each month, and how you're doing against your budgets."
+	/>
 	{#if !s}
 		<NoHousehold />
 	{:else}
@@ -145,45 +146,15 @@
 					aria-labelledby="budgets"
 				>
 					<div class="card-body gap-3 p-5">
-						<div class="flex items-start justify-between gap-3">
-							<div>
-								<h2 id="budgets" class="font-semibold">Budgets</h2>
-								<p class="text-xs text-base-content/60">
-									{#if period === 'monthly'}
-										Monthly amount per category · tap a row to set or change it
-									{:else}
-										This week's spending against your weekly amounts
-									{/if}
-								</p>
-							</div>
-							<div class="join" role="radiogroup" aria-label="Budget period">
-								{#each [{ v: 'monthly', l: 'Monthly' }, { v: 'weekly', l: 'Weekly' }] as const as o (o.v)}
-									<button
-										type="button"
-										role="radio"
-										aria-checked={period === o.v}
-										class="btn join-item min-h-10 px-3 btn-sm {period === o.v
-											? 'btn-neutral'
-											: 'border border-base-300 btn-ghost'}"
-										onclick={() => (period = o.v)}
-									>
-										{o.l}
-									</button>
-								{/each}
-							</div>
+						<div>
+							<h2 id="budgets" class="font-semibold">Monthly budgets</h2>
+							<p class="text-xs text-base-content/60">
+								Monthly amount per category · tap a row to set or change it. Weekly budgets are on
+								the <a href="/week" class="link link-primary">Week</a>.
+							</p>
 						</div>
-						{#if period === 'monthly'}
-							{#if data.budgets}
-								<BudgetList budgets={data.budgets} month={data.month} />
-							{:else}
-								<p class="text-sm text-base-content/60">
-									Monthly budgets are unavailable right now.
-								</p>
-							{/if}
-						{:else if data.weekBudget}
-							<WeekBudgetBars budget={data.weekBudget} history={false} />
-						{:else}
-							<p class="text-sm text-base-content/60">Weekly budgets are unavailable right now.</p>
+						{#if data.budgets}
+							<BudgetList budgets={data.budgets} month={data.month} />
 						{/if}
 					</div>
 				</section>
@@ -270,20 +241,5 @@
 				</section>
 			{/if}
 		{/if}
-		<a
-			href="/transfers?month={data.month}"
-			class="card border border-base-300/60 bg-base-100 text-sm shadow-sm"
-			data-testid="transfers-link"
-		>
-			<div class="card-body flex-row items-center gap-3 px-4 py-3">
-				<Icon name="arrow-left-right" size={20} class="text-info" />
-				<span class="flex-1"
-					>Transfers between your accounts <span class="text-base-content/60"
-						>(never counted as spending)</span
-					></span
-				>
-				<Icon name="chevron-right" size={18} class="text-base-content/40" />
-			</div>
-		</a>
 	{/if}
 </main>

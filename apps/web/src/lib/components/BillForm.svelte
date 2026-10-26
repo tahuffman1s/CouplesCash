@@ -3,8 +3,9 @@
 	import type { Account, Category, Frequency, Kind, RecurringItem } from '#lib/types.ts';
 	import { FREQUENCIES, KINDS } from '#lib/types.ts';
 	import { FREQUENCY_LABEL, KIND_LABEL, monthlyEquivalent } from '#lib/utils/labels.ts';
-	import { centsToInput, formatMoney, parseMoney } from '#lib/utils/money.ts';
+	import { centsToInput, currencySymbol, formatMoney, parseMoney } from '#lib/utils/money.ts';
 	import { today } from '#lib/utils/dates.ts';
+	import BankNamesInput from './BankNamesInput.svelte';
 
 	let {
 		item,
@@ -77,7 +78,7 @@
 		<label class="form-control">
 			<span class="label-text mb-1 text-sm font-medium">Amount</span>
 			<div class="input-bordered input flex min-h-12 w-full items-center gap-2">
-				<span class="text-base-content/50">$</span>
+				<span class="text-base-content/50">{currencySymbol()}</span>
 				<input
 					name="amount"
 					type="text"
@@ -165,25 +166,26 @@
 		</label>
 	</div>
 
-	{#if frequency === 'once'}
-		<label class="form-control">
-			<span class="label-text mb-1 text-sm font-medium"
-				>Bank shows it as <span class="text-base-content/50">(optional)</span></span
-			>
-			<input
-				name="payeeHint"
-				type="text"
-				maxlength="80"
-				autocapitalize="characters"
-				class="input-bordered input min-h-12 w-full"
-				placeholder="JIFFY LUBE"
-				defaultValue={values?.payeeHint ?? item?.payeeHint ?? ''}
-			/>
-			<span class="label-text-alt mt-1 text-base-content/60">
-				The payee on your statement, so it reconciles itself when the transaction clears.
-			</span>
-		</label>
-	{/if}
+	<BankNamesInput
+		names={values?.bankName !== undefined
+			? values.bankName.split('\n').filter(Boolean)
+			: (item?.bankNames ?? (item?.payeeHint ? [item.payeeHint] : []))}
+		learned={item?.bankNamesLearned ?? []}
+		itemId={item?.id ?? null}
+		placeholder={kind === 'income' ? 'ACME PAYROLL' : 'NETFLIX.COM'}
+	/>
+
+	<label class="label cursor-pointer justify-start gap-3 px-0">
+		<input
+			type="checkbox"
+			name="amountVaries"
+			class="toggle toggle-secondary"
+			defaultChecked={values ? values.amountVaries === 'on' : (item?.amountVaries ?? false)}
+		/>
+		<span class="label-text"
+			>Varies each time <span class="text-base-content/55">(utilities, card payments)</span></span
+		>
+	</label>
 
 	{#if kind !== 'income'}
 		<label class="label cursor-pointer justify-start gap-3 px-0">

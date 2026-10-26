@@ -10,13 +10,12 @@ test('notifications and passkeys degrade gracefully when the server has neither'
 	await expect(page.getByTestId('passkey-login')).toHaveCount(0);
 
 	await register(page);
-	await page.goto('/settings');
-	await page.getByRole('link', { name: /Notifications/ }).click();
-	await expect(page).toHaveURL(/\/settings\/notifications$/);
+	// notifications live inline in Settings › You; the old URL lands there
+	await page.goto('/settings/notifications');
+	await expect(page).toHaveURL(/\/settings#you$/);
 	await expect(page.getByText("Notifications aren't set up yet")).toBeVisible();
 	await expect(page.getByTestId('push-not-configured')).toBeVisible();
 
-	await page.goto('/settings');
 	await page.getByRole('link', { name: /Passkeys/ }).click();
 	await expect(page).toHaveURL(/\/settings\/passkeys$/);
 	await expect(page.getByTestId('passkeys-disabled')).toBeVisible();

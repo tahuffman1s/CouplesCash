@@ -25,7 +25,10 @@ test('typed code join links two accounts', async ({ browser }) => {
 	await pageB.getByLabel("Partner's Couple Code").fill(code.toLowerCase());
 	await pageB.getByRole('button', { name: 'Join household' }).click();
 
-	await expect(pageB).toHaveURL(/\/couple\?joined=1$/);
+	// joining lands on the Week; the couple page names the household
+	await expect(pageB).toHaveURL(/\/week\?joined=1$/);
+	await expect(pageB.getByText('Welcome to the household')).toBeVisible();
+	await pageB.goto('/couple');
 	await expect(pageB.getByRole('heading', { name: 'Test House' })).toBeVisible();
 	await expect(pageB.getByText(/Linked since/)).toBeVisible();
 

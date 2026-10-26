@@ -7,20 +7,13 @@
 	let { data, form }: PageProps = $props();
 	let submitting = $state(false);
 	const values = $derived(
-		form?.values ??
-			(data.kind || data.frequency || data.anchor
-				? {
-						...(data.kind ? { kind: data.kind } : {}),
-						...(data.frequency ? { frequency: data.frequency } : {}),
-						...(data.anchor ? { anchorDate: data.anchor } : {})
-					}
-				: undefined)
+		form?.values ?? (Object.keys(data.prefill).length ? data.prefill : undefined)
 	);
 </script>
 
 <svelte:head><title>New bill · CouplesCash</title></svelte:head>
 
-<AppBar title="Add recurring item" back="/bills" />
+<AppBar title="Add a bill, income or one-off" back="/bills" />
 
 <main class="px-4 pt-2">
 	<form

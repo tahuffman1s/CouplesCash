@@ -114,13 +114,21 @@ export function isSystemActivity(kind: string): boolean {
 		kind === 'occurrence.autopaid' ||
 		kind === 'bank.synced' ||
 		kind === 'bank.error' ||
-		kind === 'transaction.automatched'
+		kind === 'transaction.automatched' ||
+		kind === 'transaction.autocategorized' ||
+		kind === 'transaction.posted' ||
+		kind === 'transaction.dropped' ||
+		kind === 'transfer.auto'
 	);
 }
 
 /** Who the "system" is for a scheduler event: the autopay job or the bank sync. */
 export function systemActorLabel(kind: string): string {
-	return kind.startsWith('bank.') || kind.startsWith('transaction.') ? 'Bank sync' : 'Autopay';
+	if (kind === 'transaction.automatched' || kind === 'transaction.autocategorized')
+		return 'Matching';
+	return kind.startsWith('bank.') || kind.startsWith('transaction.') || kind.startsWith('transfer.')
+		? 'Bank sync'
+		: 'Autopay';
 }
 
 /** Human label for an activity actor: the person's name, or the system job for scheduler events. */
@@ -141,7 +149,10 @@ export function activityKindIcon(kind: string): string | null {
 		case 'transaction.restored':
 			return 'undo-2';
 		case 'transaction.automatched':
+		case 'transaction.autocategorized':
 			return 'sparkles';
+		case 'bill_suggestion.dismissed':
+			return 'circle-minus';
 		default:
 			return null;
 	}

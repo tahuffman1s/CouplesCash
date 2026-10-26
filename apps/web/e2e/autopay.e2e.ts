@@ -1,22 +1,25 @@
 import { expect, test } from '@playwright/test';
 import { MOCK_API, registerWithHousehold, todayIso } from './helpers';
 
-test('autopay: scheduler marks the bill, UI shows Auto-paid with Undo', async ({ page }) => {
+test('autopay: scheduler marks the bill, the week and calendar show it with Undo', async ({
+	page
+}) => {
 	await registerWithHousehold(page);
 	const today = todayIso();
 
 	await page.goto('/bills/new');
-	await page.getByLabel('Name').fill('Rent');
+	await page.getByLabel('Name', { exact: true }).fill('Rent');
 	await page.getByLabel('Amount').fill('1850');
 	await page.getByLabel('First due date').fill(today);
 	await page.getByLabel('Paid automatically (auto-pay)').check();
 	await page.getByRole('button', { name: 'Save', exact: true }).click();
 	await expect(page).toHaveURL(/\/bills\/[0-9a-f-]+/);
 
-	// unpaid autopay rows carry an Autopay badge
-	await page.goto('/');
-	await expect(page.getByText('Autopay', { exact: true })).toBeVisible();
-	await expect(page.getByTestId('autopay-banner')).toHaveCount(0);
+	// unpaid autopay rows carry an Autopay badge and read Planned
+	await page.goto('/week');
+	const row = page.getByTestId('occurrence-row').filter({ hasText: 'Rent' });
+	await expect(row.getByText('Autopay', { exact: true })).toBeVisible();
+	await expect(row.getByTestId('status-chip')).toHaveText('Planned');
 
 	// simulate the background job
 	// (when the web is pointed at the real API the mock knows nothing about this
@@ -26,15 +29,12 @@ test('autopay: scheduler marks the bill, UI shows Auto-paid with Undo', async ({
 	const { marked } = (await res.json()) as { marked: number };
 	test.skip(marked === 0, 'scheduler fixture only exists in the mock API');
 
-	// dashboard banner with Undo
 	await page.reload();
-	const banner = page.getByTestId('autopay-banner');
-	await expect(banner).toContainText('Rent');
-	await expect(banner).toContainText('auto-paid');
-	await expect(banner).toContainText('$1,850.00');
+	await expect(row.getByTestId('status-chip')).toHaveText('Paid');
+	await expect(row).toContainText('Auto-paid');
 
-	// calendar: Auto-paid + Undo → unpaid again
-	await page.goto('/calendar');
+	// Bills › Calendar: Auto-paid + Undo → unpaid again
+	await page.goto('/bills?view=calendar');
 	await expect(page.getByTestId('autopay-note')).toBeVisible();
 	await page.locator(`[data-date="${today}"]`).click();
 	const dialog = page.getByRole('dialog');

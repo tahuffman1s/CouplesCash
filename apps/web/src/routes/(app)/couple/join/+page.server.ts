@@ -26,6 +26,6 @@ export const actions: Actions = {
 			if (isApiError(e, 409)) return fail(409, { error: 'You are already part of a household.' });
 			return fail(500, { error: 'Could not join right now.' });
 		}
-		redirect(303, '/couple?joined=1');
+		redirect(303, '/week?joined=1');
 	}
 };

@@ -87,7 +87,7 @@
 
 <svelte:head><title>Passkeys · CouplesCash</title></svelte:head>
 
-<AppBar title="Passkeys" back="/settings" />
+<AppBar title="Passkeys" back="/settings#you" />
 
 <main class="flex flex-col gap-4 px-4 pt-2">
 	{#if !data.config.enabled}

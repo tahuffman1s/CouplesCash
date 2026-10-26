@@ -5,18 +5,18 @@ this app; the SvelteKit server (BFF) holds the auth cookies and proxies to the .
 
 ## Scripts
 
-| Command          | What it does                                                                                           |
-| ---------------- | ------------------------------------------------------------------------------------------------------ |
-| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                                     |
-| `pnpm build`     | Production build with `adapter-node` into `build/`                                                     |
-| `pnpm preview`   | Serve the production build on http://localhost:4173                                                    |
-| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                                        |
-| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                                   |
-| `pnpm lint`      | Prettier check + ESLint                                                                                |
-| `pnpm format`    | Prettier write                                                                                         |
-| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money, dates, pay period, push, codes, CSV, week, transactions) |
-| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                                         |
-| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                                     |
+| Command          | What it does                                                                                                      |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                                                |
+| `pnpm build`     | Production build with `adapter-node` into `build/`                                                                |
+| `pnpm preview`   | Serve the production build on http://localhost:4173                                                               |
+| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                                                   |
+| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                                              |
+| `pnpm lint`      | Prettier check + ESLint                                                                                           |
+| `pnpm format`    | Prettier write                                                                                                    |
+| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money, dates, pay period, push, codes, CSV, week, transactions, quick add) |
+| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                                                    |
+| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                                                |
 
 ## Environment variables
 
@@ -29,6 +29,46 @@ Declared in `src/env.ts` (`defineEnvVars`). Copy `.env.example` to `.env` for lo
 | `PUBLIC_APP_NAME` | `CouplesCash`           | Display name; available in the browser via `$app/env/public`.                                                                      |
 | `PORT` / `HOST`   | `3000` / `0.0.0.0`      | adapter-node runtime.                                                                                                              |
 | `BODY_SIZE_LIMIT` | `1M` (Dockerfile)       | adapter-node request body cap.                                                                                                     |
+
+## v6 — five tabs, one sentence, one tap
+
+PLAN-V6 §4–§5. The app is organised so every tab has one job:
+
+| Tab              | Route           | Job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Week** (home)  | `/week`         | "Left this week" hero, Available / Pending / Still to pay / Income to come, "Next payday Fri, Nov 6 · +$3,200.00" (when a pay period is set), the day list (Planned · Paid · Late · Pending; pending bank rows are listed on their day), Found bills, the weekly budget, a "N to review" banner (or "All caught up"), and the first-run checklist (accounts or bank → bills → partner; each step ticks itself, the card goes when all three are done).                                                                                                           |
+| **Transactions** | `/transactions` | **To review** (`GET /inbox?status=pending`, one-tap `ReviewRow`: the big button says the suggestion — "It's Rent", "Groceries", "Transfer", "Choose…"; "Something else" opens `TransactionSheet`; swipe right = the big button, swipe left = Ignore, both with an Undo toast; "Do all suggestions"), then **Pending** pinned (every account, account name + badge), then posted rows by day (`GET /transactions`, account chips, debounced search, "auto" mark + `matchDetail.reason`). The tab badge is the to-review count (`src/lib/state/review.svelte.ts`). |
+| **Bills**        | `/bills`        | List ⇄ Calendar (`?view=calendar&m=`, `CalendarView.svelte`), chips All · Bills · Subscriptions · Income · One-offs, Found bills.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **Money**        | `/accounts`     | Net worth, accounts with "N pending · −$X" (→ the account's Pending filter), Pending grouped by account (`GET /pending`, `#pending`), Goals (`#goals`), "Moved between accounts" (→ `/transfers`).                                                                                                                                                                                                                                                                                                                                                               |
+| **More**         | `/more`         | Insights (monthly budgets only, "Share this month" → the report), To pay, Activity, Settings.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+
+- **Quick add** (`QuickAddSheet.svelte`, the **+** on Week, Bills and Transactions): one text field parsed
+  by `src/lib/utils/quickadd.ts` (pure, ~85 vitest cases) into a live preview with tappable chips (kind,
+  amount + varies, how often, date, category, account, autopay). Add posts the corrected preview to
+  `?/quickAdd` (`src/lib/server/quickadd.ts`, which can also parse the raw sentence itself) →
+  `POST /recurring` with `bankNames = [name]`. "Twice a month" / "every 6 months" have no API frequency
+  and are saved as two monthly / two yearly items. "More options" opens `/bills/new` prefilled; "Already
+  spent?" opens `/expenses/new` prefilled.
+- **Bank names**: `BankNamesInput.svelte` on the bill form (all kinds; one-offs use the same form) — chips
+  posted as `bankName`, learned names listed with a "learned" label and forgotten via
+  `DELETE /recurring/{id}/bank-names/learned/{index}`; plus an "Amount varies" toggle.
+- **Settings** is one page (`/settings#you|#household|#banks`): name, theme, notifications inline
+  (`NotificationsCard.svelte`), passkeys link, password; household name / currency / week start / default
+  account, pay period, weekly target, partner, auto-match level (Off / Bills only / Everything) and
+  auto-ignore transfers; linked banks, CSV import, matcher status (+ `note`) and "Re-check matches now"
+  (`POST /inbox/rematch`, 429 → "Checked a moment ago").
+- **Vocabulary**: Planned, Paid, Late, To review, Pending, Matched, Left this week. Flows are signed and
+  coloured (`signedMoney` / `Amount.svelte`: "−$12.49", "+$3,200.00"); balances are not. Each main screen
+  has a one-line dismissible helper (`HelperText.svelte`, remembered per device in localStorage).
+- **Redirects** (`+server.ts`): `/` → `/week`, `/inbox` → `/transactions`, `/calendar` →
+  `/bills?view=calendar` (keeps `m`), `/payperiod` → `/week`, `/pending` → `/accounts#pending`, `/goals` →
+  `/accounts#goals`, `/settings/household` → `/settings#household`, `/settings/notifications` →
+  `/settings#you`, `/bills?tab=expenses` → `/transactions`. Login, register, passkey sign-in and couple
+  join land on `/week`; the manifest `start_url` is `/week`.
+- **Removed**: the dashboard, `PaydayCard`, `WeekCard`, the pay-period page, the standalone calendar and
+  inbox pages, the goals list page, the quick-add FAB, `OneOffForm`, `InboxRow`, `SuggestionChip`, the
+  separate household / notification settings pages and the Monthly ⇄ Weekly toggle on Insights. The
+  sections below describe v1–v5 as built; where they mention those screens, the table above wins.
 
 ## Architecture notes
 
@@ -143,7 +183,17 @@ id and replaces the pending row in place, keeping its confirmation), `drop` (the
 transfer, auto-ignored by the learned rule). The mock implements every v5 route
 (`/accounts/{id}/transactions`, candidates / match / transfer / unmatch, `from-transaction`,
 payments, occurrence candidates / link, `/transfers`) plus `availableCents` / `pendingOutCents`.
-`e2e/transactions.e2e.ts` covers those flows and skips itself against a real API. If a Chromium is
+`e2e/transactions.e2e.ts` covers those flows and skips itself against a real API. **v6**: every
+v6 route and field — `/transactions`, `/pending` (unmapped bank accounts group with `accountId: null`),
+`/bill-suggestions` + accept / dismiss (409 once handled), `/inbox/rematch` (1/min), `/matcher/status`,
+`bankNames` / `bankNamesLearned` (upper-cased) / `amountVaries`, `autoMatchLevel`, `matchScore` /
+`matchDetail`, week `pendingOutCents`. Its matcher scores names by significant-token overlap, so a bank
+name "Oakwood" auto-matches "ACH DEBIT OAKWOOD PROPERTY MGMT RENT"; it re-scores To review whenever a bill is
+created or edited, never auto-applies a row a person sent back (`auto_blocked`), and learns the bank's name
+on every confirmed match. Extra phases: `?phase=netflix` (three monthly NETFLIX.COM and SPOTIFY USA charges
+→ two found bills) and `?phase=oakwood` (the landlord's ACH line). The v6 specs (`v6-home`, `quickadd`,
+`review`, `money`, `bank-names`, `found-bills`, `settings-v6`) wait on `html[data-ready]` (set by the (app)
+layout on mount) instead of sleeping. If a Chromium is
 preinstalled under `PLAYWRIGHT_BROWSERS_PATH` (as in CI containers) the config uses it even when
 its revision differs from the one Playwright expects; set `CHROMIUM_PATH` to point at a specific
 binary, or run `pnpm exec playwright install chromium` locally.

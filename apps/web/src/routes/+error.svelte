@@ -10,7 +10,7 @@
 			title={page.status === 404 ? 'Page not found' : 'Something went wrong'}
 			body={page.error?.message ?? 'Please try again.'}
 			cta="Back to home"
-			href="/"
+			href="/week"
 		/>
 	</div>
 </main>

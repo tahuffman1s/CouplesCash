@@ -184,7 +184,11 @@
 
 <svelte:head><title>Import CSV · CouplesCash</title></svelte:head>
 
-<AppBar title="Import CSV" back="/more" subtitle={step === 'map' ? filename : undefined} />
+<AppBar
+	title="Import CSV"
+	back="/settings#banks"
+	subtitle={step === 'map' ? filename : undefined}
+/>
 
 <main class="flex flex-col gap-4 px-4 pt-2">
 	{#if data.accounts.length === 0}
@@ -447,12 +451,12 @@
 					</div>
 				</div>
 				<p class="text-sm text-base-content/70">
-					{result.inboxPending} transaction{result.inboxPending === 1 ? '' : 's'} now wait in the inbox.
+					{result.inboxPending} transaction{result.inboxPending === 1 ? '' : 's'} now wait in To review.
 					Each one gets a suggested category or bill; nothing changes until you confirm.
 				</p>
 				<div class="flex gap-2">
-					<a href="/inbox" class="btn min-h-12 flex-1 rounded-full btn-primary">
-						<Icon name="inbox" size={18} /> Review in inbox
+					<a href="/transactions" class="btn min-h-12 flex-1 rounded-full btn-primary">
+						<Icon name="inbox" size={18} /> Review them
 					</a>
 					<button type="button" class="btn min-h-12 rounded-full btn-ghost" onclick={reset}
 						>Import another</button

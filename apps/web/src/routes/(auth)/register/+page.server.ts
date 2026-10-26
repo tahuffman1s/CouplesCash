@@ -40,6 +40,6 @@ export const actions: Actions = {
 			}
 			return fail(503, { ...values, error: 'Could not reach the server. Try again shortly.' });
 		}
-		redirect(303, '/');
+		redirect(303, '/week');
 	}
 };

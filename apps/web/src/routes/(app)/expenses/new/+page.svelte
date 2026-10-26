@@ -10,7 +10,7 @@
 
 <svelte:head><title>New expense · CouplesCash</title></svelte:head>
 
-<AppBar title="Add an expense" back="/bills?tab=expenses" />
+<AppBar title="Add an expense" back="/transactions" />
 
 <main class="px-4 pt-2">
 	<form
@@ -29,7 +29,7 @@
 				categories={data.categories}
 				accounts={data.accounts}
 				defaultAccountId={data.household?.defaultAccountId ?? null}
-				values={form?.values}
+				values={form?.values ?? data.prefill}
 				error={form?.error}
 			/>
 			<button class="btn mt-2 min-h-12 rounded-full btn-primary" disabled={submitting}>

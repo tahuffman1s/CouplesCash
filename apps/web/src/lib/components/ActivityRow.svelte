@@ -21,11 +21,11 @@
 				return id ? `/accounts/${id}` : '/accounts';
 			case 'recurring':
 			case 'occurrence':
-				return id ? `/bills/${id}` : '/calendar';
+				return id ? `/bills/${id}` : '/bills?view=calendar';
 			case 'expense':
-				return id ? `/expenses/${id}` : '/bills';
+				return id ? `/expenses/${id}` : '/transactions';
 			case 'goal':
-				return id ? `/goals/${id}` : '/goals';
+				return id ? `/goals/${id}` : '/accounts#goals';
 			case 'todo':
 				return '/todos';
 			case 'budget':
@@ -38,7 +38,7 @@
 				return '/settings/banks';
 			case 'transaction':
 			case 'inbox':
-				return '/inbox';
+				return '/transactions';
 			case 'csv_import':
 			case 'import':
 				return '/imports/csv';

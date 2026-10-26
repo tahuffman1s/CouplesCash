@@ -1,9 +1,9 @@
 {
 	"name": "CouplesCash",
 	"short_name": "CouplesCash",
-	"description": "See your shared money at a glance: balances, bills, subscriptions and a calendar for two.",
+	"description": "Your shared money for two: what is left this week, every bill, every transaction.",
 	"id": "/",
-	"start_url": "/",
+	"start_url": "/week",
 	"scope": "/",
 	"display": "standalone",
 	"orientation": "portrait",
@@ -20,6 +20,6 @@
 	],
 	"shortcuts": [
 		{ "name": "Add a bill", "url": "/bills/new", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
-		{ "name": "Calendar", "url": "/calendar", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+		{ "name": "Transactions", "url": "/transactions", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
 	]
 }

@@ -21,6 +21,13 @@
  * `payeeHint` (seeds an item payee rule), `weekSummaryEnabled`, occurrence `varianceCents` + `status`,
  * and the wider matcher window for one-offs (±7 days, max(15 %, $10)).
  *
+ * v6: bank names (+ learned names, `DELETE …/bank-names/learned/{i}`), `amountVaries`, `autoMatchLevel`
+ * with a token-overlap name score ("Oakwood" ≈ "ACH DEBIT OAKWOOD PROPERTY MGMT RENT"), `matchScore` /
+ * `matchDetail`, rematch on every bill create/edit and `POST /inbox/rematch`, `/transactions`,
+ * `/pending`, `/bill-suggestions` (+ accept / dismiss), `/matcher/status`, week `pendingOutCents`.
+ *   POST /__mock/bank-sync?phase=netflix   3 monthly NETFLIX.COM + 3 SPOTIFY USA charges → two found bills
+ *   POST /__mock/bank-sync?phase=oakwood   an "ACH DEBIT OAKWOOD PROPERTY MGMT RENT" line (−1,850.00)
+ *
  * v5: the setup token `demo-v5` (see `demoBridgeV5`), the pending lifecycle (`reconcileAccount`),
  * transfers (auto-ignored pairs, keyword / learned one-sided transfers, `autoIgnoreTransfers`),
  * `/accounts/{id}/transactions`, candidates / match / transfer / unmatch, `/recurring/from-transaction`,
@@ -55,6 +62,8 @@ type Household = {
 	payAnchorDate: string | null;
 	weeklySpendCents: number | null;
 	autoIgnoreTransfers: boolean;
+	/** v6 */
+	autoMatchLevel: 'off' | 'bills' | 'all';
 };
 type Account = {
 	id: string;
@@ -94,7 +103,10 @@ type Item = {
 	autoPay: boolean;
 	notes: string | null;
 	url: string | null;
-	payeeHint: string | null;
+	/** v6: "Bank shows it as" (user) + names learned from confirmed matches; payeeHint = bankNames[0] */
+	bankNames: string[];
+	bankNamesLearned: string[];
+	amountVaries: boolean;
 	createdAt: string;
 	updatedAt: string;
 	archived: boolean;
@@ -263,6 +275,34 @@ type Tx = {
 	transferAuto: boolean;
 	/** the other side the matcher found while auto-ignore was off (a suggestion, not a pairing) */
 	suggestedPeerId: string | null;
+	/** v6 */
+	matchScore: number | null;
+	matchDetail: MatchDetail | null;
+	/** v6: a person sent it back to review (restore / unmatch / unpaid) → never auto-applied again */
+	autoBlocked?: boolean;
+};
+type MatchDetail = {
+	name: number;
+	amount: number;
+	date: number;
+	reason: string;
+	engine: 'fuzzy' | 'builtin';
+};
+type BillSuggestionRec = {
+	id: string;
+	householdId: string;
+	name: string;
+	kind: string;
+	amountCents: number;
+	amountVaries: boolean;
+	frequency: string;
+	nextDue: string;
+	bankName: string;
+	sampleIds: string[];
+	score: number;
+	lastSeen: string;
+	status: 'open' | 'accepted' | 'dismissed';
+	fingerprint: string;
 };
 type PayeeRule = {
 	householdId: string;
@@ -327,6 +367,9 @@ const txs = new Map<string, Tx>();
 const payeeRules = new Map<string, PayeeRule>(); // `${hh}:${payeeNorm}`
 const csvImports = new Map<string, CsvImportRec>();
 const bridge = new Map<string, BridgeAccount[]>(); // by bank link id
+const billSuggestions = new Map<string, BillSuggestionRec>();
+const lastRematch = new Map<string, number>(); // by household (1/min)
+const matcherRuns = new Map<string, { at: string; autoMatched: number }>(); // by household
 
 const PORT = Number(process.env.MOCK_API_PORT ?? 8099);
 const ACCESS_TTL = Number(process.env.MOCK_ACCESS_TTL ?? 900);
@@ -374,7 +417,8 @@ function householdView(h: Household | null) {
 		payPeriod: h.payPeriod,
 		payAnchorDate: h.payAnchorDate,
 		weeklySpendCents: h.weeklySpendCents,
-		autoIgnoreTransfers: h.autoIgnoreTransfers
+		autoIgnoreTransfers: h.autoIgnoreTransfers,
+		autoMatchLevel: h.autoMatchLevel
 	};
 }
 
@@ -424,7 +468,8 @@ function createHousehold(name: string, owner: User): Household {
 		payPeriod: 'monthly',
 		payAnchorDate: null,
 		weeklySpendCents: null,
-		autoIgnoreTransfers: true
+		autoIgnoreTransfers: true,
+		autoMatchLevel: 'all'
 	};
 	households.set(h.id, h);
 	owner.householdId = h.id;
@@ -578,27 +623,89 @@ function itemView(i: Item) {
 		nextDueDate: nextDue(i),
 		createdAt: i.createdAt,
 		updatedAt: i.updatedAt,
-		payeeHint: i.payeeHint
+		payeeHint: i.bankNames[0] ?? null,
+		bankNames: i.bankNames,
+		bankNamesLearned: i.bankNamesLearned,
+		amountVaries: i.amountVaries
 	};
 }
-/** v4: a payee hint seeds an item payee rule so the first bank match auto-applies; clearing removes it. */
-function applyPayeeHint(i: Item, hint: string | null) {
-	// drop the rule the previous hint created (only if it still points at this item)
+/**
+ * v4 payee hint → v6 bank names: every bank name seeds an item payee rule so the first bank match
+ * auto-applies; names that go away drop the rules they created (only if they still point here).
+ */
+function applyBankNames(i: Item, names: string[]) {
 	for (const [key, rule] of payeeRules)
 		if (rule.householdId === i.householdId && rule.itemId === i.id && rule.hits <= 1)
 			payeeRules.delete(key);
-	i.payeeHint = hint && hint.trim() ? hint.trim().slice(0, 80) : null;
-	if (!i.payeeHint) return;
-	const norm = normPayee(i.payeeHint);
-	if (!norm) return;
-	payeeRules.set(`${i.householdId}:${norm}`, {
-		householdId: i.householdId,
-		payeeNorm: norm,
-		categoryId: null,
-		itemId: i.id,
-		hits: 1
-	});
+	i.bankNames = names;
+	for (const name of names) {
+		const norm = normPayee(name);
+		if (!norm) continue;
+		payeeRules.set(`${i.householdId}:${norm}`, {
+			householdId: i.householdId,
+			payeeNorm: norm,
+			categoryId: null,
+			itemId: i.id,
+			hits: 1
+		});
+	}
 }
+/** v6 body → bank names: `bankNames` (≤ 10, 2–80 chars) or the v4 `payeeHint`. Error text on a bad list. */
+function bankNamesFrom(b: Record<string, unknown>, fallback: string[]): string[] | string {
+	if (Array.isArray(b.bankNames)) {
+		const out: string[] = [];
+		for (const raw of b.bankNames) {
+			const name = String(raw ?? '').trim();
+			if (name.length < 2 || name.length > 80) return 'Each bank name needs 2 to 80 characters';
+			if (!out.some((n) => n.toLowerCase() === name.toLowerCase())) out.push(name);
+		}
+		if (out.length > 10) return 'Up to 10 bank names';
+		return out;
+	}
+	if ('payeeHint' in b) {
+		const hint = String(b.payeeHint ?? '').trim();
+		return hint ? [hint.slice(0, 80)] : [];
+	}
+	return fallback;
+}
+/** v6: remember what the bank called a confirmed match (dedupe, max 10 together, user names stay). */
+function learnBankName(i: Item, t: Tx) {
+	const norm = normPayee(t.payee ?? t.description);
+	if (norm.length < 2) return;
+	const known = [...i.bankNames.map(normPayee), ...i.bankNamesLearned.map(normPayee)];
+	if (known.includes(norm)) return;
+	// the API stores the matcher's normal form, upper-cased ("OAKWOOD PROPERTY MGMT RENT")
+	i.bankNamesLearned.push(norm.toUpperCase().slice(0, 80));
+	while (i.bankNames.length + i.bankNamesLearned.length > 10 && i.bankNamesLearned.length)
+		i.bankNamesLearned.shift();
+}
+/** v6 fuzzy-ish name score (0–1): significant-token overlap coefficient. */
+function tokenOverlap(a: string, b: string): number {
+	const ta = new Set(
+		normPayee(a)
+			.split(' ')
+			.filter((w) => w.length >= 2)
+	);
+	const tb = new Set(
+		normPayee(b)
+			.split(' ')
+			.filter((w) => w.length >= 2)
+	);
+	if (!ta.size || !tb.size) return 0;
+	let hit = 0;
+	for (const w of ta) if (tb.has(w)) hit++;
+	return hit / Math.min(ta.size, tb.size);
+}
+/** Best name score of a transaction against an item's bank names (user + learned), and its name. */
+function nameScores(i: Item, t: Pick<Tx, 'description' | 'payee'>) {
+	const text = t.payee ? `${t.payee} ${t.description}` : t.description;
+	const bank = Math.max(
+		0,
+		...[...i.bankNames, ...i.bankNamesLearned].map((n) => tokenOverlap(n, text))
+	);
+	return { bank, any: Math.max(bank, tokenOverlap(i.name, text)) };
+}
+
 function occurrence(i: Item, date: string) {
 	const c = i.categoryId ? categories.get(i.categoryId) : undefined;
 	const a = i.accountId ? accounts.get(i.accountId) : undefined;
@@ -1172,7 +1279,22 @@ function weekViewFor(hh: string, start: string) {
 		projected: start > today,
 		days,
 		overdue,
-		budget: weekBudgetFor(hh, start)
+		budget: weekBudgetFor(hh, start),
+		// v6: pending outflows on spendable accounts
+		pendingOutCents: [...txs.values()]
+			.filter((t) => {
+				const a = t.accountId ? accounts.get(t.accountId) : undefined;
+				return (
+					t.householdId === hh &&
+					t.pending &&
+					t.amountCents < 0 &&
+					(t.status === 'pending' || t.status === 'confirmed') &&
+					!!a &&
+					!a.archived &&
+					isLiquid(a)
+				);
+			})
+			.reduce((sum, t) => sum - t.amountCents, 0)
 	};
 }
 
@@ -1290,6 +1412,33 @@ function demoBridgeV5(): BridgeAccount[] {
 }
 /** `?phase=` for POST /__mock/bank-sync: edits a v5 Bridge before the sync runs. */
 function applyPhase(data: BridgeAccount[], phase: string) {
+	// v6 phases work on either demo data set
+	const anyChecking = data.find((a) => a.id === 'v5-checking' || a.id === 'demo-checking');
+	if (anyChecking && phase === 'netflix') {
+		// three monthly NETFLIX.COM and SPOTIFY USA charges → two "Found bills" suggestions
+		for (const [n, id, amount, description] of [
+			[61, 'v6-netflix-1', -1549, 'NETFLIX.COM'],
+			[31, 'v6-netflix-2', -1549, 'NETFLIX.COM'],
+			[1, 'v6-netflix-3', -1549, 'NETFLIX.COM'],
+			[62, 'v6-spotify-1', -1199, 'SPOTIFY USA'],
+			[32, 'v6-spotify-2', -1199, 'SPOTIFY USA'],
+			[2, 'v6-spotify-3', -1199, 'SPOTIFY USA']
+		] as const)
+			if (!anyChecking.transactions.some((t) => t.id === id))
+				anyChecking.transactions.push({ id, posted: daysAgo(n), amount, description });
+		return;
+	}
+	if (anyChecking && phase === 'oakwood') {
+		// the landlord's ACH line: fuzzy-matches a bill whose bank name is "Oakwood"
+		if (!anyChecking.transactions.some((t) => t.id === 'v6-oakwood'))
+			anyChecking.transactions.push({
+				id: 'v6-oakwood',
+				posted: todayIso(),
+				amount: -185000,
+				description: 'ACH DEBIT OAKWOOD PROPERTY MGMT RENT'
+			});
+		return;
+	}
 	const checking = data.find((a) => a.id === 'v5-checking');
 	const savings = data.find((a) => a.id === 'v5-savings');
 	if (!checking) return;
@@ -1371,40 +1520,77 @@ function fingerprintFor(
 			);
 }
 
-/** Suggestion engine per PLAN-V3 (recurring → payee rule → keywords). */
+/**
+ * Suggestion engine per PLAN-V3 (recurring → payee rule → keywords), v6: amount-varies tolerance,
+ * a name score (token overlap against bank names, learned names and the item name) as a tie-break,
+ * and `matchDetail` / `matchScore` for the "Auto-matched · name 94% · …" line.
+ */
 function suggest(
 	hh: string,
 	tx: Pick<Tx, 'postedOn' | 'amountCents' | 'description' | 'payee'>
 ): {
 	suggestion: Suggestion;
 	confidence: number;
+	matchScore: number | null;
+	matchDetail: MatchDetail | null;
+	/** best bank-name score (0–1) of the suggested item, for v6 auto-match */
+	bankScore: number;
 } {
 	const abs = Math.abs(tx.amountCents);
 	const outflow = tx.amountCents < 0;
 	const norm = normPayee(tx.payee ?? tx.description);
 	const rule = payeeRules.get(`${hh}:${norm}`);
 	// 1. recurring occurrence within ±5 days, amount within max(2 %, $1), kind matches sign;
-	//    v4: one-offs get ±7 days and max(15 %, $10)
-	let best: { item: Item; date: string; distance: number } | null = null;
+	//    v4: one-offs get ±7 days and max(15 %, $10); v6: amount varies → max(25 %, $10)
+	let best: {
+		item: Item;
+		date: string;
+		distance: number;
+		rank: number;
+		diff: number;
+		window: number;
+		names: { bank: number; any: number };
+	} | null = null;
 	for (const i of items.values()) {
 		if (i.householdId !== hh || i.archived) continue;
 		if ((i.kind === 'income') === outflow) continue;
 		const once = i.frequency === 'once';
 		const tolerance = once
 			? Math.max(Math.round(i.amountCents * 0.15), 1000)
-			: Math.max(Math.round(i.amountCents * 0.02), 100);
-		if (Math.abs(i.amountCents - abs) > tolerance) continue;
+			: i.amountVaries
+				? Math.max(Math.round(i.amountCents * 0.25), 1000)
+				: Math.max(Math.round(i.amountCents * 0.02), 100);
+		const diff = Math.abs(i.amountCents - abs);
+		if (diff > tolerance) continue;
 		const window = once ? 7 : 5;
+		const names = nameScores(i, tx);
+		// a one-off's wide window needs a name hint or the exact amount (the matcher weighs names)
+		if (once && diff > 0 && names.any < 0.5) continue;
 		const from = toIso(new Date(parse(tx.postedOn).getTime() - window * 86400_000));
 		const to = toIso(new Date(parse(tx.postedOn).getTime() + window * 86400_000));
 		for (const d of expand(i, from, to)) {
 			if (payments.has(`${i.id}:${d}`)) continue;
 			const distance = Math.abs(parse(d).getTime() - parse(tx.postedOn).getTime());
-			if (!best || distance < best.distance) best = { item: i, date: d, distance };
+			const rank = distance - names.any * 3 * 86400_000; // a name match is worth 3 days
+			if (!best || rank < best.rank)
+				best = { item: i, date: d, distance, rank, diff, window, names };
 		}
 	}
 	if (best) {
 		const confidence = 90 + (rule && rule.itemId === best.item.id ? 5 : 0);
+		const days = Math.round(best.distance / 86400_000);
+		const name = Math.round(best.names.any * 100);
+		const amount =
+			best.diff === 0
+				? 100
+				: Math.max(0, Math.round(100 - (best.diff / Math.max(best.item.amountCents, 1)) * 100));
+		const date = Math.round(100 * (1 - days / (best.window + 1)));
+		const early = tx.postedOn < best.date;
+		const reason = [
+			`name ${name}%`,
+			best.diff === 0 ? 'amount exact' : `amount ${100 - amount}% off`,
+			days === 0 ? 'same day' : `${days} day${days === 1 ? '' : 's'} ${early ? 'early' : 'late'}`
+		].join(' · ');
 		return {
 			suggestion: {
 				kind: 'occurrence',
@@ -1414,9 +1600,13 @@ function suggest(
 				dueDate: best.date,
 				confidence
 			},
-			confidence
+			confidence,
+			matchScore: Math.round(0.5 * name + 0.3 * amount + 0.2 * date),
+			matchDetail: { name, amount, date, reason, engine: 'fuzzy' },
+			bankScore: best.names.bank
 		};
 	}
+	const none = { matchScore: null, matchDetail: null, bankScore: 0 };
 	// 2. learned payee rule
 	if (rule?.categoryId) {
 		const c = categories.get(rule.categoryId);
@@ -1424,7 +1614,8 @@ function suggest(
 			const confidence = 70 + Math.min(rule.hits, 20);
 			return {
 				suggestion: { kind: 'category', categoryId: c.id, categoryName: c.name, confidence },
-				confidence
+				confidence,
+				...none
 			};
 		}
 	}
@@ -1436,10 +1627,11 @@ function suggest(
 		if (c)
 			return {
 				suggestion: { kind: 'category', categoryId: c.id, categoryName: c.name, confidence: 40 },
-				confidence: 40
+				confidence: 40,
+				...none
 			};
 	}
-	return { suggestion: null, confidence: 0 };
+	return { suggestion: null, confidence: 0, ...none };
 }
 
 const isHidden = (t: Tx) =>
@@ -1476,7 +1668,10 @@ function markTransfer(t: Tx, peer: Tx | null, auto: boolean, by: string | null) 
  * transfer payee are auto-ignored (85) or suggested; transfer keywords are a suggestion at 60.
  */
 function detectTransfers(hh: string, fresh: Tx[]) {
-	const auto = households.get(hh)?.autoIgnoreTransfers !== false;
+	// v6: only when the household lets the app act on its own (level ≠ off)
+	const auto =
+		households.get(hh)?.autoIgnoreTransfers !== false &&
+		households.get(hh)?.autoMatchLevel !== 'off';
 	const open = () =>
 		[...txs.values()].filter(
 			(t) => t.householdId === hh && t.status === 'pending' && !t.suggestedPeerId
@@ -1563,6 +1758,8 @@ function insertTx(
 		| 'transferPeerId'
 		| 'transferAuto'
 		| 'suggestedPeerId'
+		| 'matchScore'
+		| 'matchDetail'
 	>
 ): Tx | null {
 	const fingerprint = fingerprintFor(
@@ -1575,7 +1772,7 @@ function insertTx(
 	);
 	if ([...txs.values()].some((t) => t.householdId === hh && t.fingerprint === fingerprint))
 		return null;
-	const { suggestion, confidence } = suggest(hh, input);
+	const { suggestion, confidence, matchScore, matchDetail } = suggest(hh, input);
 	const tx: Tx = {
 		...input,
 		id: randomUUID(),
@@ -1589,7 +1786,9 @@ function insertTx(
 		ignoreReason: null,
 		transferPeerId: null,
 		transferAuto: false,
-		suggestedPeerId: null
+		suggestedPeerId: null,
+		matchScore,
+		matchDetail
 	};
 	txs.set(tx.id, tx);
 	return tx;
@@ -1752,6 +1951,194 @@ type SyncResult = {
 	errors: string[];
 	syncedAt: string;
 };
+/**
+ * v6 auto-apply over To-review rows. `bills`: a recurring/one-off suggestion ≥ 90 whose item has a
+ * learned payee rule naming it or a bank name (user or learned) scoring ≥ 80 % is marked paid
+ * (`paid_by NULL, auto`); `all`: also a category from a learned rule with ≥ 2 hits → expense
+ * (`transaction.autocategorized`). `off`: suggestions only.
+ */
+function autoApply(hh: string, rows: Tx[]): number {
+	const level = households.get(hh)?.autoMatchLevel ?? 'all';
+	if (level === 'off') return 0;
+	let n = 0;
+	for (const tx of rows) {
+		if (tx.status !== 'pending' || isHidden(tx) || tx.autoBlocked) continue;
+		const s = tx.suggestion;
+		if (s?.kind === 'occurrence' && s.confidence >= 90) {
+			const item = items.get(s.itemId);
+			if (!item || payments.has(`${item.id}:${s.dueDate}`)) continue;
+			const rule = payeeRules.get(`${hh}:${normPayee(tx.payee ?? tx.description)}`);
+			const bank = nameScores(item, tx).bank;
+			if (!(rule && rule.itemId === s.itemId) && bank < 0.8) continue;
+			payments.set(`${item.id}:${s.dueDate}`, {
+				paidAt: nowIso(),
+				paidBy: null,
+				amountCents: Math.abs(tx.amountCents),
+				auto: true,
+				source: 'bank'
+			});
+			tx.status = 'confirmed';
+			tx.confirmed = {
+				expenseId: null,
+				itemId: item.id,
+				dueDate: s.dueDate,
+				by: null,
+				at: nowIso(),
+				auto: true,
+				categoryId: null,
+				categoryName: null,
+				itemName: item.name
+			};
+			const reason = tx.matchDetail?.reason || 'learned payee';
+			tx.matchDetail = tx.matchDetail
+				? { ...tx.matchDetail, reason }
+				: { name: Math.round(bank * 100), amount: 100, date: 100, reason, engine: 'fuzzy' };
+			learnBankName(item, tx);
+			record(
+				hh,
+				null,
+				'transaction.automatched',
+				'transaction',
+				tx.id,
+				`matched ${item.name} · ${money(hh, Math.abs(tx.amountCents))} (auto)`,
+				{ itemId: item.id, dueDate: s.dueDate, reason }
+			);
+			n++;
+		} else if (level === 'all' && s?.kind === 'category' && tx.amountCents < 0) {
+			const rule = payeeRules.get(`${hh}:${normPayee(tx.payee ?? tx.description)}`);
+			if (!rule || rule.categoryId !== s.categoryId || rule.hits < 2) continue;
+			const cat = categories.get(s.categoryId);
+			const e: Expense = {
+				id: randomUUID(),
+				householdId: hh,
+				name: tx.payee || tx.description,
+				amountCents: Math.abs(tx.amountCents),
+				categoryId: cat?.id ?? null,
+				accountId: tx.accountId,
+				spentOn: tx.postedOn,
+				note: tx.memo,
+				deducted: false,
+				createdBy: households.get(hh)?.memberIds[0] ?? '',
+				createdAt: nowIso(),
+				updatedAt: nowIso()
+			};
+			expenses.set(e.id, e);
+			tx.status = 'confirmed';
+			tx.confirmed = {
+				expenseId: e.id,
+				itemId: null,
+				dueDate: null,
+				by: null,
+				at: nowIso(),
+				auto: true,
+				categoryId: cat?.id ?? null,
+				categoryName: cat?.name ?? null,
+				itemName: null
+			};
+			const reason = `${cat?.name ?? 'a category'} · seen ${rule.hits} times`;
+			tx.matchDetail = { name: 100, amount: 100, date: 100, reason, engine: 'fuzzy' };
+			record(
+				hh,
+				null,
+				'transaction.autocategorized',
+				'transaction',
+				tx.id,
+				`filed ${e.name} · ${money(hh, e.amountCents)} in ${cat?.name ?? 'a category'} (auto)`,
+				{ expenseId: e.id, reason }
+			);
+			n++;
+		}
+	}
+	matcherRuns.set(hh, { at: nowIso(), autoMatched: n });
+	return n;
+}
+/** v6: re-score every To-review row (bill created/edited, `POST /inbox/rematch`), then auto-apply. */
+function rematchHousehold(hh: string): number {
+	const rows = [...txs.values()].filter(
+		(t) => t.householdId === hh && t.status === 'pending' && !isHidden(t)
+	);
+	for (const t of rows) {
+		if (t.suggestion?.kind === 'transfer') continue;
+		const r = suggest(hh, t);
+		t.suggestion = r.suggestion;
+		t.confidence = r.confidence;
+		t.matchScore = r.matchScore;
+		t.matchDetail = r.matchDetail;
+	}
+	return autoApply(hh, rows);
+}
+/**
+ * v6 found bills (`detect-recurring`, simplified): ≥ 3 outflows with the same normalised payee,
+ * 25–35 days apart, amounts within 10 % → a monthly suggestion, unless an item already knows that
+ * bank name or the fingerprint was dismissed.
+ */
+function detectBills(hh: string) {
+	const groups = new Map<string, Tx[]>();
+	for (const t of txs.values()) {
+		if (t.householdId !== hh || t.amountCents >= 0 || isHidden(t)) continue;
+		if (t.status === 'confirmed' && t.confirmed?.itemId) continue;
+		const norm = normPayee(t.payee ?? t.description);
+		if (norm) groups.set(norm, [...(groups.get(norm) ?? []), t]);
+	}
+	for (const [norm, rows] of groups) {
+		if (rows.length < 3) continue;
+		rows.sort((a, b) => a.postedOn.localeCompare(b.postedOn));
+		const gaps = rows.slice(1).map((r, i) => dayDistance(rows[i].postedOn, r.postedOn));
+		if (!gaps.every((g) => g >= 25 && g <= 35)) continue;
+		const amounts = rows.map((r) => Math.abs(r.amountCents));
+		const avg = Math.round(amounts.reduce((a, b) => a + b, 0) / amounts.length);
+		if (amounts.some((a) => Math.abs(a - avg) > avg * 0.1)) continue;
+		const fingerprint = `${norm}|monthly`;
+		const known = [...billSuggestions.values()].some(
+			(b) => b.householdId === hh && b.fingerprint === fingerprint
+		);
+		const covered = [...items.values()].some(
+			(i) =>
+				i.householdId === hh &&
+				!i.archived &&
+				[...i.bankNames, ...i.bankNamesLearned].some((n) => tokenOverlap(n, norm) >= 0.8)
+		);
+		if (known || covered) continue;
+		const last = rows[rows.length - 1];
+		const words = norm.split(' ');
+		const name = words[0].charAt(0).toUpperCase() + words[0].slice(1);
+		const varies = amounts.some((a) => a !== amounts[0]);
+		billSuggestions.set(randomUUID(), {
+			id: '',
+			householdId: hh,
+			name,
+			kind: KEYWORDS.some(([re, c]) => c === 'Subscriptions' && re.test(last.description))
+				? 'subscription'
+				: 'bill',
+			amountCents: Math.abs(last.amountCents),
+			amountVaries: varies,
+			frequency: 'monthly',
+			nextDue: toIso(addMonthsClamp(parse(last.postedOn), 1)),
+			bankName: last.description,
+			sampleIds: rows.map((r) => r.id),
+			score: 92,
+			lastSeen: last.postedOn,
+			status: 'open',
+			fingerprint
+		});
+	}
+	for (const [id, b] of billSuggestions) if (!b.id) b.id = id;
+}
+function billSuggestionView(b: BillSuggestionRec) {
+	return {
+		id: b.id,
+		name: b.name,
+		kind: b.kind,
+		amountCents: b.amountCents,
+		amountVaries: b.amountVaries,
+		frequency: b.frequency,
+		nextDue: b.nextDue,
+		bankName: b.bankName,
+		score: b.score,
+		sampleCount: b.sampleIds.length,
+		lastSeen: b.lastSeen
+	};
+}
 function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
 	const hh = link.householdId;
 	const data = bridge.get(link.id) ?? [];
@@ -1791,46 +2178,9 @@ function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
 		fresh.push(...reconcileAccount(hh, ext, ba));
 	}
 	detectTransfers(hh, fresh);
-	// auto-mark: recurring match ≥ 90 whose item already has a learned payee rule
-	for (const tx of fresh) {
-		if (tx.status !== 'pending') continue;
-		const s = tx.suggestion;
-		if (!s || s.kind !== 'occurrence' || s.confidence < 90) continue;
-		const norm = normPayee(tx.payee ?? tx.description);
-		const rule = payeeRules.get(`${hh}:${norm}`);
-		if (!rule || rule.itemId !== s.itemId) continue;
-		const item = items.get(s.itemId);
-		if (!item || payments.has(`${item.id}:${s.dueDate}`)) continue;
-		payments.set(`${item.id}:${s.dueDate}`, {
-			paidAt: nowIso(),
-			paidBy: null,
-			amountCents: Math.abs(tx.amountCents),
-			auto: true,
-			source: 'bank'
-		});
-		tx.status = 'confirmed';
-		tx.confirmed = {
-			expenseId: null,
-			itemId: item.id,
-			dueDate: s.dueDate,
-			by: null,
-			at: nowIso(),
-			auto: true,
-			categoryId: null,
-			categoryName: null,
-			itemName: item.name
-		};
-		record(
-			hh,
-			null,
-			'transaction.automatched',
-			'transaction',
-			tx.id,
-			`matched ${item.name} · ${money(hh, Math.abs(tx.amountCents))} (auto)`,
-			{ itemId: item.id, dueDate: s.dueDate }
-		);
-		autoMatched++;
-	}
+	// auto-mark (v6: per the household's auto-match level, fuzzy bank names count as a rule)
+	autoMatched += autoApply(hh, fresh);
+	detectBills(hh);
 	link.lastSyncedAt = nowIso();
 	link.lastError = null;
 	record(
@@ -1936,7 +2286,10 @@ function txView(t: Tx) {
 						categoryId: t.confirmed.categoryId,
 						categoryName: t.confirmed.categoryName
 					}
-				: null
+				: null,
+		// v6
+		matchScore: t.matchScore,
+		matchDetail: t.matchDetail
 	};
 }
 function learnRule(
@@ -2039,6 +2392,7 @@ function confirmTx(
 			source: 'bank'
 		});
 		learnRule(hh, tx, { itemId: item.id });
+		learnBankName(item, tx);
 		tx.status = 'confirmed';
 		tx.confirmed = {
 			expenseId: null,
@@ -2094,6 +2448,7 @@ function reverseTx(t: Tx) {
 }
 function restoreTx(hh: string, user: User | null, tx: Tx) {
 	reverseTx(tx);
+	tx.autoBlocked = true;
 	record(
 		hh,
 		user,
@@ -2107,6 +2462,7 @@ function restoreTxForOccurrence(hh: string, itemId: string, date: string) {
 	for (const t of txs.values()) {
 		if (t.householdId !== hh || t.status !== 'confirmed') continue;
 		if (t.confirmed?.itemId === itemId && t.confirmed.dueDate === date) {
+			t.autoBlocked = true;
 			t.status = 'pending';
 			t.confirmed = null;
 			t.ignoreReason = null;
@@ -2568,7 +2924,10 @@ const server = createServer(async (req, res) => {
 				txs,
 				payeeRules,
 				csvImports,
-				bridge
+				bridge,
+				billSuggestions,
+				lastRematch,
+				matcherRuns
 			])
 				map.clear();
 			codes.length = 0;
@@ -2853,6 +3212,20 @@ const server = createServer(async (req, res) => {
 				h.autoIgnoreTransfers = b.autoIgnoreTransfers;
 				changed.push('transfers');
 			}
+			if ('autoMatchLevel' in b) {
+				if (
+					b.autoMatchLevel !== 'off' &&
+					b.autoMatchLevel !== 'bills' &&
+					b.autoMatchLevel !== 'all'
+				)
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { autoMatchLevel: ['Use off, bills or all'] }
+					});
+				h.autoMatchLevel = b.autoMatchLevel;
+				changed.push('auto-match level');
+			}
 			if (changed.length)
 				record(
 					h.id,
@@ -3102,6 +3475,13 @@ const server = createServer(async (req, res) => {
 			const b = await readJson(req);
 			if (!b.name || !b.kind || typeof b.amountCents !== 'number' || !b.frequency || !b.anchorDate)
 				return problem(res, 400, 'Validation failed');
+			const names = bankNamesFrom(b, []);
+			if (typeof names === 'string')
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { bankNames: [names] }
+				});
 			const i: Item = {
 				id: randomUUID(),
 				householdId: hh,
@@ -3116,13 +3496,15 @@ const server = createServer(async (req, res) => {
 				autoPay: Boolean(b.autoPay),
 				notes: (b.notes as string | null) ?? null,
 				url: (b.url as string | null) ?? null,
-				payeeHint: null,
+				bankNames: [],
+				bankNamesLearned: [],
+				amountVaries: b.amountVaries === true,
 				createdAt: nowIso(),
 				updatedAt: nowIso(),
 				archived: false
 			};
 			items.set(i.id, i);
-			applyPayeeHint(i, (b.payeeHint as string | null | undefined) ?? null);
+			applyBankNames(i, names);
 			record(
 				hh,
 				user,
@@ -3131,6 +3513,7 @@ const server = createServer(async (req, res) => {
 				i.id,
 				`added ${i.kind} ${i.name} · ${$(i.amountCents)}`
 			);
+			rematchHousehold(hh); // v6: a new bill is matched against To review right away
 			return send(res, 201, itemView(i));
 		}
 		// --- v5: create a bill from a transaction, payments, link a transaction
@@ -3162,13 +3545,15 @@ const server = createServer(async (req, res) => {
 				autoPay: false,
 				notes: null,
 				url: null,
-				payeeHint: null,
+				bankNames: [],
+				bankNamesLearned: [],
+				amountVaries: false,
 				createdAt: nowIso(),
 				updatedAt: nowIso(),
 				archived: false
 			};
 			items.set(i.id, i);
-			applyPayeeHint(i, t.payee ?? t.description);
+			applyBankNames(i, [(t.payee ?? t.description).slice(0, 80)]);
 			reverseTx(t);
 			confirmTx(hh, user, t, { as: 'occurrence', itemId: i.id, dueDate: i.anchorDate });
 			record(
@@ -3181,6 +3566,17 @@ const server = createServer(async (req, res) => {
 				{ transactionId: t.id }
 			);
 			return send(res, 201, { item: itemView(i), transaction: txView(t) });
+		}
+		// v6: forget a learned bank name
+		mm = /^\/v1\/recurring\/([^/]+)\/bank-names\/learned\/(\d+)$/.exec(p);
+		if (mm && m === 'DELETE') {
+			const i = items.get(mm[1]);
+			if (!i || i.householdId !== hh || i.archived) return problem(res, 404, 'Not found');
+			const index = Number(mm[2]);
+			if (index >= i.bankNamesLearned.length) return problem(res, 404, 'Not found');
+			i.bankNamesLearned.splice(index, 1);
+			record(hh, user, 'recurring.updated', 'recurring', i.id, `updated ${i.name}`);
+			return send(res, 200, itemView(i));
 		}
 		mm = /^\/v1\/recurring\/([^/]+)\/payments$/.exec(p);
 		if (mm && m === 'GET') {
@@ -3283,6 +3679,13 @@ const server = createServer(async (req, res) => {
 				if (m === 'GET') return send(res, 200, itemView(i));
 				if (m === 'PUT') {
 					const b = await readJson(req);
+					const names = bankNamesFrom(b, i.bankNames);
+					if (typeof names === 'string')
+						return send(res, 400, {
+							title: 'Validation failed',
+							status: 400,
+							errors: { bankNames: [names] }
+						});
 					Object.assign(i, {
 						name: b.name,
 						kind: b.kind,
@@ -3297,8 +3700,10 @@ const server = createServer(async (req, res) => {
 						url: b.url ?? null,
 						updatedAt: nowIso()
 					});
-					if ('payeeHint' in b) applyPayeeHint(i, (b.payeeHint as string | null) ?? null);
+					if ('amountVaries' in b) i.amountVaries = b.amountVaries === true;
+					applyBankNames(i, names);
 					record(hh, user, 'recurring.updated', 'recurring', i.id, `updated ${i.name}`);
+					rematchHousehold(hh);
 					return send(res, 200, itemView(i));
 				}
 				if (m === 'DELETE') {
@@ -3860,6 +4265,219 @@ const server = createServer(async (req, res) => {
 			}
 		}
 
+		// --- v6: pending by account, the all-accounts feed, found bills, matcher
+		if (p === '/v1/pending' && m === 'GET') {
+			const live = (t: Tx) =>
+				t.householdId === hh &&
+				t.pending &&
+				!isHidden(t) &&
+				(t.status === 'pending' || t.status === 'confirmed');
+			const rowsAll = [...txs.values()].filter(live);
+			const groupOf = (
+				head: {
+					accountId: string | null;
+					accountName: string;
+					institution: string;
+					balanceCents: number;
+					availableCents: number | null;
+				},
+				rows: Tx[]
+			) => ({
+				...head,
+				pendingCount: rows.length,
+				pendingOutCents: rows
+					.filter((t) => t.amountCents < 0)
+					.reduce((sum, t) => sum - t.amountCents, 0),
+				pendingInCents: rows
+					.filter((t) => t.amountCents > 0)
+					.reduce((sum, t) => sum + t.amountCents, 0),
+				items: rows.sort((x, y) => y.postedOn.localeCompare(x.postedOn)).map(txView)
+			});
+			// every active linked account (also without pending rows) and every account with some
+			const mapped = [...accounts.values()]
+				.filter(
+					(a) =>
+						a.householdId === hh &&
+						!a.archived &&
+						(accountView(a).linked || rowsAll.some((t) => t.accountId === a.id))
+				)
+				.map((a) =>
+					groupOf(
+						{
+							accountId: a.id,
+							accountName: a.name,
+							institution: a.institution,
+							balanceCents: a.balanceCents,
+							availableCents: accountView(a).availableCents
+						},
+						rowsAll.filter((t) => t.accountId === a.id)
+					)
+				);
+			// rows of an unmapped bank account group under that bank account (accountId null)
+			const unmapped = [...extAccounts.values()]
+				.filter((x) => x.householdId === hh && !x.accountId)
+				.map((x) =>
+					groupOf(
+						{
+							accountId: null,
+							accountName: x.name,
+							institution: x.orgName,
+							balanceCents: x.balanceCents,
+							availableCents: x.availableCents
+						},
+						rowsAll.filter((t) => !t.accountId && t.externalAccountId === x.id)
+					)
+				)
+				.filter((g) => g.pendingCount > 0);
+			const groups = [...mapped, ...unmapped].sort(
+				(x, y) =>
+					Number(y.pendingCount > 0) - Number(x.pendingCount > 0) ||
+					y.pendingOutCents - x.pendingOutCents ||
+					x.accountName.localeCompare(y.accountName)
+			);
+			return send(res, 200, {
+				totalOutCents: groups.reduce((sum, g) => sum + g.pendingOutCents, 0),
+				totalInCents: groups.reduce((sum, g) => sum + g.pendingInCents, 0),
+				count: groups.reduce((sum, g) => sum + g.pendingCount, 0),
+				groups
+			});
+		}
+		if (p === '/v1/transactions' && m === 'GET') {
+			const accountId = url.searchParams.get('accountId');
+			const q = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+			const before = url.searchParams.get('before');
+			const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? 50)));
+			const cursor = (r: { postedOn: string; createdAt: string; id: string }) =>
+				`${r.postedOn}|${r.createdAt}|${r.id}`;
+			const hit = (r: { description: string; payee: string | null; memo: string | null }) =>
+				!q || [r.description, r.payee, r.memo].some((x) => x?.toLowerCase().includes(q));
+			const mine = [...txs.values()].filter(
+				(t) => t.householdId === hh && !isHidden(t) && (!accountId || t.accountId === accountId)
+			);
+			const pendingRows = mine
+				.filter((t) => t.pending && hit(t))
+				.sort((a, b) => cursor(b).localeCompare(cursor(a)))
+				.map(txView);
+			const fromBank = new Set(
+				[...txs.values()].map((t) => t.confirmed?.expenseId).filter(Boolean) as string[]
+			);
+			const manual = [...expenses.values()]
+				.filter(
+					(e) =>
+						e.householdId === hh &&
+						!fromBank.has(e.id) &&
+						(!accountId || e.accountId === accountId) &&
+						(!q || e.name.toLowerCase().includes(q) || (e.note ?? '').toLowerCase().includes(q))
+				)
+				.map((e) => {
+					const { kind: _k, ...row } = manualRow(e);
+					return row;
+				});
+			const all = [...mine.filter((t) => !t.pending && hit(t)).map(txView), ...manual]
+				.filter((r) => !before || cursor(r) < before)
+				.sort((a, b) => cursor(b).localeCompare(cursor(a)));
+			const pageRows = all.slice(0, limit);
+			return send(res, 200, {
+				pending: before ? [] : pendingRows,
+				items: pageRows,
+				nextBefore: all.length > limit ? cursor(pageRows[pageRows.length - 1]) : null,
+				toReviewCount: [...txs.values()].filter(
+					(t) => t.householdId === hh && t.status === 'pending' && !isHidden(t)
+				).length
+			});
+		}
+		if (p === '/v1/bill-suggestions' && m === 'GET')
+			return send(
+				res,
+				200,
+				[...billSuggestions.values()]
+					.filter((b) => b.householdId === hh && b.status === 'open')
+					.sort((a, b) => b.score - a.score)
+					.map(billSuggestionView)
+			);
+		mm = /^\/v1\/bill-suggestions\/([^/]+)\/(accept|dismiss)$/.exec(p);
+		if (mm && m === 'POST') {
+			const bs = billSuggestions.get(mm[1]);
+			if (!bs || bs.householdId !== hh) return problem(res, 404, 'Not found');
+			if (mm[2] === 'dismiss') {
+				if (bs.status === 'accepted') return problem(res, 409, 'Suggestion already handled');
+				bs.status = 'dismissed';
+				return send(res, 204);
+			}
+			if (bs.status !== 'open') return problem(res, 409, 'Suggestion already handled');
+			const b = await readJson(req);
+			const samples = bs.sampleIds
+				.map((id) => txs.get(id))
+				.filter((t): t is Tx => !!t)
+				.sort((a, c) => a.postedOn.localeCompare(c.postedOn));
+			const i: Item = {
+				id: randomUUID(),
+				householdId: hh,
+				name: String(b.name ?? bs.name).slice(0, 80),
+				kind: String(b.kind ?? bs.kind),
+				amountCents: typeof b.amountCents === 'number' ? b.amountCents : bs.amountCents,
+				categoryId:
+					(bs.kind === 'subscription' ? categoryByName(hh, 'Subscriptions')?.id : undefined) ??
+					null,
+				accountId: samples[0]?.accountId ?? null,
+				frequency: String(b.frequency ?? bs.frequency),
+				anchorDate: String(b.nextDue ?? samples[0]?.postedOn ?? bs.nextDue),
+				endDate: null,
+				autoPay: false,
+				notes: null,
+				url: null,
+				bankNames: [],
+				bankNamesLearned: [],
+				amountVaries: bs.amountVaries,
+				createdAt: nowIso(),
+				updatedAt: nowIso(),
+				archived: false
+			};
+			items.set(i.id, i);
+			applyBankNames(i, [bs.bankName.slice(0, 80)]);
+			let matched = 0;
+			for (const t of samples) {
+				const from = toIso(new Date(parse(t.postedOn).getTime() - 7 * 86400_000));
+				const to = toIso(new Date(parse(t.postedOn).getTime() + 7 * 86400_000));
+				const date = expand(i, from, to)
+					.filter((d) => !payments.has(`${i.id}:${d}`))
+					.sort((x, y) => dayDistance(x, t.postedOn) - dayDistance(y, t.postedOn))[0];
+				if (!date) continue;
+				reverseTx(t);
+				if (!confirmTx(hh, user, t, { as: 'occurrence', itemId: i.id, dueDate: date })) matched++;
+			}
+			bs.status = 'accepted';
+			record(
+				hh,
+				user,
+				'recurring.created',
+				'recurring',
+				i.id,
+				`added ${i.kind} ${i.name} · ${$(i.amountCents)} from found bills`
+			);
+			return send(res, 201, { item: itemView(i), matched });
+		}
+		if (p === '/v1/inbox/rematch' && m === 'POST') {
+			const last = lastRematch.get(hh) ?? 0;
+			if (Date.now() - last < 60_000) {
+				res.setHeader('Retry-After', String(Math.ceil((60_000 - (Date.now() - last)) / 1000)));
+				return problem(res, 429, 'Too many requests', 'Re-checked a moment ago');
+			}
+			lastRematch.set(hh, Date.now());
+			rematchHousehold(hh);
+			return send(res, 202, { queued: true });
+		}
+		if (p === '/v1/matcher/status' && m === 'GET') {
+			const run = matcherRuns.get(hh);
+			return send(res, 200, {
+				engine: 'fuzzy',
+				reachable: true,
+				version: 'mock-1',
+				lastRunAt: run?.at ?? null,
+				lastAutoMatched: run?.autoMatched ?? 0
+			});
+		}
+
 		// --- v3: inbox
 		if (p === '/v1/inbox/summary' && m === 'GET') return send(res, 200, inboxSummary(hh));
 		if (p === '/v1/inbox' && m === 'GET') {
@@ -4047,6 +4665,7 @@ const server = createServer(async (req, res) => {
 			if (tx.status !== 'pending') {
 				const wasTransfer = tx.status === 'ignored' && tx.ignoreReason === 'transfer';
 				reverseTx(tx);
+				tx.autoBlocked = true;
 				record(
 					hh,
 					user,
@@ -4137,6 +4756,9 @@ const server = createServer(async (req, res) => {
 				} else duplicates++;
 			}
 			detectTransfers(hh, fresh);
+			// v6: CSV rows go through the matcher too
+			autoApply(hh, fresh);
+			detectBills(hh);
 			const rec: CsvImportRec = {
 				id: randomUUID(),
 				householdId: hh,

@@ -87,7 +87,7 @@ sw.addEventListener('push', (event) => {
 			icon: data.icon ?? '/icons/icon-192.png',
 			badge: '/icons/icon-192.png',
 			tag: data.tag,
-			data: { url: data.url ?? '/' }
+			data: { url: data.url ?? '/week' }
 		})
 	);
 });
@@ -95,7 +95,7 @@ sw.addEventListener('push', (event) => {
 sw.addEventListener('notificationclick', (event) => {
 	event.notification.close();
 	const target = new URL(
-		(event.notification.data as { url?: string })?.url ?? '/',
+		(event.notification.data as { url?: string })?.url ?? '/week',
 		sw.location.origin
 	).href;
 	event.waitUntil(

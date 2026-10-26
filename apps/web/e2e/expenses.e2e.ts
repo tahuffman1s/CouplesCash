@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
-import { addAccount, registerWithHousehold, todayIso } from './helpers';
+import { addAccount, registerWithHousehold, todayIso, txRow } from './helpers';
 
-test('expense with deduction lowers the balance and feeds Bills › Expenses and budgets', async ({
+test('expense with deduction lowers the balance and feeds Transactions and budgets', async ({
 	page
 }) => {
 	await registerWithHousehold(page);
@@ -17,20 +17,17 @@ test('expense with deduction lowers the balance and feeds Bills › Expenses and
 	await expect(page.getByLabel('Deduct from account balance')).toBeChecked();
 	await page.getByRole('button', { name: 'Save expense' }).click();
 
-	// lands on Bills › Expenses, grouped by day with a total
-	await expect(page).toHaveURL(/\/bills\?tab=expenses/);
-	await expect(page.getByRole('radio', { name: 'Expenses' })).toHaveAttribute(
-		'aria-checked',
-		'true'
-	);
-	await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
-	await expect(page.getByRole('link', { name: /Groceries run/ })).toBeVisible();
-	await expect(page.getByTestId('expenses-total')).toHaveText('$45.00');
-
-	// month nav through the proxy: previous month is empty
-	await page.getByRole('button', { name: 'Previous month' }).click();
-	await expect(page.getByTestId('expenses-total')).toHaveText('$0.00');
-	await expect(page.getByText('No expenses this month')).toBeVisible();
+	// lands on Transactions, posted under Today with its category chip
+	await expect(page).toHaveURL(/\/transactions\?added=1/);
+	await expect(page.getByText('Expense added')).toBeVisible();
+	const day = page.locator(`[data-testid="tx-day"][data-date="${todayIso()}"]`);
+	await expect(day.getByRole('heading', { name: 'Today' })).toBeVisible();
+	await expect(txRow(page, 'Groceries run').getByTestId('tx-status')).toHaveText('Groceries');
+	await expect(txRow(page, 'Groceries run').getByTestId('tx-amount')).toHaveText('−$45.00');
+	// a typed expense only offers Edit
+	await txRow(page, 'Groceries run').getByRole('button').click();
+	await expect(page.getByTestId('edit-expense')).toBeVisible();
+	await page.keyboard.press('Escape');
 
 	// balance dropped
 	await page.goto('/accounts');
@@ -38,7 +35,7 @@ test('expense with deduction lowers the balance and feeds Bills › Expenses and
 
 	// budgets: set Groceries to $40 → over by $5
 	await page.goto('/insights');
-	await expect(page.getByRole('heading', { name: 'Budgets' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Monthly budgets' })).toBeVisible();
 	await page.getByRole('button', { name: /Unbudgeted/ }).click();
 	await page
 		.getByTestId('unbudgeted')
@@ -61,14 +58,12 @@ test('expense with deduction lowers the balance and feeds Bills › Expenses and
 	// the donut's category list now includes the one-off expense
 	await expect(page.getByRole('list', { name: 'Category breakdown' })).toContainText('Groceries');
 
-	// quick-add from the dashboard: bottom sheet → inline expense form → toast
-	await page.goto('/');
+	// quick add: "Already spent?" opens the expense form prefilled from the sentence
+	await page.goto('/transactions');
 	await page.getByTestId('quick-add').click();
-	await page.getByRole('button', { name: /Expense/ }).click();
-	await page.getByLabel('What was it?').fill('Coffee');
-	await page.getByLabel('Amount').fill('4.50');
-	await page.getByRole('button', { name: 'Add expense' }).click();
-	await expect(page.getByText('Coffee added')).toBeVisible();
-	await expect(page.getByRole('dialog')).toHaveCount(0);
-	await expect(page.getByTestId('recent-activity')).toContainText('Coffee');
+	await page.getByTestId('quick-add-input').fill('coffee 4.50 today');
+	await page.getByRole('link', { name: /Already spent/ }).click();
+	await expect(page).toHaveURL(/\/expenses\/new\?/);
+	await expect(page.getByLabel('What was it?')).toHaveValue('Coffee');
+	await expect(page.getByLabel('Amount')).toHaveValue('4.50');
 });

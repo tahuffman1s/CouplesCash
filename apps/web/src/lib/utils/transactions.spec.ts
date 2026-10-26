@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { BillPayment, InboxItem, TransferPair } from '#lib/types.ts';
 import {
+	autoReason,
+	bulkEligible,
+	isAuto,
+	matchesQuery,
+	reviewAction,
+	splitFeed,
 	accountTxQuery,
 	billNameFor,
 	candidateSelectable,
@@ -287,5 +293,116 @@ describe('accountTxQuery', () => {
 				before: '2026-10-01|x'
 			})
 		).toBe('?filter=review&q=kroger+%26+co&month=2026-10&before=2026-10-01%7Cx');
+	});
+});
+
+describe('v6 review rows', () => {
+	const base = {
+		id: 'r1',
+		source: 'simplefin' as const,
+		accountId: 'a',
+		accountName: 'Everyday',
+		postedOn: '2026-10-01',
+		amountCents: -185000,
+		description: 'ACH DEBIT OAKWOOD PROPERTY MGMT RENT',
+		payee: null,
+		memo: null,
+		pending: false,
+		status: 'pending' as const,
+		suggestion: null,
+		confirmed: null,
+		createdAt: '2026-10-01T00:00:00Z'
+	};
+	it('says the suggestion in words', () => {
+		expect(
+			reviewAction({
+				...base,
+				suggestion: {
+					kind: 'occurrence',
+					itemId: 'i',
+					itemName: 'Rent',
+					itemKind: 'bill',
+					dueDate: '2026-10-01',
+					confidence: 90
+				}
+			})
+		).toEqual({ kind: 'occurrence', label: "It's Rent", itemId: 'i', dueDate: '2026-10-01' });
+		expect(
+			reviewAction({
+				...base,
+				suggestion: { kind: 'category', categoryId: 'g', categoryName: 'Groceries', confidence: 40 }
+			}).label
+		).toBe('Groceries');
+		expect(reviewAction({ ...base, suggestion: { kind: 'transfer', confidence: 60 } }).label).toBe(
+			'Transfer'
+		);
+		expect(reviewAction(base).label).toBe('Choose…');
+	});
+	it('money in with only a category guess asks', () => {
+		expect(
+			reviewAction({
+				...base,
+				amountCents: 320000,
+				suggestion: { kind: 'category', categoryId: 'i', categoryName: 'Income', confidence: 40 }
+			}).kind
+		).toBe('choose');
+	});
+	it('bulk takes confident suggestions only', () => {
+		const cat = { kind: 'category' as const, categoryId: 'g', categoryName: 'Groceries' };
+		expect(bulkEligible({ ...base, suggestion: { ...cat, confidence: 75 } })).toBe(true);
+		expect(bulkEligible({ ...base, suggestion: { ...cat, confidence: 40 } })).toBe(false);
+		expect(
+			bulkEligible({ ...base, status: 'confirmed', suggestion: { ...cat, confidence: 90 } })
+		).toBe(false);
+	});
+	it('auto marks and reasons', () => {
+		const auto = {
+			...base,
+			status: 'confirmed' as const,
+			confirmed: {
+				expenseId: null,
+				itemId: 'i',
+				dueDate: '2026-10-01',
+				by: null,
+				byName: null,
+				at: null,
+				auto: true
+			},
+			matchDetail: {
+				name: 94,
+				amount: 100,
+				date: 90,
+				reason: 'name 94% · amount exact · 1 day early',
+				engine: 'fuzzy' as const
+			}
+		};
+		expect(isAuto(auto)).toBe(true);
+		expect(autoReason(auto)).toBe('Auto-matched · name 94% · amount exact · 1 day early');
+		expect(
+			autoReason({ ...auto, matchDetail: { ...auto.matchDetail, reason: 'Auto-matched · x' } })
+		).toBe('Auto-matched · x');
+		expect(
+			autoReason({
+				...auto,
+				confirmed: { ...auto.confirmed, itemId: null, dueDate: null, expenseId: 'e' }
+			})
+		).toBe('Auto-filed · name 94% · amount exact · 1 day early');
+		expect(autoReason({ ...auto, matchDetail: null })).toBe('Auto-matched');
+		expect(isAuto(base)).toBe(false);
+	});
+	it('splits the feed so every row shows once', () => {
+		const r = { ...base, id: 'r' };
+		const p1 = { ...base, id: 'p1', pending: true, status: 'confirmed' as const };
+		const p2 = { ...base, id: 'r', pending: true };
+		const posted = { ...base, id: 'x', status: 'confirmed' as const };
+		const out = splitFeed([r], [p1, p2], [posted, { ...base, id: 'r' }]);
+		expect(out.pending.map((i) => i.id)).toEqual(['p1']);
+		expect(out.posted.map((i) => i.id)).toEqual(['x']);
+	});
+	it('searches description, payee, memo and account', () => {
+		expect(matchesQuery(base, 'oakwood')).toBe(true);
+		expect(matchesQuery(base, 'everyday')).toBe(true);
+		expect(matchesQuery(base, 'kroger')).toBe(false);
+		expect(matchesQuery(base, '  ')).toBe(true);
 	});
 });

@@ -20,12 +20,9 @@ test('activity feed names the actor for each action just performed', async ({ pa
 	await saved;
 	await expect(page.getByRole('button', { name: 'Mark Electric unpaid' })).toBeVisible();
 
-	// dashboard: latest 5
-	await page.goto('/');
-	const recent = page.getByTestId('recent-activity');
-	await expect(recent.locator('li').first()).toContainText('Riley');
-	await expect(recent).toContainText(/marked Electric paid/);
-	await page.getByRole('link', { name: 'See all' }).click();
+	// More › Activity
+	await page.goto('/more');
+	await page.getByRole('link', { name: /Activity/ }).click();
 
 	// full feed grouped by day
 	await expect(page).toHaveURL(/\/activity$/);

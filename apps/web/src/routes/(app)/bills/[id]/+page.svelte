@@ -14,7 +14,7 @@
 	import BillForm from '#lib/components/BillForm.svelte';
 	import OccurrenceRow from '#lib/components/OccurrenceRow.svelte';
 	import { FREQUENCY_LABEL, KIND_LABEL } from '#lib/utils/labels.ts';
-	import { formatMoney } from '#lib/utils/money.ts';
+	import { formatMoney, signedMoney } from '#lib/utils/money.ts';
 	import { formatDate, today } from '#lib/utils/dates.ts';
 	import { occurrenceKey, optimisticToggle, togglePaid } from '#lib/utils/occurrences.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
@@ -29,6 +29,8 @@
 
 	const item = $derived(data.item);
 	const category = $derived(data.categories.find((c) => c.id === item.categoryId));
+	const bankNames = $derived(item.bankNames ?? (item.payeeHint ? [item.payeeHint] : []));
+	const learnedNames = $derived(item.bankNamesLearned ?? []);
 	const account = $derived(data.accounts.find((a) => a.id === item.accountId));
 
 	async function onToggle(occ: Occurrence) {
@@ -167,9 +169,9 @@
 						<p
 							class="text-3xl font-bold tracking-tight tabular {item.kind === 'income'
 								? 'text-success'
-								: ''}"
+								: 'text-error'}"
 						>
-							{formatMoney(item.amountCents)}
+							{signedMoney((item.kind === 'income' ? 1 : -1) * item.amountCents)}
 						</p>
 						<p class="text-xs text-base-content/60">
 							{FREQUENCY_LABEL[item.frequency]}
@@ -188,11 +190,36 @@
 					<dd class="font-medium">{account?.name ?? 'Any'}</dd>
 					<dt class="text-base-content/60">Auto-pay</dt>
 					<dd class="font-medium">{item.autoPay ? 'Yes' : 'No'}</dd>
+					{#if item.amountVaries}
+						<dt class="text-base-content/60">Amount</dt>
+						<dd class="font-medium">Varies</dd>
+					{/if}
 					{#if item.endDate}
 						<dt class="text-base-content/60">Ends</dt>
 						<dd class="font-medium">{formatDate(item.endDate)}</dd>
 					{/if}
 				</dl>
+				{#if bankNames.length || learnedNames.length}
+					<div class="flex flex-col gap-1" data-testid="bill-bank-names">
+						<p class="text-xs text-base-content/60">Bank shows it as</p>
+						<div class="flex flex-wrap gap-1.5">
+							{#each bankNames as n (n)}
+								<span
+									class="badge h-auto min-h-7 rounded-full border-0 bg-base-200 px-2.5 py-1 text-xs"
+									>{n}</span
+								>
+							{/each}
+							{#each learnedNames as n, i (`${i}:${n}`)}
+								<span
+									class="badge h-auto min-h-7 gap-1 rounded-full border border-dashed border-base-300 bg-transparent px-2.5 py-1 text-xs"
+									data-testid="learned-name"
+									>{n}
+									<span class="text-[0.65rem] text-base-content/55 uppercase">learned</span></span
+								>
+							{/each}
+						</div>
+					</div>
+				{/if}
 				{#if item.url}
 					<a
 						href={item.url}
@@ -239,7 +266,7 @@
 													class="badge border-0 px-1.5 badge-xs text-[0.65rem] {p.dueDate < today()
 														? 'bg-error/15 text-error'
 														: 'bg-base-200 text-base-content/70'}"
-													>{p.dueDate < today() ? 'Unpaid' : 'Upcoming'}</span
+													>{p.dueDate < today() ? 'Late' : 'Planned'}</span
 												>
 											{/if}
 										</p>

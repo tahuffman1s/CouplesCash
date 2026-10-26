@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import Dock from '#lib/components/Dock.svelte';
 	import { currency } from '#lib/state/currency.svelte.ts';
+	import { review } from '#lib/state/review.svelte.ts';
 	import { apiFetch } from '#lib/utils/client.ts';
 	import type { LayoutProps } from './$types';
 
@@ -19,6 +20,14 @@
 	// currency on the first paint.
 	untrack(() => currency.set(data.household?.currency));
 	$effect(() => currency.set(data.household?.currency));
+	// the Transactions badge: seeded from the server on every navigation, nudged by review taps
+	untrack(() => review.set(data.inbox?.pending));
+	$effect(() => review.set(data.inbox?.pending));
+
+	// Marks the app as interactive (e2e waits on it instead of sleeping)
+	onMount(() => {
+		document.documentElement.dataset.ready = '1';
+	});
 
 	// Time zone: auto-detected from the browser and posted once when the server still has the
 	// default (UTC) and the device disagrees. Guarded per session so a failing PATCH never loops.

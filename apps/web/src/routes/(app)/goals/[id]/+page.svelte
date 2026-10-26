@@ -48,7 +48,7 @@
 <AppBar
 	title={g.name}
 	subtitle={g.accountName ? `Linked to ${g.accountName}` : 'Tracked manually'}
-	back="/goals"
+	back="/accounts#goals"
 >
 	{#snippet action()}
 		<button

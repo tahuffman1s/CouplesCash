@@ -3,6 +3,11 @@ import { redirect, type RequestEvent } from '@sveltejs/kit';
 import type {
 	AccountTransactionsPage,
 	AccountType,
+	AutoMatchLevel,
+	BillSuggestion,
+	MatcherStatus,
+	PendingView,
+	TransactionFeed,
 	BillPayment,
 	FromTransactionResult,
 	InboxCandidates,
@@ -41,7 +46,12 @@ import type {
 	WeekBudgetRow,
 	WeekView
 } from '#lib/types.ts';
-import { accountTxQuery, type AccountTxQuery } from '#lib/utils/transactions.ts';
+import {
+	accountTxQuery,
+	transactionFeedQuery,
+	type AccountTxQuery,
+	type TransactionFeedQuery
+} from '#lib/utils/transactions.ts';
 import { ACCESS_COOKIE, REFRESH_COOKIE, clearAuthCookies, setAuthCookies } from './cookies';
 
 export const API_BASE = `${API_URL}/v1`;
@@ -200,6 +210,7 @@ export type HouseholdPatch = Partial<{
 	payAnchorDate: string | null;
 	weeklySpendCents: number | null;
 	autoIgnoreTransfers: boolean;
+	autoMatchLevel: AutoMatchLevel;
 }>;
 export type RecurringBody = {
 	name: string;
@@ -213,7 +224,9 @@ export type RecurringBody = {
 	autoPay: boolean;
 	notes: string | null;
 	url: string | null;
-	payeeHint: string | null;
+	/** v6: "Bank shows it as" (replaces the v4 `payeeHint`, which is no longer written). */
+	bankNames: string[];
+	amountVaries: boolean;
 };
 export type ExpenseBody = {
 	name: string;
@@ -298,7 +311,37 @@ export function endpoints(event: RequestEvent) {
 			candidates: (id: string, date: string, days = 10) =>
 				c.get<InboxItem[]>(`/recurring/${id}/occurrences/${date}/candidates?days=${days}`),
 			link: (id: string, date: string, transactionId: string) =>
-				c.post<Occurrence>(`/recurring/${id}/occurrences/${date}/link`, { transactionId })
+				c.post<Occurrence>(`/recurring/${id}/occurrences/${date}/link`, { transactionId }),
+			list: () => c.get<RecurringItem[]>('/recurring'),
+			// v6
+			forgetLearned: (id: string, index: number) =>
+				c.del<RecurringItem>(`/recurring/${id}/bank-names/learned/${index}`)
+		},
+		// ---- v6 (docs/API-CONTRACT.md § v6 additions)
+		transactions: {
+			feed: (opts: TransactionFeedQuery = {}) =>
+				c.get<TransactionFeed>(`/transactions${transactionFeedQuery(opts)}`)
+		},
+		pending: {
+			view: () => c.get<PendingView>('/pending')
+		},
+		billSuggestions: {
+			list: () => c.get<BillSuggestion[]>('/bill-suggestions'),
+			accept: (
+				id: string,
+				overrides: Partial<
+					Pick<BillSuggestion, 'name' | 'kind' | 'amountCents' | 'frequency' | 'nextDue'>
+				> = {}
+			) =>
+				c.post<{ item: RecurringItem; matched: number }>(
+					`/bill-suggestions/${id}/accept`,
+					overrides
+				),
+			dismiss: (id: string) => c.post<void>(`/bill-suggestions/${id}/dismiss`)
+		},
+		matcher: {
+			status: () => c.get<MatcherStatus>('/matcher/status'),
+			rematch: () => c.post<{ queued: boolean }>('/inbox/rematch')
 		},
 		// ---- v5 (docs/API-CONTRACT.md § v5 additions)
 		accounts: {

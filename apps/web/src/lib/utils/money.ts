@@ -89,3 +89,21 @@ export function parseMoney(input: string | null | undefined): number | null {
 export function centsToInput(cents: number): string {
 	return (Math.round(cents) / 100).toFixed(2);
 }
+
+/**
+ * v6 money-flow rule: money out reads "−$12.49", money in "+$3,200.00" (U+2212 minus); zero has
+ * no sign. Use it for anything that moves (transactions, bills, pending, planned); balances stay
+ * unsigned.
+ */
+export function signedMoney(cents: number, opts: Omit<MoneyOptions, 'signed'> = {}): string {
+	const safe = Number.isFinite(cents) ? Math.round(cents) : 0;
+	const text = formatMoney(Math.abs(safe), opts);
+	if (safe < 0) return `−${text}`;
+	if (safe > 0) return `+${text}`;
+	return text;
+}
+
+/** Colour for a signed flow: in = success, out = error, zero = inherit. */
+export function flowTone(cents: number): string {
+	return cents > 0 ? 'text-success' : cents < 0 ? 'text-error' : '';
+}

@@ -1,11 +1,12 @@
 import { expect, test } from '@playwright/test';
 import { registerWithHousehold } from './helpers';
 
-test('manual goal: create, contribute, ring percent, accounts section', async ({ page }) => {
+test('manual goal: create, contribute, ring percent, Money section', async ({ page }) => {
 	await registerWithHousehold(page);
+	// the old list page is a section of Money now
 	await page.goto('/goals');
-	await expect(page.getByText('No goals yet')).toBeVisible();
-	await page.getByRole('link', { name: 'Create a goal' }).click();
+	await expect(page).toHaveURL(/\/accounts#goals$/);
+	await page.getByRole('link', { name: /Saving for something/ }).click();
 	await expect(page).toHaveURL(/\/goals\/new$/);
 
 	await page.getByLabel('Goal name').fill('Japan trip');
@@ -25,11 +26,11 @@ test('manual goal: create, contribute, ring percent, accounts section', async ({
 	await expect(page.getByRole('meter')).toHaveAttribute('aria-valuenow', '25');
 	await expect(page.getByRole('img', { name: /Goal history/ })).toBeVisible();
 
-	// listed on the accounts page and /goals
-	await page.goto('/accounts');
+	// listed in Money; back from the detail page goes there too
+	await page.getByRole('link', { name: 'Back' }).click();
+	await expect(page).toHaveURL(/\/accounts#goals$/);
 	const card = page.getByTestId('goals-section').getByTestId('goal-card');
 	await expect(card).toHaveCount(1);
 	await expect(card.getByTestId('goal-percent')).toHaveText('25%');
-	await page.goto('/goals');
-	await expect(page.getByTestId('goal-card')).toContainText('Japan trip');
+	await expect(card).toContainText('Japan trip');
 });

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { addAccount, registerWithHousehold } from './helpers';
+import { addAccount, registerWithHousehold, reviewRow } from './helpers';
 
 const CSV = [
 	'Date,Description,Debit,Credit',
@@ -10,7 +10,7 @@ const CSV = [
 	',Opening balance,,' // no date → skipped client-side
 ].join('\n');
 
-test('CSV import: auto-detected debit/credit mapping and MM/DD/YYYY dates → inbox', async ({
+test('CSV import: auto-detected debit/credit mapping and MM/DD/YYYY dates → To review', async ({
 	page
 }) => {
 	await registerWithHousehold(page);
@@ -52,18 +52,19 @@ test('CSV import: auto-detected debit/credit mapping and MM/DD/YYYY dates → in
 	await expect(page.getByTestId('result-imported')).toHaveText('3');
 	await expect(page.getByTestId('result-duplicates')).toHaveText('1');
 	await expect(page.getByTestId('result-skipped')).toHaveText('1');
-	await expect(result).toContainText('3 transactions now wait in the inbox');
+	await expect(result).toContainText('3 transactions now wait in To review');
 
-	await page.getByRole('link', { name: 'Review in inbox' }).click();
-	await expect(page).toHaveURL(/\/inbox$/);
-	await expect(page.getByTestId('pending-count')).toHaveText('3');
-	const row = (text: string) => page.getByTestId('inbox-row').filter({ hasText: text });
+	await page.getByRole('link', { name: 'Review them' }).click();
+	await expect(page).toHaveURL(/\/transactions$/);
+	await expect(page.getByTestId('review-row')).toHaveCount(3);
+	await expect(page.getByTestId('review-badge')).toHaveText('3');
+	const row = (text: string) => reviewRow(page, text);
 	await expect(row('KROGER #123')).toContainText('CSV');
-	await expect(row('KROGER #123').getByTestId('suggestion-chip')).toContainText('Groceries');
-	await expect(row('SHELL OIL 4411').getByTestId('suggestion-chip')).toContainText(
-		'Transportation'
-	);
-	await expect(row('ACME PAYROLL')).toContainText('Everyday');
+	await expect(row('KROGER #123').getByTestId('review-primary')).toHaveText('Groceries');
+	await expect(row('SHELL OIL 4411').getByTestId('review-primary')).toHaveText('Transportation');
+	// money in is never an expense: the payroll row asks
+	await expect(row('ACME PAYROLL').getByTestId('review-primary')).toHaveText('Choose…');
+	await expect(row('ACME PAYROLL').getByTestId('review-account')).toContainText('Everyday');
 
 	// the recent-imports list remembers it; the balance was not touched
 	await page.goto('/imports/csv');

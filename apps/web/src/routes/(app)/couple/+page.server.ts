@@ -54,7 +54,7 @@ export const actions: Actions = {
 				});
 			return fail(500, { joinError: 'Could not join right now.', codeValue: raw });
 		}
-		redirect(303, '/couple?joined=1');
+		redirect(303, '/week?joined=1');
 	},
 	leave: async (event) => {
 		try {

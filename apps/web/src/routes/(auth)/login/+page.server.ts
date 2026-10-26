@@ -4,7 +4,7 @@ import type { AuthResult } from '#lib/types.ts';
 import { applyAuth, isApiError, passkeyConfig, publicPost } from '#lib/server/api.ts';
 
 function safeNext(raw: string | null): string {
-	if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return '/';
+	if (!raw || !raw.startsWith('/') || raw.startsWith('//') || raw === '/') return '/week';
 	return raw;
 }
 

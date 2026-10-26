@@ -12,13 +12,20 @@ export const load: PageServerLoad = async (event) => {
 		client.get<Account[]>('/accounts')
 	]);
 	const q = event.url.searchParams;
-	return {
-		categories,
-		accounts,
-		kind: q.get('kind'),
-		frequency: q.get('frequency') === 'once' ? 'once' : null,
-		anchor: q.get('anchor')
-	};
+	// prefill from the quick-add sheet's "More options" (or the calendar's empty day)
+	const prefill: Record<string, string> = {};
+	for (const [key, param] of [
+		['name', 'name'],
+		['kind', 'kind'],
+		['amount', 'amount'],
+		['frequency', 'frequency'],
+		['anchorDate', 'anchor']
+	] as const) {
+		const v = q.get(param);
+		if (v) prefill[key] = v.slice(0, 80);
+	}
+	if (prefill.name) prefill.bankName = prefill.name;
+	return { categories, accounts, prefill };
 };
 
 export const actions: Actions = {

@@ -1,10 +1,8 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
-	import type { PageProps } from './$types';
-	import AppBar from '#lib/components/AppBar.svelte';
-	import Icon from '#lib/components/Icon.svelte';
-	import EmptyState from '#lib/components/EmptyState.svelte';
+	import type { PushPrefs } from '#lib/types.ts';
+	import Icon from './Icon.svelte';
 	import { apiFetch } from '#lib/utils/client.ts';
 	import {
 		detectPushSupport,
@@ -15,9 +13,29 @@
 	import { formatTimestamp } from '#lib/utils/dates.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 
-	let { data, form }: PageProps = $props();
+	/**
+	 * v6: notifications inline in Settings › You (device toggle, what to send, devices). Hidden
+	 * behind a one-line "not set up" note when the server has no VAPID keys (503).
+	 */
+	type PushForm = {
+		prefs?: PushPrefs;
+		saved?: boolean;
+		tested?: boolean;
+		removed?: boolean;
+		pushError?: string;
+	};
+	let {
+		vapidPublicKey,
+		initialPrefs,
+		form = null
+	}: {
+		vapidPublicKey: string | null;
+		initialPrefs: PushPrefs | null;
+		form?: PushForm | null;
+	} = $props();
+	const data = $derived({ vapidPublicKey });
 
-	const prefs = $derived(form?.prefs ?? data.prefs);
+	const prefs = $derived(form?.prefs ?? initialPrefs);
 	let support = $state<PushSupport | 'checking'>('checking');
 	let permission = $state<NotificationPermission | 'unknown'>('unknown');
 	let subscribed = $state(false);
@@ -102,31 +120,24 @@
 		if (form?.saved) toasts.show('Preferences saved', 'success');
 		if (form?.tested) toasts.show('Test sent – check your notifications', 'success');
 		if (form?.removed) toasts.show('Device removed', 'info');
-		if (form?.error) toasts.show(form.error, 'error');
+		if (form?.pushError) toasts.show(form.pushError, 'error');
 	});
 </script>
 
-<svelte:head><title>Notifications · CouplesCash</title></svelte:head>
-
-<AppBar title="Notifications" back="/settings" />
-
-<main class="flex flex-col gap-4 px-4 pt-2">
+<div class="flex flex-col gap-3" data-testid="notifications">
+	<h3 class="flex items-center gap-2 text-sm font-semibold">
+		<Icon name="bell" size={16} /> Notifications
+	</h3>
 	{#if !data.vapidPublicKey}
-		<EmptyState
-			icon="bell"
-			title="Notifications aren't set up yet"
-			body="Push reminders need VAPID keys on the server. Whoever runs CouplesCash can generate them with `--vapid` and add them to the environment; this page lights up afterwards."
-		>
-			<p class="mt-2 text-xs text-base-content/50" data-testid="push-not-configured">
-				Server reported: push not configured.
-			</p>
-		</EmptyState>
+		<p class="text-sm text-base-content/65">
+			Notifications aren't set up yet.
+			<span class="text-xs text-base-content/50" data-testid="push-not-configured"
+				>The server needs VAPID keys (<code>--vapid</code>); this lights up afterwards.</span
+			>
+		</p>
 	{:else}
-		<section class="card border border-base-300/60 bg-base-100 shadow-sm" aria-labelledby="device">
-			<div class="card-body gap-3 p-5">
-				<h2 id="device" class="flex items-center gap-2 font-semibold">
-					<Icon name="bell-ring" size={18} /> This device
-				</h2>
+		<div class="flex flex-col gap-3">
+			<div class="flex flex-col gap-3">
 				{#if support === 'checking'}
 					<div class="h-12 w-full skeleton rounded-xl"></div>
 				{:else if support === 'insecure'}
@@ -164,7 +175,7 @@
 						</p>
 					{/if}
 					{#if subscribed}
-						<form method="POST" action="?/test" use:enhance>
+						<form method="POST" action="?/pushTest" use:enhance>
 							<button class="btn min-h-11 rounded-full border border-base-300 btn-ghost">
 								<Icon name="send" size={16} /> Send a test
 							</button>
@@ -172,12 +183,17 @@
 					{/if}
 				{/if}
 			</div>
-		</section>
 
-		{#if prefs}
-			<section class="card border border-base-300/60 bg-base-100 shadow-sm" aria-labelledby="prefs">
-				<form method="POST" action="?/prefs" class="card-body gap-4 p-5" use:enhance>
-					<h2 id="prefs" class="font-semibold">What to send</h2>
+			{#if prefs}
+				<form
+					method="POST"
+					action="?/prefs"
+					class="flex flex-col gap-4 rounded-2xl bg-base-200/50 p-4"
+					use:enhance={() =>
+						async ({ update }) =>
+							update({ reset: false })}
+				>
+					<p class="text-sm font-medium">What to send</p>
 					<label class="label cursor-pointer justify-start gap-3 px-0">
 						<input
 							type="checkbox"
@@ -258,14 +274,9 @@
 					</div>
 					<button class="btn min-h-12 rounded-full btn-primary">Save preferences</button>
 				</form>
-			</section>
 
-			<section
-				class="card border border-base-300/60 bg-base-100 shadow-sm"
-				aria-labelledby="devices"
-			>
-				<div class="card-body gap-2 p-5">
-					<h2 id="devices" class="font-semibold">Devices</h2>
+				<div class="flex flex-col gap-1">
+					<p class="text-sm font-medium">Devices</p>
 					{#if prefs.subscriptions.length === 0}
 						<p class="text-sm text-base-content/60">No devices are subscribed yet.</p>
 					{:else}
@@ -281,7 +292,7 @@
 												: ''}
 										</p>
 									</div>
-									<form method="POST" action="?/remove" use:enhance>
+									<form method="POST" action="?/pushRemove" use:enhance>
 										<input type="hidden" name="id" value={sub.id} />
 										{#if currentEndpoint && sub.userAgent === navigator.userAgent.slice(0, 200)}
 											<input type="hidden" name="endpoint" value={currentEndpoint} />
@@ -298,7 +309,7 @@
 						</ul>
 					{/if}
 				</div>
-			</section>
-		{/if}
+			{/if}
+		</div>
 	{/if}
-</main>
+</div>

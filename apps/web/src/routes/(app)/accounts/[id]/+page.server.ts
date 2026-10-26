@@ -1,6 +1,13 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
-import type { Account, AccountTransactionsPage, BalanceSnapshot, Category } from '#lib/types.ts';
+import type {
+	Account,
+	AccountTransactionsPage,
+	BalanceSnapshot,
+	Category,
+	TxFilter
+} from '#lib/types.ts';
+import { TX_FILTERS } from '#lib/types.ts';
 import { api, endpoints, isApiError } from '#lib/server/api.ts';
 import { today } from '#lib/utils/dates.ts';
 import { echo, parseAccountForm } from '#lib/server/forms.ts';
@@ -14,7 +21,14 @@ export const load: PageServerLoad = async (event) => {
 			client.get<BalanceSnapshot[]>(`/accounts/${event.params.id}/history?limit=30`)
 		]);
 		// v5: Transactions tab (first page server-side; filters, search and pages go via /api)
-		const tab = event.url.searchParams.get('tab') === 'transactions' ? 'transactions' : 'overview';
+		const rawFilter = event.url.searchParams.get('filter');
+		const filter: TxFilter = TX_FILTERS.some((f) => f.value === rawFilter)
+			? (rawFilter as TxFilter)
+			: 'all';
+		const tab =
+			event.url.searchParams.get('tab') === 'transactions' || rawFilter
+				? 'transactions'
+				: 'overview';
 		const m = event.url.searchParams.get('month');
 		const month = m && /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : today().slice(0, 7);
 		let transactions: AccountTransactionsPage | null = null;
@@ -22,7 +36,7 @@ export const load: PageServerLoad = async (event) => {
 		if (tab === 'transactions') {
 			[transactions, categories] = await Promise.all([
 				endpoints(event)
-					.accounts.transactions(event.params.id, { month, limit: 50 })
+					.accounts.transactions(event.params.id, { month, filter, limit: 50 })
 					.catch(() => null),
 				client.get<Category[]>('/categories').catch(() => [] as Category[])
 			]);
@@ -32,6 +46,7 @@ export const load: PageServerLoad = async (event) => {
 			history,
 			tab,
 			month,
+			filter,
 			transactions,
 			categories,
 			created: event.url.searchParams.has('created')

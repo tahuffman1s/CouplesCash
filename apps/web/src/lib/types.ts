@@ -19,7 +19,11 @@ export type Household = {
 	weeklySpendCents: number | null;
 	/** v5: auto-ignore both sides of a transfer between linked accounts (default on). */
 	autoIgnoreTransfers?: boolean;
+	/** v6: what the matcher may do on its own (default `all`). Older builds omit it. */
+	autoMatchLevel?: AutoMatchLevel;
 };
+/** v6: `off` = suggestions only; `bills` = auto-apply bill/income/one-off matches and transfers; `all` = also categories. */
+export type AutoMatchLevel = 'off' | 'bills' | 'all';
 export type AuthResult = {
 	user: User;
 	household: Household | null;
@@ -78,8 +82,14 @@ export type RecurringItem = {
 	nextDueDate: string | null;
 	createdAt: string;
 	updatedAt: string;
-	/** v4: what the bank calls it, so a one-off reconciles itself on the first match. */
+	/** v4: what the bank calls it (v6: read-only = bankNames[0] ?? null). */
 	payeeHint: string | null;
+	/** v6: "Bank shows it as" names the user added (≤ 10, 2–80 chars each). Older builds omit it. */
+	bankNames?: string[];
+	/** v6: normalised descriptions learned from confirmed matches (read-only; forget one by index). */
+	bankNamesLearned?: string[];
+	/** v6: widens the amount tolerance (utilities, credit-card payments). */
+	amountVaries?: boolean;
 };
 
 export type OccurrenceStatus = 'planned' | 'cleared' | 'overdue';
@@ -416,6 +426,17 @@ export type InboxItem = {
 	transfer?: InboxTransfer | null;
 	match?: InboxMatch | null;
 	expense?: InboxExpense | null;
+	// v6
+	matchScore?: number | null;
+	matchDetail?: MatchDetail | null;
+};
+/** v6: why the matcher picked what it picked (0–100 per part). */
+export type MatchDetail = {
+	name: number;
+	amount: number;
+	date: number;
+	reason: string;
+	engine: 'fuzzy' | 'builtin';
 };
 export type InboxPage = { items: InboxItem[]; nextBefore: string | null };
 export type InboxSummary = {
@@ -505,6 +526,8 @@ export type WeekView = {
 	days: WeekDay[];
 	overdue: Occurrence[] /* unpaid planned before `start` still open, shown once at the top */;
 	budget: WeekBudget;
+	/** v6: Σ pending outflows on spendable accounts. Older builds omit it. */
+	pendingOutCents?: number;
 };
 
 // ---- v5 ----------------------------------------------------------------------------------
@@ -595,3 +618,68 @@ export const TX_FILTERS: readonly { value: TxFilter; label: string }[] = [
 	{ value: 'matched', label: 'Matched' },
 	{ value: 'transfers', label: 'Transfers' }
 ];
+
+// ---- v6 ----------------------------------------------------------------------------------
+
+export type PendingGroup = {
+	/** null: an unmapped bank account, or "Other" (rows of an archived account) */
+	accountId: string | null;
+	accountName: string;
+	institution: string;
+	balanceCents: number;
+	availableCents: number | null;
+	pendingCount: number;
+	pendingOutCents: number;
+	pendingInCents: number;
+	items: InboxItem[];
+};
+export type PendingView = {
+	totalOutCents: number;
+	totalInCents: number;
+	count: number;
+	groups: PendingGroup[];
+};
+export type BillSuggestion = {
+	id: string;
+	name: string;
+	kind: Kind;
+	amountCents: number;
+	amountVaries: boolean;
+	frequency: Frequency;
+	nextDue: string;
+	bankName: string;
+	score: number;
+	sampleCount: number;
+	lastSeen: string;
+};
+export type TransactionFeed = {
+	/** every in-progress transaction on every account (first page only) */
+	pending: InboxItem[];
+	/** posted rows + manual expenses, newest first */
+	items: InboxItem[];
+	nextBefore: string | null;
+	toReviewCount: number;
+};
+export type MatcherStatus = {
+	engine: 'fuzzy' | 'builtin';
+	reachable: boolean;
+	version: string | null;
+	lastRunAt: string | null;
+	lastAutoMatched: number;
+	// v6 API extras (optional so older builds type-check)
+	configured?: boolean;
+	lastRunEngine?: 'fuzzy' | 'builtin' | null;
+	foundBills?: boolean;
+	/** why the built-in engine is used, when it is */
+	note?: string | null;
+};
+export const AUTO_MATCH_LEVELS: readonly { value: AutoMatchLevel; label: string; hint: string }[] =
+	[
+		{ value: 'off', label: 'Off', hint: 'Only suggest; one of you taps to confirm' },
+		{
+			value: 'bills',
+			label: 'Bills only',
+			hint: 'Match bills, income, one-offs and transfers by itself'
+		},
+		{ value: 'all', label: 'Everything', hint: 'Also file regular shops into their usual category' }
+	];

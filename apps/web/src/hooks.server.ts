@@ -59,7 +59,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 		const next = pathname + event.url.search;
 		redirect(303, `/login${next !== '/' ? `?next=${encodeURIComponent(next)}` : ''}`);
 	} else if (user && AUTH_PAGES.has(pathname)) {
-		redirect(303, '/');
+		redirect(303, '/week');
 	}
 
 	// 4. Render, stamping the theme on <html>

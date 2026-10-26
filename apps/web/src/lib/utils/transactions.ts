@@ -297,3 +297,103 @@ export function accountTxQuery(opts: AccountTxQuery): string {
 	const qs = q.toString();
 	return qs ? `?${qs}` : '';
 }
+
+export type TransactionFeedQuery = {
+	accountId?: string | null;
+	q?: string | null;
+	before?: string | null;
+	limit?: number;
+};
+/** `?accountId=&q=&before=&limit=` for v6 `GET /transactions` (server load and browser). */
+export function transactionFeedQuery(opts: TransactionFeedQuery): string {
+	const q = new URLSearchParams();
+	if (opts.accountId) q.set('accountId', opts.accountId);
+	if (opts.q) q.set('q', opts.q);
+	if (opts.before) q.set('before', opts.before);
+	if (opts.limit) q.set('limit', String(opts.limit));
+	const qs = q.toString();
+	return qs ? `?${qs}` : '';
+}
+
+// ---- v6: one-tap review rows ---------------------------------------------------------------
+
+export type ReviewAction =
+	| { kind: 'occurrence'; label: string; itemId: string; dueDate: string }
+	| { kind: 'expense'; label: string; categoryId: string }
+	| { kind: 'transfer'; label: string }
+	| { kind: 'choose'; label: string };
+
+/**
+ * The big button on a To-review row says the suggestion in words: "It's Rent", "Groceries",
+ * "Transfer"; without a usable suggestion it is "Choose…" (opens the transaction sheet). Money in
+ * is never an expense, so an inflow with only a category guess also gets "Choose…".
+ */
+export function reviewAction(item: Pick<InboxItem, 'suggestion' | 'amountCents'>): ReviewAction {
+	const s = item.suggestion;
+	if (s?.kind === 'occurrence')
+		return {
+			kind: 'occurrence',
+			label: `It's ${s.itemName}`,
+			itemId: s.itemId,
+			dueDate: s.dueDate
+		};
+	if (s?.kind === 'transfer') return { kind: 'transfer', label: 'Transfer' };
+	if (s?.kind === 'category' && item.amountCents < 0)
+		return { kind: 'expense', label: s.categoryName, categoryId: s.categoryId };
+	return { kind: 'choose', label: 'Choose…' };
+}
+
+/** Rows "Do all suggestions" would take (the API's bulk floor is confidence ≥ 70). */
+export function bulkEligible(
+	item: Pick<InboxItem, 'status' | 'suggestion' | 'amountCents'>
+): boolean {
+	const s = item.suggestion;
+	if (item.status !== 'pending' || !s || s.confidence < 70) return false;
+	return !(s.kind === 'category' && item.amountCents >= 0);
+}
+
+/** True when the matcher (not a person) decided this row: auto-matched bill or auto transfer. */
+export function isAuto(item: Pick<InboxItem, 'status' | 'confirmed' | 'transfer'>): boolean {
+	if (item.status === 'confirmed') return !!item.confirmed?.auto;
+	if (item.status === 'ignored') return !!item.transfer?.auto;
+	return false;
+}
+
+/**
+ * "Auto-matched · name 94% · amount exact · 1 day early" from `matchDetail` (the API's reason is the
+ * part after the dot; an expense the matcher filed reads "Auto-filed · …"), else a plain label.
+ */
+export function autoReason(
+	item: Pick<InboxItem, 'matchDetail' | 'transfer' | 'status'> &
+		Partial<Pick<InboxItem, 'expense' | 'confirmed'>>
+): string {
+	if (item.status === 'ignored' && item.transfer?.auto) return 'Auto-ignored transfer';
+	const filed = !!(item.expense?.expenseId || item.confirmed?.expenseId);
+	const label = filed ? 'Auto-filed' : 'Auto-matched';
+	const reason = item.matchDetail?.reason?.trim();
+	if (!reason) return label;
+	return /^auto/i.test(reason) ? reason : `${label} · ${reason}`;
+}
+
+/** Rows that still need a person, in the order the To-review list shows them (newest first). */
+export function splitFeed<T extends InboxItem>(
+	review: T[],
+	pending: T[],
+	posted: T[]
+): { review: T[]; pending: T[]; posted: T[] } {
+	const reviewIds = new Set(review.map((r) => r.id));
+	const keep = (r: T) => !reviewIds.has(r.id) && r.status !== 'pending';
+	return { review, pending: pending.filter(keep), posted: posted.filter(keep) };
+}
+
+/** Case-insensitive search over description, payee, memo and account (client-side filter). */
+export function matchesQuery(
+	item: Pick<InboxItem, 'description' | 'payee' | 'memo' | 'accountName'>,
+	q: string
+): boolean {
+	const needle = q.trim().toLowerCase();
+	if (!needle) return true;
+	return [item.description, item.payee, item.memo, item.accountName]
+		.filter(Boolean)
+		.some((s) => s!.toLowerCase().includes(needle));
+}

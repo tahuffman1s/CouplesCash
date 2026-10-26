@@ -11,9 +11,10 @@ test('month report renders the month data with Share and Print', async ({ page }
 	await page.getByLabel('Category').selectOption({ label: 'Transportation' });
 	await page.getByLabel('Account').selectOption({ label: 'Everyday' });
 	await page.getByRole('button', { name: 'Save expense' }).click();
-	await expect(page).toHaveURL(/\/bills\?tab=expenses/);
+	await expect(page).toHaveURL(/\/transactions\?added=1/);
 
 	await page.goto('/insights');
+	await expect(page.getByTestId('report-link')).toHaveText(/Share this month/);
 	await page.getByTestId('report-link').click();
 	await expect(page).toHaveURL(/\/insights\/report\?m=\d{4}-\d{2}$/);
 

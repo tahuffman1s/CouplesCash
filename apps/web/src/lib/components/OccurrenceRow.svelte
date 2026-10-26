@@ -4,6 +4,7 @@
 	import { relativeDay, formatDate, today } from '#lib/utils/dates.ts';
 	import { formatVariance, varianceTone } from '#lib/utils/week.ts';
 	import Icon from './Icon.svelte';
+	import Amount from './Amount.svelte';
 
 	let {
 		occ,
@@ -11,7 +12,8 @@
 		showDate = true,
 		showStatus = false,
 		busy = false,
-		onBank
+		onBank,
+		pending = false
 	}: {
 		occ: Occurrence;
 		onToggle?: (occ: Occurrence) => void;
@@ -21,6 +23,8 @@
 		busy?: boolean;
 		/** v5: open the bank transaction that paid this occurrence (the shared transaction sheet) */
 		onBank?: (occ: Occurrence) => void;
+		/** v6: paid by a bank transaction that is still pending */
+		pending?: boolean;
 	} = $props();
 
 	const overdue = $derived(!occ.paid && occ.kind !== 'income' && occ.dueDate < today());
@@ -37,12 +41,23 @@
 			? 'bg-success/15 text-success'
 			: 'bg-error/15 text-error'
 	);
+	// v6 vocabulary: Planned · Paid · Late · Pending
 	const STATUS_CLASS = {
 		planned: 'bg-base-200 text-base-content/70',
 		cleared: 'bg-success/15 text-success',
-		overdue: 'bg-error/15 text-error'
+		overdue: 'bg-error/15 text-error',
+		pending: 'bg-warning/20 text-pending'
 	} as const;
-	const STATUS_LABEL = { planned: 'Planned', cleared: 'Cleared', overdue: 'Overdue' } as const;
+	const STATUS_LABEL = {
+		planned: 'Planned',
+		cleared: 'Paid',
+		overdue: 'Late',
+		pending: 'Pending'
+	} as const;
+	const shown = $derived(pending && occ.paid ? 'pending' : status);
+	const signedCents = $derived(
+		(occ.kind === 'income' ? 1 : -1) * (occ.paid?.amountCents ?? occ.amountCents)
+	);
 </script>
 
 <li class="flex items-center gap-3 py-2.5" data-testid="occurrence-row" data-status={status}>
@@ -71,11 +86,11 @@
 			{#if showStatus}
 				<span
 					class="badge shrink-0 border-0 px-1.5 badge-xs text-[0.65rem] font-medium {STATUS_CLASS[
-						status
+						shown
 					]}"
 					data-testid="status-chip"
 				>
-					{STATUS_LABEL[status]}
+					{STATUS_LABEL[shown]}
 				</span>
 			{/if}
 		</p>
@@ -107,16 +122,12 @@
 		</button>
 	{/if}
 	<span class="flex shrink-0 flex-col items-end">
-		<span
-			class="text-sm font-semibold tabular {occ.kind === 'income'
-				? 'text-success'
-				: occ.paid
-					? 'text-base-content/50'
-					: ''}"
-			data-testid="occurrence-amount"
-		>
-			{occ.kind === 'income' ? '+' : ''}{formatMoney(occ.paid?.amountCents ?? occ.amountCents)}
-		</span>
+		<Amount
+			cents={signedCents}
+			muted={!!occ.paid}
+			class="text-sm font-semibold"
+			testid="occurrence-amount"
+		/>
 		{#if variance}
 			<span
 				class="rounded-full px-1.5 text-[0.65rem] leading-4 font-medium tabular {varianceClass}"

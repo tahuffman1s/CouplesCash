@@ -39,6 +39,6 @@ export const actions: Actions = {
 		} catch (e) {
 			if (!isApiError(e, 404)) return fail(500, { error: 'Could not delete the expense.' });
 		}
-		redirect(303, '/bills?tab=expenses');
+		redirect(303, '/transactions');
 	}
 };

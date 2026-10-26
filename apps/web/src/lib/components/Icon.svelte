@@ -109,6 +109,11 @@
 	import ArrowRight from '@lucide/svelte/icons/arrow-right';
 	import Clock from '@lucide/svelte/icons/clock';
 	import ListPlus from '@lucide/svelte/icons/list-plus';
+	import List from '@lucide/svelte/icons/list';
+	import ScrollText from '@lucide/svelte/icons/scroll-text';
+	import WandSparkles from '@lucide/svelte/icons/wand-sparkles';
+	import Hourglass from '@lucide/svelte/icons/hourglass';
+	import Circle from '@lucide/svelte/icons/circle';
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const ICONS: Record<string, Component<any>> = {
@@ -224,7 +229,12 @@
 		search: Search,
 		'arrow-right': ArrowRight,
 		clock: Clock,
-		'list-plus': ListPlus
+		'list-plus': ListPlus,
+		list: List,
+		'scroll-text': ScrollText,
+		'wand-sparkles': WandSparkles,
+		hourglass: Hourglass,
+		circle: Circle
 	};
 
 	export const ICON_NAMES = Object.keys(ICONS);

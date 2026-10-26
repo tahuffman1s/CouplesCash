@@ -23,7 +23,7 @@
 
 <svelte:head><title>{e.name} · CouplesCash</title></svelte:head>
 
-<AppBar title={e.name} subtitle={formatWeekdayDate(e.spentOn)} back="/bills?tab=expenses" />
+<AppBar title={e.name} subtitle={formatWeekdayDate(e.spentOn)} back="/transactions" />
 
 <main class="flex flex-col gap-4 px-4 pt-2">
 	<section class="card border border-base-300/60 bg-base-100 shadow-sm">

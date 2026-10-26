@@ -7,50 +7,42 @@ test('household settings: currency, week start and pay period flow through the a
 	await registerWithHousehold(page);
 	await addAccount(page, 'Everyday', '1300');
 
-	// --- general: EUR + Monday
+	// --- one settings page; the old URL lands on its Household section
 	await page.goto('/settings/household');
-	await page.getByLabel('Currency').selectOption('EUR');
-	await expect(page.getByText('€1,234.56')).toBeVisible(); // live preview
-	await page.getByRole('radiogroup', { name: 'Week starts on' }).getByText('Monday').click();
-	await page.getByRole('button', { name: 'Save', exact: true }).click();
-	await expect(page.getByText('Household settings saved')).toBeVisible();
+	await expect(page).toHaveURL(/\/settings#household$/);
+	const household = page.locator('#household');
+	await household.getByLabel('Currency').selectOption('EUR');
+	await expect(household.getByText('€1,234.56')).toBeVisible(); // live preview
+	await household.getByRole('radiogroup', { name: 'Week starts on' }).getByText('Monday').click();
+	await household.getByRole('button', { name: 'Save household' }).click();
+	await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 
-	// dashboard renders euros everywhere
-	await page.goto('/');
-	await expect(page.getByTestId('hero-net-worth')).toHaveText('€1,300');
-	const monthCard = page.locator('section[aria-labelledby="month"]');
-	await expect(monthCard).toContainText('€0.00');
-	await expect(monthCard).not.toContainText('$');
-	await expect(page.locator('section[aria-labelledby="networth"]')).not.toContainText('$');
-	// the payday card is replaced by a one-line setup CTA until a pay period exists
-	await expect(page.getByTestId('payday-setup')).toBeVisible();
+	// the week renders euros
+	await page.goto('/week');
+	await expect(page.getByTestId('stat-spendable')).toHaveText('€1,300.00');
+	await expect(page.getByTestId('left-at-end')).toHaveText('€1,300.00');
+	await expect(page.locator('main')).not.toContainText('$');
+	await expect(page.getByTestId('next-payday')).toHaveCount(0);
 
-	// calendar grid starts on Monday
-	await page.goto('/calendar');
+	// Bills › Calendar starts on Monday
+	await page.goto('/bills?view=calendar');
 	await expect(page.getByTestId('weekday-headers').locator('span').first()).toHaveText('M');
 
-	// --- pay period: preview updates live, then the dashboard card appears
-	await page.goto('/settings/household');
+	// --- pay period: preview updates live, then the week shows "Next payday"
+	await page.goto('/settings#household');
 	await expect(page.getByTestId('payday-preview')).toContainText('Pick a payday');
 	await page.getByRole('radiogroup', { name: 'Pay period' }).getByText('Every two weeks').click();
 	await page.getByLabel('A recent payday').fill(todayIso());
 	await expect(page.getByTestId('payday-preview')).toContainText(/Next payday:.*in 14 days/);
 	await page.getByRole('button', { name: 'Save pay period' }).click();
-	await expect(page.getByText('Household settings saved')).toBeVisible();
+	await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 
-	await page.goto('/');
-	const card = page.getByTestId('payday-card');
-	await expect(card).toBeVisible();
-	await expect(card).toContainText('14 days left');
-	await expect(page.getByTestId('spendable')).toHaveText('€1,300');
+	await page.goto('/week');
+	await expect(page.getByTestId('next-payday')).toContainText('Next payday');
 
-	// /payperiod shows the same header and period navigation works
-	await page.getByRole('link', { name: 'Details' }).click();
-	await expect(page).toHaveURL(/\/payperiod$/);
-	await expect(page.getByTestId('period-label')).toContainText('now');
-	await page.getByRole('link', { name: 'Next period' }).click();
-	await expect(page).toHaveURL(/\/payperiod\?date=\d{4}-\d{2}-\d{2}$/);
-	await expect(page.getByTestId('period-label')).not.toContainText('now');
+	// the old pay-period page folds into the week
+	await page.goto('/payperiod');
+	await expect(page).toHaveURL(/\/week$/);
 
 	// couple page explains re-inviting after a leave
 	await page.goto('/couple');

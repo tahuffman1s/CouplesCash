@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { centsToInput, currencySymbol, formatMoney, parseMoney } from './money.ts';
+import {
+	centsToInput,
+	currencySymbol,
+	flowTone,
+	formatMoney,
+	parseMoney,
+	signedMoney
+} from './money.ts';
 import { currency } from '#lib/state/currency.svelte.ts';
 
 describe('formatMoney', () => {
@@ -55,5 +62,19 @@ describe('parseMoney', () => {
 	it('round-trips through centsToInput', () => {
 		expect(centsToInput(123456)).toBe('1234.56');
 		expect(parseMoney(centsToInput(99))).toBe(99);
+	});
+});
+
+describe('signedMoney (v6 flows)', () => {
+	it('signs money out and in, leaves zero alone', () => {
+		expect(signedMoney(-1249)).toBe('−$12.49');
+		expect(signedMoney(320000)).toBe('+$3,200.00');
+		expect(signedMoney(0)).toBe('$0.00');
+		expect(signedMoney(-185000, { whole: true })).toBe('−$1,850');
+	});
+	it('colours by direction', () => {
+		expect(flowTone(-1)).toBe('text-error');
+		expect(flowTone(1)).toBe('text-success');
+		expect(flowTone(0)).toBe('');
 	});
 });

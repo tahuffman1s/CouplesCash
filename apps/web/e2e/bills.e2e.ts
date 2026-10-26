@@ -9,7 +9,7 @@ test('create a monthly bill: it appears on the calendar and can be marked paid',
 
 	await page.goto('/bills/new');
 	await page.getByRole('radiogroup', { name: 'Kind' }).getByText('Bill').click();
-	await page.getByLabel('Name').fill('Rent');
+	await page.getByLabel('Name', { exact: true }).fill('Rent');
 	await page.getByLabel('Amount').fill('1800');
 	await page.getByLabel('Repeats').selectOption('monthly');
 	await page.getByLabel('First due date').fill(today);
@@ -21,12 +21,13 @@ test('create a monthly bill: it appears on the calendar and can be marked paid',
 	// list shows it with the monthly-equivalent total
 	await page.goto('/bills');
 	await expect(page.getByRole('link', { name: /Rent/ })).toBeVisible();
-	await expect(page.getByTestId('monthly-total')).toHaveText('$1,800.00');
+	await expect(page.getByTestId('monthly-total')).toHaveText('−$1,800.00');
 	await page.getByRole('radio', { name: 'Income' }).click();
 	await expect(page.getByText('No income yet.')).toBeVisible();
 
-	// calendar: the day has an item, open the drawer and mark it paid
-	await page.goto('/calendar');
+	// Bills › Calendar: the day has an item, open the drawer and mark it paid
+	await page.getByRole('tab', { name: 'Calendar' }).click();
+	await expect(page).toHaveURL(/view=calendar/);
 	const day = page.locator(`[data-date="${today}"]`);
 	await expect(day).toHaveAttribute('aria-label', /1 item/);
 	await day.click();
@@ -59,5 +60,5 @@ test('create a monthly bill: it appears on the calendar and can be marked paid',
 	await page.getByRole('button', { name: 'Next month' }).click();
 	await expect(page.getByTestId('month-label')).not.toHaveText(label);
 	await expect(page.locator('[data-date][aria-label*="1 item"]')).toHaveCount(1);
-	expect(page.url()).toMatch(/\?m=\d{4}-\d{2}$/);
+	expect(page.url()).toMatch(/\?view=calendar&m=\d{4}-\d{2}$/);
 });

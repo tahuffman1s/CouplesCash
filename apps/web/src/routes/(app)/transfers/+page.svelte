@@ -78,7 +78,7 @@
 		busy = item.id;
 		try {
 			await apiFetch<InboxItem>(`/inbox/${item.id}/unmatch`, { method: 'POST' });
-			toasts.show('Back to review in the inbox', 'success');
+			toasts.show('Back in To review', 'success');
 			await invalidateAll();
 		} catch (e) {
 			toasts.show(
@@ -95,7 +95,7 @@
 
 <svelte:head><title>Transfers · CouplesCash</title></svelte:head>
 
-<AppBar title="Transfers" back="/more" subtitle="Money moved between your own accounts" />
+<AppBar title="Transfers" back="/accounts" subtitle="Money moved between your own accounts" />
 
 <main class="flex flex-col gap-4 px-4 pt-2">
 	{#if !data.household}

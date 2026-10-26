@@ -95,7 +95,7 @@
 	};
 	let txPage = $derived<AccountTransactionsPage>(data.transactions ?? EMPTY);
 	let txItems = $derived<AccountTransaction[]>(data.transactions?.items ?? []);
-	let filter = $state<TxFilter>('all');
+	let filter = $state<TxFilter>(untrack(() => data.filter));
 	let q = $state('');
 	let txLoading = $state(false);
 	let moreLoading = $state(false);
@@ -152,7 +152,7 @@
 	$effect(() => {
 		void data.transactions;
 		untrack(() => {
-			if (filter !== 'all' || q.trim()) void fetchTx();
+			if (filter !== data.filter || q.trim()) void fetchTx();
 		});
 	});
 	function setFilter(next: TxFilter) {
@@ -176,7 +176,7 @@
 		txItems = txItems.map((t) => (t.id === next.id ? { ...t, ...next } : t));
 	}
 	const monthHref = (n: number) =>
-		`?tab=transactions&month=${addMonths(`${data.month}-01`, n).slice(0, 7)}`;
+		`?tab=transactions&month=${addMonths(`${data.month}-01`, n).slice(0, 7)}${filter !== 'all' ? `&filter=${filter}` : ''}`;
 </script>
 
 <svelte:head><title>{account.name} · CouplesCash</title></svelte:head>

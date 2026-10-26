@@ -273,7 +273,7 @@
 				expense: null
 			},
 			(row) => post(`/inbox/${row.id}/unmatch`),
-			() => (label === 'Not a transfer' ? 'Not a transfer any more' : 'Back to review')
+			() => (label === 'Not a transfer' ? 'Not a transfer any more' : 'Back in To review')
 		);
 	}
 
@@ -312,7 +312,7 @@
 	const occurrences = $derived(candidates?.occurrences ?? []);
 	const peers = $derived(candidates?.transferPeers ?? []);
 	const STATE_CLASS: Record<string, string> = {
-		review: 'bg-warning/15 text-warning-content',
+		review: 'bg-warning/15 text-pending',
 		expense: 'bg-success/15 text-success',
 		paid: 'bg-success/15 text-success',
 		manual: 'bg-base-200 text-base-content/80',
@@ -367,7 +367,7 @@
 					<div class="flex shrink-0 items-center gap-1">
 						{#if current.pending}
 							<span
-								class="badge border-0 bg-warning/20 badge-sm font-medium text-warning-content"
+								class="badge border-0 bg-warning/20 badge-sm font-medium text-pending"
 								data-testid="sheet-pending">Pending</span
 							>
 						{/if}
@@ -697,7 +697,7 @@
 								<span class="min-w-0 flex-1">
 									<span class="block">{undoLabel}</span>
 									<span class="block text-xs font-normal text-base-content/60"
-										>Back to To review, undoing what was done</span
+										>Back to To review; undoes what was done</span
 									>
 								</span>
 							</button>

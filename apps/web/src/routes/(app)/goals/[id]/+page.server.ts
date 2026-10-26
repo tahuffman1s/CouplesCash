@@ -60,6 +60,6 @@ export const actions: Actions = {
 		} catch (e) {
 			if (!isApiError(e, 404)) return fail(500, { error: 'Could not remove the goal.' });
 		}
-		redirect(303, '/goals');
+		redirect(303, '/accounts#goals');
 	}
 };

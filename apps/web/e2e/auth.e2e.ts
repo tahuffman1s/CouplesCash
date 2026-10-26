@@ -7,17 +7,29 @@ test('unauthenticated / redirects to /login', async ({ page }) => {
 	await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
 });
 
-test('register lands on the dashboard empty state', async ({ page }) => {
+test('register lands on the Week with the household prompt', async ({ page }) => {
 	await register(page, 'Sam');
-	await expect(
-		page.getByRole('heading', { name: /Good (morning|afternoon|evening), Sam/ })
-	).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'This week' })).toBeVisible();
 	await expect(page.getByText('Start your shared household')).toBeVisible();
 	await expect(page.getByRole('link', { name: 'Set up our household' })).toBeVisible();
-	// bottom dock is present with the active item marked
-	await expect(
-		page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Home' })
-	).toHaveAttribute('aria-current', 'page');
+	// five tabs, Week marked
+	const dock = page.getByRole('navigation', { name: 'Primary' });
+	await expect(dock.getByRole('link')).toHaveText([
+		/Week/,
+		/Transactions/,
+		/Bills/,
+		/Money/,
+		/More/
+	]);
+	await expect(dock.getByRole('link', { name: 'Week' })).toHaveAttribute('aria-current', 'page');
+});
+
+test('signed-in visits to / and /login go to the Week', async ({ page }) => {
+	await register(page);
+	await page.goto('/');
+	await expect(page).toHaveURL(/\/week$/);
+	await page.goto('/login');
+	await expect(page).toHaveURL(/\/week$/);
 });
 
 test('/api without the X-Requested-With header is forbidden', async ({ page }) => {

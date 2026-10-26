@@ -10,7 +10,7 @@
 
 <svelte:head><title>New goal · CouplesCash</title></svelte:head>
 
-<AppBar title="New savings goal" back="/goals" />
+<AppBar title="New savings goal" back="/accounts#goals" />
 
 <main class="px-4 pt-2">
 	<form

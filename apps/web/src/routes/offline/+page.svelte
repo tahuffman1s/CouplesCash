@@ -24,5 +24,5 @@
 	>
 		Try again
 	</button>
-	<a href="/" class="link text-sm link-primary">Go to home</a>
+	<a href="/week" class="link text-sm link-primary">Go to home</a>
 </main>

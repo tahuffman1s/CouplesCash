@@ -4,7 +4,7 @@ import { registerWithHousehold } from './helpers';
 test('create an account: it appears in the list and in net worth', async ({ page }) => {
 	await registerWithHousehold(page);
 	await page.goto('/accounts');
-	await expect(page.getByText('No accounts yet')).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'No accounts yet' })).toBeVisible();
 	await page.getByRole('link', { name: 'Add your first account' }).click();
 	await expect(page).toHaveURL(/\/accounts\/new$/);
 
@@ -29,8 +29,7 @@ test('create an account: it appears in the list and in net worth', async ({ page
 	await expect(page.getByRole('link', { name: /Everyday checking/ })).toBeVisible();
 	await expect(page.getByTestId('net-worth')).toHaveText('$1,300.00');
 
-	// and in the dashboard hero
-	await page.goto('/');
-	await expect(page.getByText('Net worth')).toBeVisible();
-	await expect(page.getByText('$1,300', { exact: false }).first()).toBeVisible();
+	// and in the Week: spendable is the checking balance
+	await page.goto('/week');
+	await expect(page.getByTestId('stat-spendable')).toHaveText('$1,300.00');
 });

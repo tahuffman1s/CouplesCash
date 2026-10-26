@@ -1,5 +1,16 @@
-import { expect, test, type Page } from '@playwright/test';
-import { addAccount, registerWithHousehold, todayIso } from './helpers';
+import { expect, test } from '@playwright/test';
+import {
+	addAccount,
+	addBill,
+	linkDemoBank,
+	mapChecking,
+	registerWithHousehold,
+	reviewRow,
+	shiftDays,
+	skipUnlessMockBridge,
+	todayIso,
+	txRow
+} from './helpers';
 
 /**
  * The demo bank (`demo-token`) only exists in the mock API's fake Bridge. Against a real API the
@@ -7,55 +18,6 @@ import { addAccount, registerWithHousehold, todayIso } from './helpers';
  * skip themselves; the real bank-sync path is covered by apps/api/scripts/smoke.sh with a fake
  * SimpleFIN server.
  */
-async function skipUnlessMockBridge(page: Page) {
-	await page.goto('/settings/banks');
-	await expect(page.getByRole('heading', { name: 'How bank sync works' })).toBeVisible();
-	// the not-configured state only shows after a claim attempt (listing links always works)
-	await page.getByLabel('Setup token').fill('probe');
-	await page.getByRole('button', { name: 'Link bank' }).click();
-	await expect(page.getByRole('alert').or(page.getByTestId('banks-not-configured'))).toBeVisible();
-	const notConfigured = await page.getByTestId('banks-not-configured').count();
-	test.skip(notConfigured > 0, 'bank sync not configured on this API (demo bank is mock-only)');
-}
-
-/** Links the demo bank at /settings/banks and waits for its two external accounts. */
-async function linkDemoBank(page: Page) {
-	await page.goto('/settings/banks');
-	await expect(page.getByRole('heading', { name: 'How bank sync works' })).toBeVisible();
-	await page.getByLabel('Name').fill('Demo Bank');
-	await page.getByLabel('Setup token').fill('demo-token');
-	await page.getByRole('button', { name: 'Link bank' }).click();
-	await expect(page.getByText(/Linked Demo Bank · 2 accounts found/)).toBeVisible();
-	await expect(page.getByTestId('external-account')).toHaveCount(2);
-}
-
-async function mapChecking(page: Page, accountName: string) {
-	await page
-		.getByLabel('Mapped account for Demo Bank · Everyday Checking')
-		.selectOption({ label: accountName });
-	await expect(page.getByText(`Everyday Checking now updates ${accountName}`)).toBeVisible();
-}
-
-function shiftDays(iso: string, n: number): string {
-	const [y, m, d] = iso.split('-').map(Number);
-	const date = new Date(y, m - 1, d + n);
-	const pad = (x: number) => (x < 10 ? `0${x}` : `${x}`);
-	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-async function addBill(
-	page: Page,
-	opts: { kind?: 'Bill' | 'Income'; name: string; amount: string; firstDue: string }
-) {
-	await page.goto('/bills/new');
-	if (opts.kind) await page.getByRole('radiogroup', { name: 'Kind' }).getByText(opts.kind).click();
-	await page.getByLabel('Name').fill(opts.name);
-	await page.getByLabel('Amount').fill(opts.amount);
-	await page.getByLabel('Repeats').selectOption('monthly');
-	await page.getByLabel('First due date').fill(opts.firstDue);
-	await page.getByRole('button', { name: 'Save', exact: true }).click();
-	await expect(page).toHaveURL(/\/bills\/[0-9a-f-]+/);
-}
 
 test('link a bank: bad token, demo token, map + create accounts, sync cooldown, unlink', async ({
 	page
@@ -119,9 +81,7 @@ test('link a bank: bad token, demo token, map + create accounts, sync cooldown, 
 	await expect(page.getByTestId('net-worth')).toHaveText('$1,805.67');
 });
 
-test('inbox: suggestions, confirm as bill / expense, ignore + restore, bulk confirm', async ({
-	page
-}) => {
+test('To review: suggestions in words, one tap, ignore + undo, do all', async ({ page }) => {
 	await registerWithHousehold(page);
 	await addAccount(page, 'Everyday', '1000');
 	await skipUnlessMockBridge(page);
@@ -140,68 +100,54 @@ test('inbox: suggestions, confirm as bill / expense, ignore + restore, bulk conf
 	await linkDemoBank(page);
 	await mapChecking(page, 'Everyday');
 
-	// dashboard card → inbox
-	await page.goto('/');
-	const card = page.getByTestId('inbox-card');
-	await expect(card).toContainText('5 transactions to review');
-	await expect(card).toContainText('2 suggested');
-	await card.click();
-	await expect(page).toHaveURL(/\/inbox$/);
+	// the week sends you to Transactions; the tab badge counts what needs a person
+	await page.goto('/week');
+	await expect(page.getByTestId('review-banner')).toContainText('5 to review');
+	await expect(page.getByTestId('review-badge')).toHaveText('5');
+	await page.getByTestId('review-banner').click();
+	await expect(page).toHaveURL(/\/transactions$/);
 
-	const row = (text: string) => page.getByTestId('inbox-row').filter({ hasText: text });
-	await expect(page.getByTestId('pending-count')).toHaveText('5');
-	await expect(page.getByTestId('confirm-all')).toContainText('Confirm all suggested (2)');
-	await expect(row('RENT PAYMENT').getByTestId('suggestion-chip')).toContainText('Rent · due');
-	await expect(row('RENT PAYMENT').getByTestId('inbox-amount')).toHaveText('−$1,850.00');
-	await expect(row('KROGER #123').getByTestId('suggestion-chip')).toContainText('Groceries');
-	await expect(row('ACME PAYROLL').getByTestId('inbox-amount')).toHaveText('+$3,200.00');
+	const row = (text: string) => reviewRow(page, text);
+	await expect(page.getByTestId('review-row')).toHaveCount(5);
+	await expect(row('RENT PAYMENT').getByTestId('review-primary')).toHaveText("It's Rent");
+	await expect(row('RENT PAYMENT').getByTestId('review-amount')).toHaveText('−$1,850.00');
+	await expect(row('KROGER #123').getByTestId('review-primary')).toHaveText('Groceries');
+	await expect(row('ACME PAYROLL').getByTestId('review-primary')).toHaveText("It's Paycheck");
+	await expect(row('ACME PAYROLL').getByTestId('review-amount')).toHaveText('+$3,200.00');
 	await expect(row('COFFEE')).toContainText('Pending');
+	await expect(page.getByTestId('do-all')).toContainText('Do all suggestions (2)');
 
-	// confirm Rent with its suggestion → occurrence paid
-	await row('RENT PAYMENT').getByRole('button', { name: 'Confirm RENT PAYMENT' }).click();
+	// one tap: Rent is paid, the row moves down to the posted list
+	await row('RENT PAYMENT').getByTestId('review-primary').click();
 	await expect(page.getByText('Rent marked paid')).toBeVisible();
-	await expect(row('RENT PAYMENT').getByTestId('inbox-outcome')).toContainText('Paid Rent');
-	await expect(page.getByTestId('pending-count')).toHaveText('4');
+	await expect(row('RENT PAYMENT')).toHaveCount(0);
+	await expect(txRow(page, 'RENT PAYMENT').getByTestId('tx-status')).toHaveText('Rent');
+	await expect(page.getByTestId('review-badge')).toHaveText('4');
 
-	// confirm Kroger → expense in Groceries
-	await row('KROGER #123').getByRole('button', { name: 'Confirm KROGER #123' }).click();
+	// Kroger → expense in Groceries
+	await row('KROGER #123').getByTestId('review-primary').click();
 	await expect(page.getByText('Expense added in Groceries')).toBeVisible();
-	await expect(row('KROGER #123').getByTestId('inbox-outcome')).toContainText(
-		'Expense in Groceries'
-	);
+	await expect(txRow(page, 'KROGER #123').getByTestId('tx-status')).toHaveText('Groceries');
 
-	// ignore the pending coffee, then bring it back
-	await row('COFFEE').getByRole('button', { name: 'Ignore COFFEE' }).click();
-	await expect(row('COFFEE').getByTestId('inbox-outcome')).toContainText('Ignored');
-	await expect(page.getByTestId('pending-count')).toHaveText('2');
-	await row('COFFEE').getByRole('button', { name: 'Restore COFFEE' }).click();
-	await expect(page.getByText('Back in the inbox')).toBeVisible();
-	await expect(row('COFFEE').getByRole('button', { name: 'Confirm COFFEE' })).toBeVisible();
-	await expect(page.getByTestId('pending-count')).toHaveText('3');
+	// "Something else" opens the sheet: coffee → Groceries instead of the suggested Fun
+	await row('COFFEE').getByTestId('review-else').click();
+	await expect(page.getByRole('dialog')).toContainText('COFFEE');
+	await page
+		.getByTestId('transaction-sheet')
+		.getByRole('button', { name: 'Groceries', exact: true })
+		.click();
+	await expect(txRow(page, 'COFFEE').getByTestId('tx-status')).toHaveText('Groceries');
 
-	// change a suggestion through the sheet: coffee → Fun is suggested, pick Groceries instead
-	await row('COFFEE').getByTestId('suggestion-chip').click();
-	const sheet = page.getByRole('dialog');
-	await expect(sheet).toContainText('COFFEE');
-	await sheet.getByRole('button', { name: 'Groceries' }).click();
-	await expect(row('COFFEE').getByTestId('inbox-outcome')).toContainText('Expense in Groceries');
-
-	// bulk: the payroll row (matched to Paycheck) is the only suggested one left
-	await expect(page.getByTestId('confirm-all')).toContainText('Confirm all suggested (1)');
-	await page.getByTestId('confirm-all').click();
-	await expect(page.getByText('1 confirmed')).toBeVisible();
-	await expect(page.getByTestId('pending-count')).toHaveText('1');
-	await expect(page.getByTestId('inbox-row')).toHaveCount(1);
+	// do all: the payroll row (matched to Paycheck) is the only confident one left
+	await expect(page.getByTestId('do-all')).toContainText('Do all suggestions (1)');
+	await page.getByTestId('do-all').click();
+	await expect(page.getByText('1 done')).toBeVisible();
+	await expect(page.getByTestId('review-row')).toHaveCount(1);
 	await expect(row('NETFLIX.COM')).toBeVisible();
+	await expect(txRow(page, 'ACME PAYROLL').getByTestId('tx-status')).toHaveText('Paycheck');
 
-	// Confirmed filter lists what happened
-	await page.getByRole('radio', { name: 'Confirmed' }).click();
-	await expect(page).toHaveURL(/status=confirmed/);
-	await expect(page.getByTestId('inbox-row')).toHaveCount(4);
-	await expect(row('ACME PAYROLL').getByTestId('inbox-outcome')).toContainText('Paid Paycheck');
-
-	// calendar: Rent is paid and carries the From bank badge
-	await page.goto(`/calendar?m=${today.slice(0, 7)}`);
+	// Bills › Calendar: Rent is paid and carries the From bank badge
+	await page.goto(`/bills?view=calendar&m=${today.slice(0, 7)}`);
 	await page.locator(`[data-date="${firstOfMonth}"]`).click();
 	const dialog = page.getByRole('dialog');
 	await expect(dialog.getByRole('button', { name: 'Mark Rent unpaid' })).toHaveAttribute(
@@ -210,9 +156,7 @@ test('inbox: suggestions, confirm as bill / expense, ignore + restore, bulk conf
 	);
 	await expect(dialog.getByTestId('from-bank')).toBeVisible();
 
-	// Bills › Expenses has the Kroger expense; no balance change (deduct = false)
-	await page.goto(`/bills?tab=expenses&m=${today.slice(0, 7)}`);
-	await expect(page.getByRole('link', { name: /KROGER #123/ })).toBeVisible();
+	// no balance change from confirming an expense (deduct = false)
 	await page.goto('/accounts');
 	await expect(page.getByTestId('net-worth')).toHaveText('$2,345.67');
 
@@ -221,9 +165,10 @@ test('inbox: suggestions, confirm as bill / expense, ignore + restore, bulk conf
 	await expect(page.locator('main li').filter({ hasText: 'linked bank Demo Bank' })).toBeVisible();
 	await expect(page.locator('main li').filter({ hasText: 'matched Rent' })).toBeVisible();
 
-	// More menu badge
-	await page.goto('/more');
-	await expect(page.getByTestId('inbox-badge')).toHaveText('1');
+	// the old inbox URL lands on Transactions
+	await page.goto('/inbox');
+	await expect(page).toHaveURL(/\/transactions$/);
+	await expect(page.getByTestId('review-badge')).toHaveText('1');
 });
 
 test('bank sync not configured: the claim form explains the missing DATA_KEY', async ({ page }) => {

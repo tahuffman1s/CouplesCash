@@ -11,7 +11,13 @@ export const load: PageServerLoad = async (event) => {
 		client.get<Category[]>('/categories'),
 		client.get<Account[]>('/accounts')
 	]);
-	return { categories, accounts };
+	// prefill from the quick-add sheet ("Already spent? Add an expense")
+	const q = event.url.searchParams;
+	const name = q.get('name')?.slice(0, 80);
+	const amount = q.get('amount')?.slice(0, 20);
+	const prefill =
+		name || amount ? { name: name ?? '', amount: amount ?? '', deduct: 'on' } : undefined;
+	return { categories, accounts, prefill };
 };
 
 export const actions: Actions = {
@@ -25,6 +31,6 @@ export const actions: Actions = {
 			const message = isApiError(e) ? e.message : 'Could not save. Try again.';
 			return fail(isApiError(e) ? e.status : 500, { error: message, values: echo(data) });
 		}
-		redirect(303, `/bills?tab=expenses&m=${parsed.value.spentOn.slice(0, 7)}&created=1`);
+		redirect(303, '/transactions?added=1');
 	}
 };

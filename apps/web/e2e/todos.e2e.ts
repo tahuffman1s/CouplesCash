@@ -1,10 +1,13 @@
 import { expect, test } from '@playwright/test';
 import { addAccount, registerWithHousehold } from './helpers';
 
-test('to-pay checklist: add, done/undone, reorder, dashboard', async ({ page }) => {
+test('to-pay checklist: add, done/undone, reorder', async ({ page }) => {
 	await registerWithHousehold(page, 'Kaylee');
-	await addAccount(page, 'Everyday', '100'); // the dashboard shows widgets once anything exists
-	await page.goto('/todos');
+	await addAccount(page, 'Everyday', '100');
+	// More › To pay
+	await page.goto('/more');
+	await page.getByRole('link', { name: /To pay/ }).click();
+	await expect(page).toHaveURL(/\/todos$/);
 	await expect(page.getByText('Nothing on the list')).toBeVisible();
 
 	await page.getByLabel('Title').fill('Transfer to savings');
@@ -28,15 +31,18 @@ test('to-pay checklist: add, done/undone, reorder, dashboard', async ({ page }) 
 		'Call insurance'
 	);
 
-	// dashboard shows open items with checkboxes
-	await page.goto('/');
-	const dash = page.getByTestId('dashboard-todos');
-	await expect(dash.getByTestId('todo-row')).toHaveCount(2);
-	await dash.getByRole('checkbox', { name: 'Mark "Call insurance" done' }).click();
-	await expect(dash.getByText(/done by Kaylee/)).toBeVisible();
+	// tick one off (optimistic; wait for the API before reloading)
+	const doneSaved = page.waitForResponse(
+		(r) => /\/todos\/[^/]+\/done$/.test(r.url()) && r.request().method() === 'POST' && r.ok()
+	);
+	await page
+		.getByTestId('open-todos')
+		.getByRole('checkbox', { name: 'Mark "Call insurance" done' })
+		.click();
+	await doneSaved;
 
 	// done items are hidden by default and shown with the toggle; undone brings it back
-	await page.goto('/todos');
+	await page.reload();
 	await expect(page.getByTestId('open-todos').getByTestId('todo-row')).toHaveCount(1);
 	await page.getByTestId('toggle-done').click();
 	await expect(page).toHaveURL(/done=1/);
