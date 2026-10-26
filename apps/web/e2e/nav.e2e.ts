@@ -77,6 +77,11 @@ test('notifications: just the payday push and bill reminders', async ({ page }) 
 	await register(page, 'Alex', uniqueEmail('push'));
 	await page.goto('/settings#you');
 	const toggle = page.getByTestId('payday-push-toggle');
+	await expect(toggle.or(page.getByTestId('push-not-configured')).first()).toBeVisible();
+	test.skip(
+		(await page.getByTestId('push-not-configured').count()) > 0,
+		'push is not configured on this API (the VAPID key is mock-only)'
+	);
 	await expect(toggle).toBeChecked();
 	await expect(page.getByText('Bill reminders')).toBeVisible();
 	await expect(page.getByText(/Partner activity/)).toHaveCount(0);
