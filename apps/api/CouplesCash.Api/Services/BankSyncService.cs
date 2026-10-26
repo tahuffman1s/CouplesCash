@@ -117,7 +117,11 @@ public sealed class BankSyncService(
             await using var uow = await db.BeginUnitOfWorkAsync(ct);
             var newIds = new List<Guid>();
             var updatedAccounts = 0;
+            var stats = new ReconcileStats();
             string? firstOrg = null;
+
+            // v5: absence is only judged on a clean response (no Bridge errors) for accounts that are in it.
+            var judgeAbsence = set.Errors.Count == 0;
 
             foreach (var account in set.Accounts)
             {
@@ -133,29 +137,34 @@ public sealed class BankSyncService(
                     }
                 }
 
-                foreach (var tx in account.Transactions)
-                {
-                    var description = string.IsNullOrWhiteSpace(tx.Description) ? tx.Payee ?? "(no description)" : tx.Description.Trim();
-                    var row = new NewImportedTransaction(Source, external.Id, external.AccountId, tx.Id,
-                        Fingerprint.ForExternal(Source, account.Id, tx.Id), tx.PostedOn, tx.AmountCents, description, tx.Payee, tx.Memo, tx.Pending);
-                    if (await imports.InsertAsync(uow.Connection, householdId, row, now, ct) is { } id)
-                    {
-                        newIds.Add(id);
-                    }
-                }
+                newIds.AddRange(await ReconcileAccountAsync(uow, link, account, external, start, today, judgeAbsence, currency, now, stats, ct));
             }
 
             var newRows = await imports.ListByIdsAsync(uow.Connection, householdId, newIds, ct);
-            var suggestions = await inbox.SuggestAsync(uow.Connection, householdId, newRows, ct);
-            var autoMatched = await inbox.AutoMatchAsync(uow, householdId, currency, newRows, suggestions, ct);
+            var suggested = await inbox.SuggestAsync(uow.Connection, householdId, newRows, ct);
+            var autoMatched = await inbox.AutoMatchAsync(uow, householdId, currency, newRows, suggested.Suggestions, ct);
+            var autoIgnored = await inbox.AutoIgnoreTransfersAsync(uow, householdId, newRows, suggested, ct);
 
             var nameOverride = link.Name == DefaultLinkName && firstOrg is not null ? firstOrg : null;
             var updated = await banks.MarkSyncedAsync(uow.Connection, householdId, link.Id, now, manual, set.Errors, nameOverride, ct) ?? link;
 
-            var toReview = newRows.Count - autoMatched;
+            var toReview = Math.Max(0, newRows.Count - autoMatched - autoIgnored);
             await activity.RecordAsync(uow.Connection, uow.Transaction, householdId, actorId, "bank.synced", "bank", link.Id,
                 ActivitySummaries.BankSynced(updated.Name, newRows.Count, autoMatched),
-                new { linkId = link.Id, newTransactions = newRows.Count, updatedAccounts, autoMatched, errors = set.Errors, manual }, ct);
+                new
+                {
+                    linkId = link.Id,
+                    newTransactions = newRows.Count,
+                    updatedAccounts,
+                    autoMatched,
+                    autoIgnoredTransfers = autoIgnored,
+                    posted = stats.Posted,
+                    replaced = stats.Replaced,
+                    dropped = stats.Dropped,
+                    superseded = stats.Superseded,
+                    errors = set.Errors,
+                    manual,
+                }, ct);
 
             if (toReview > 0)
             {
@@ -168,8 +177,9 @@ public sealed class BankSyncService(
             }
 
             await uow.CommitAsync(ct);
-            logger.LogInformation("Scheduler bank sync of {LinkId}: {New} new, {Updated} balance(s) updated, {Auto} auto-matched, {Errors} bridge error(s)",
-                link.Id, newRows.Count, updatedAccounts, autoMatched, set.Errors.Count);
+            logger.LogInformation(
+                "Scheduler bank sync of {LinkId}: {New} new, {Updated} balance(s) updated, {Auto} auto-matched, {Transfers} transfer(s) auto-ignored, {Posted} posted ({Replaced} under a new id), {Dropped} dropped, {Superseded} superseded, {Errors} bridge error(s)",
+                link.Id, newRows.Count, updatedAccounts, autoMatched, autoIgnored, stats.Posted, stats.Replaced, stats.Dropped, stats.Superseded, set.Errors.Count);
 
             return new SyncResultDto(link.Id, newRows.Count, updatedAccounts, autoMatched, set.Errors, now);
         }
@@ -217,6 +227,199 @@ public sealed class BankSyncService(
             }
         }
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // v5: pending lifecycle per external account
+    // ---------------------------------------------------------------------------------------------
+
+    private sealed class ReconcileStats
+    {
+        public int Posted { get; set; }
+
+        public int Replaced { get; set; }
+
+        public int Dropped { get; set; }
+
+        public int Superseded { get; set; }
+    }
+
+    /// <summary>
+    /// PLAN-V5 §1 for one external account of a successful response: same-id rows that posted are refreshed in place, a posted
+    /// transaction with a new id replaces its absent pending row in place (keeping status, suggestion and confirmation; a confirmed
+    /// expense / matched payment follows the posted amount), absent stale authorizations are dropped (their confirmation reversed),
+    /// and everything else is inserted. Returns the ids of the inserted rows.
+    /// </summary>
+    private async Task<List<Guid>> ReconcileAccountAsync(
+        UnitOfWork uow,
+        BankLinkRow link,
+        SimpleFinAccount account,
+        ExternalAccountRow external,
+        DateOnly windowStart,
+        DateOnly today,
+        bool judgeAbsence,
+        string currency,
+        DateTime now,
+        ReconcileStats stats,
+        CancellationToken ct)
+    {
+        var householdId = link.HouseholdId;
+        var conn = uow.Connection;
+        var byExternalId = new Dictionary<string, SimpleFinTransaction>(StringComparer.Ordinal);
+        foreach (var tx in account.Transactions)
+        {
+            byExternalId.TryAdd(tx.Id, tx);
+        }
+
+        var fingerprints = byExternalId.Keys.ToDictionary(id => id, id => Fingerprint.ForExternal(Source, account.Id, id), StringComparer.Ordinal);
+        var stored = await imports.ListForReconcileAsync(conn, householdId, external.Id, fingerprints.Values.ToList(),
+            windowStart.AddDays(-PendingReconciler.DaysAfter), ct);
+        var storedById = stored.ToDictionary(r => r.Id);
+
+        var incoming = byExternalId.Values
+            .Select(tx => new ReconcileIncoming(tx.Id, tx.Pending, tx.PostedOn, tx.AmountCents, DescriptionOf(tx), tx.Payee))
+            .ToList();
+        var existing = stored
+            .Select(r => new ReconcileExisting(r.Id, r.ExternalId, r.Pending, r.PostedOn, r.AmountCents, r.Description, r.Payee, r.Status, r.IgnoreReason, r.CreatedAt))
+            .ToList();
+        var result = PendingReconciler.Reconcile(existing, incoming, windowStart, today, judgeAbsence);
+
+        // 1. Same id: a dropped authorization that reappears comes back; a pending row that posted is refreshed in place.
+        foreach (var same in result.SameId)
+        {
+            var row = await LockedAsync(conn, householdId, same.ExistingId, ct);
+            if (row is null)
+            {
+                continue;
+            }
+
+            if (row.IgnoreReason == PendingReconciler.Dropped)
+            {
+                await imports.RestoreAsync(conn, householdId, row.Id, ct);
+                await activity.RecordAsync(conn, uow.Transaction, householdId, null, "transaction.restored", "transaction", row.Id,
+                    ActivitySummaries.TransactionRestored(InboxService.DisplayName(row), row.AmountCents, currency),
+                    new { transactionId = row.Id, amountCents = row.AmountCents, reason = "reappeared" }, ct);
+            }
+
+            if (same.Posts)
+            {
+                await ApplyPostedAsync(uow, householdId, row, same.Incoming, externalId: null, fingerprint: null, byExternalId, currency, now, ct);
+                stats.Posted++;
+            }
+        }
+
+        // 2. A posted transaction with a new id takes over its absent pending row.
+        foreach (var replacement in result.Replacements)
+        {
+            var row = await LockedAsync(conn, householdId, replacement.ExistingId, ct);
+            if (row is null)
+            {
+                continue;
+            }
+
+            var externalId = replacement.Incoming.ExternalId;
+            await ApplyPostedAsync(uow, householdId, row, replacement.Incoming, externalId, fingerprints[externalId], byExternalId, currency, now, ct);
+            stats.Posted++;
+            stats.Replaced++;
+        }
+
+        // 3. The posted version is already its own row: hide one of the two (the reviewed one survives).
+        foreach (var pair in result.Superseded)
+        {
+            var hidden = await LockedAsync(conn, householdId, pair.HiddenId, ct);
+            var survivor = await LockedAsync(conn, householdId, pair.SurvivorId, ct);
+            if (hidden is null || survivor is null)
+            {
+                continue;
+            }
+
+            await inbox.HideAsync(uow, householdId, link.CreatedBy, currency, hidden, PendingReconciler.Superseded, ct);
+            if (pair.ApplyToSurvivor)
+            {
+                await ApplyPostedAsync(uow, householdId, survivor, pair.Posted, externalId: null, fingerprint: null, byExternalId, currency, now, ct);
+            }
+
+            stats.Superseded++;
+        }
+
+        // 4. Authorizations that fell off the feed.
+        foreach (var id in result.Dropped)
+        {
+            var row = await LockedAsync(conn, householdId, id, ct);
+            if (row is null || !row.Pending || row.IsHidden)
+            {
+                continue;
+            }
+
+            await inbox.HideAsync(uow, householdId, link.CreatedBy, currency, row, PendingReconciler.Dropped, ct);
+            stats.Dropped++;
+        }
+
+        // 5. New rows.
+        var newIds = new List<Guid>();
+        foreach (var fresh in result.New)
+        {
+            var tx = byExternalId[fresh.ExternalId];
+            var row = new NewImportedTransaction(Source, external.Id, external.AccountId, tx.Id, fingerprints[tx.Id], tx.PostedOn, tx.AmountCents,
+                fresh.Description, tx.Payee, tx.Memo, tx.Pending);
+            if (await imports.InsertAsync(conn, householdId, row, now, ct) is { } id)
+            {
+                newIds.Add(id);
+            }
+        }
+
+        await imports.TouchSeenAsync(conn, householdId, fingerprints.Values.ToList(), now, ct);
+        return newIds;
+    }
+
+    /// <summary>Writes the posted values onto a row (optionally under a new external id), lets a confirmation follow, records <c>transaction.posted</c> when the amount changed.</summary>
+    private async Task ApplyPostedAsync(
+        UnitOfWork uow,
+        Guid householdId,
+        ImportedTransactionRow row,
+        ReconcileIncoming posted,
+        string? externalId,
+        byte[]? fingerprint,
+        IReadOnlyDictionary<string, SimpleFinTransaction> byExternalId,
+        string currency,
+        DateTime now,
+        CancellationToken ct)
+    {
+        var memo = byExternalId.TryGetValue(posted.ExternalId, out var tx) ? tx.Memo : row.Memo;
+        await imports.ApplyPostedAsync(uow.Connection, householdId, row.Id, externalId, fingerprint, posted.PostedOn, posted.AmountCents,
+            posted.Description, posted.Payee, memo, now, ct);
+
+        var amountChanged = row.AmountCents != posted.AmountCents;
+        if (amountChanged || row.PostedOn != posted.PostedOn)
+        {
+            await inbox.FollowPostedAsync(uow.Connection, householdId, row, posted.AmountCents, posted.PostedOn, ct);
+        }
+
+        if (amountChanged)
+        {
+            await activity.RecordAsync(uow.Connection, uow.Transaction, householdId, null, "transaction.posted", "transaction", row.Id,
+                ActivitySummaries.TransactionPosted(InboxService.DisplayName(row), row.AmountCents, posted.AmountCents, currency),
+                new
+                {
+                    transactionId = row.Id,
+                    fromCents = row.AmountCents,
+                    toCents = posted.AmountCents,
+                    postedOn = posted.PostedOn,
+                    newExternalId = externalId is not null,
+                    status = row.Status,
+                    expenseId = row.ConfirmedExpenseId,
+                    itemId = row.ConfirmedItemId,
+                }, ct);
+        }
+    }
+
+    private async Task<ImportedTransactionRow?> LockedAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct)
+    {
+        await imports.LockAsync(conn, householdId, id, ct);
+        return await imports.GetAsync(conn, householdId, id, ct);
+    }
+
+    private static string DescriptionOf(SimpleFinTransaction tx) =>
+        string.IsNullOrWhiteSpace(tx.Description) ? tx.Payee ?? "(no description)" : tx.Description.Trim();
 
     // ---------------------------------------------------------------------------------------------
     // Mapping

@@ -33,6 +33,16 @@ public static class InboxEndpoints
         group.MapPost("/bulk", Bulk).WithValidation<InboxBulkRequest>()
             .WithSummary("{ action:'confirm-suggested'|'ignore', ids? } — no ids = every pending row; confirm-suggested takes confidence ≥ 70 only");
 
+        // v5: matching from anywhere, transfers, unmatch.
+        group.MapGet("/{id:guid}/candidates", Candidates)
+            .WithSummary("Ranked bill/income occurrences within ±days (default 30) and transfer peers (other account, opposite sign, 1 %, ±5 days)");
+        group.MapPost("/{id:guid}/match", Match).WithValidation<InboxMatchRequest>()
+            .WithSummary("Match a row in any status to an occurrence ({ itemId, dueDate }); reverses a previous expense/payment/transfer · 409 when paid by another transaction or by hand");
+        group.MapPost("/{id:guid}/transfer", Transfer).WithValidation<InboxTransferRequest>()
+            .WithSummary("Mark as transfer ({ peerId? }): pairs both rows, or one-sided (learns the payee)");
+        group.MapPost("/{id:guid}/unmatch", Unmatch)
+            .WithSummary("Back to pending from any status, reversing expense / payment / transfer (and the transfer peer)");
+
         return group;
     }
 
@@ -50,7 +60,8 @@ public static class InboxEndpoints
         CancellationToken ct,
         string? status = null,
         string? before = null,
-        int limit = DefaultLimit)
+        int limit = DefaultLimit,
+        string? includeHidden = null)
     {
         if (status is not null && !Statuses.Contains(status, StringComparer.Ordinal))
         {
@@ -71,7 +82,7 @@ public static class InboxEndpoints
         }
 
         var size = Math.Clamp(limit, 1, MaxLimit);
-        var rows = await imports.ListAsync(principal.GetHouseholdId(), status, cursor, size, ct);
+        var rows = await imports.ListAsync(principal.GetHouseholdId(), status, cursor, size, ct, IsTrue(includeHidden));
         var page = rows.Take(size).Select(r => r.ToDto()).ToList();
         var nextBefore = rows.Count > size ? Cursor(rows[size - 1]) : null;
         return TypedResults.Ok(new InboxPage(page, nextBefore));
@@ -207,7 +218,7 @@ public static class InboxEndpoints
             }
             else if (row.SuggestedTransfer)
             {
-                error = await inbox.IgnoreAsync(uow, householdId, userId, actorName, currency, row, quiet: true, ct);
+                error = await inbox.IgnoreAsync(uow, householdId, userId, actorName, currency, row, quiet: true, ct, reason: "transfer");
                 if (error is null)
                 {
                     ignored++;
@@ -246,6 +257,88 @@ public static class InboxEndpoints
         await uow.CommitAsync(ct);
         return TypedResults.Ok(new BulkResultDto(confirmed, ignored, skipped));
     }
+
+    private static async Task<Results<Ok<CandidatesResponse>, NotFound, ValidationProblem>> Candidates(
+        Guid id,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        ImportRepository imports,
+        InboxService inbox,
+        CancellationToken ct,
+        int days = DefaultCandidateDays)
+    {
+        if (days is < 1 or > MaxCandidateDays)
+        {
+            return Problems.Validation("days", $"Must be between 1 and {MaxCandidateDays}.");
+        }
+
+        var householdId = principal.GetHouseholdId();
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var row = await imports.GetAsync(conn, householdId, id, ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        return TypedResults.Ok(await inbox.CandidatesAsync(conn, householdId, row, days, ct));
+    }
+
+    private static Task<Results<Ok<InboxItemDto>, NotFound, ValidationProblem, ProblemHttpResult>> Match(
+        Guid id, InboxMatchRequest request, ClaimsPrincipal principal, NpgsqlDataSource db, ImportRepository imports, HouseholdRepository households, InboxService inbox, CancellationToken ct) =>
+        Act(id, principal, db, imports, households, ct,
+            (uow, hh, user, name, currency, row) => inbox.MatchAsync(uow, hh, user, name, currency, row, request.ItemId!.Value, request.DueDate!.Value, quiet: false, ct));
+
+    private static Task<Results<Ok<InboxItemDto>, NotFound, ValidationProblem, ProblemHttpResult>> Transfer(
+        Guid id, InboxTransferRequest request, ClaimsPrincipal principal, NpgsqlDataSource db, ImportRepository imports, HouseholdRepository households, InboxService inbox, CancellationToken ct) =>
+        Act(id, principal, db, imports, households, ct,
+            (uow, hh, user, name, currency, row) => inbox.TransferAsync(uow, hh, user, name, currency, row, request.PeerId, ct));
+
+    private static Task<Results<Ok<InboxItemDto>, NotFound, ValidationProblem, ProblemHttpResult>> Unmatch(
+        Guid id, ClaimsPrincipal principal, NpgsqlDataSource db, ImportRepository imports, HouseholdRepository households, InboxService inbox, CancellationToken ct) =>
+        Act(id, principal, db, imports, households, ct,
+            (uow, hh, user, name, currency, row) => inbox.UnmatchAsync(uow, hh, user, name, currency, row, ct));
+
+    /// <summary>Like <see cref="Review"/> but maps <see cref="InboxError.Conflict"/> to 409.</summary>
+    private static async Task<Results<Ok<InboxItemDto>, NotFound, ValidationProblem, ProblemHttpResult>> Act(
+        Guid id,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        ImportRepository imports,
+        HouseholdRepository households,
+        CancellationToken ct,
+        Func<UnitOfWork, Guid, Guid, string?, string, ImportedTransactionRow, Task<InboxError?>> action)
+    {
+        var householdId = principal.GetHouseholdId();
+        var currency = await households.CurrencyAsync(householdId, ct);
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        await imports.LockAsync(uow.Connection, householdId, id, ct);
+        var row = await imports.GetAsync(uow.Connection, householdId, id, ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        var error = await action(uow, householdId, principal.GetUserId(), principal.GetDisplayName(), currency, row);
+        if (error is { Conflict: true })
+        {
+            return Problems.Conflict("Occurrence already paid", error.Message);
+        }
+
+        if (error is not null)
+        {
+            return Problems.Validation(error.Field, error.Message);
+        }
+
+        var fresh = await imports.GetAsync(uow.Connection, householdId, id, ct) ?? row;
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(fresh.ToDto());
+    }
+
+    internal static bool IsTrue(string? flag) => flag is "1" or "true" or "True" or "yes";
+
+    public const int DefaultCandidateDays = 30;
+    public const int MaxCandidateDays = 90;
 
     /// <summary>Cursor = "YYYY-MM-DD_&lt;uuid&gt;" (a bare date means "everything before that date").</summary>
     internal static string Cursor(ImportedTransactionRow last) => $"{last.PostedOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}_{last.Id:D}";

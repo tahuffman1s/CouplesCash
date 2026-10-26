@@ -649,6 +649,219 @@ if [[ -n "${SMOKE_SIMPLEFIN_PORT:-}" ]]; then
   request POST "/v1/inbox/$TX_KROGER/restore" "$A_TOKEN"; expect 200 "restore the confirmed Kroger expense"
   request GET "/v1/expenses/$KROGER_EXP" "$A_TOKEN"; expect 404 "restored expense is gone"
 
+  # -------------------------------------------------------------------------------------------
+  # v5: pending lifecycle, transfers, per-account transactions, matching from anywhere.
+  # The fake Bridge's phases are picked up by the scheduler (Sync__IntervalHours=0), so every step polls for its effect.
+  # -------------------------------------------------------------------------------------------
+  if [[ "${SMOKE_SCHEDULER_WAIT:-0}" -gt 0 ]]; then
+    phase() { curl -fs -X POST "$FAKE/__phase/$1" >/dev/null || fail "could not enable phase $1 on the fake Bridge"; }
+    wait_for() { # wait_for LABEL PATH JQ-FILTER — polls (the scheduler syncs every tick) until the filter holds
+      local label="$1" path="$2" filter="$3"
+      for _ in $(seq 1 "$SMOKE_SCHEDULER_WAIT"); do
+        request GET "$path" "$A_TOKEN"
+        if [[ "$STATUS" == "200" ]] && echo "$BODY" | jq -e "$filter" >/dev/null 2>&1; then pass "$label"; return 0; fi
+        sleep 1
+      done
+      echo "$BODY" | head -c 1200; echo; fail "$label: not observed within ${SMOKE_SCHEDULER_WAIT}s"
+    }
+    check() { # check LABEL JQ-FILTER — on the last $BODY
+      if echo "$BODY" | jq -e "$2" >/dev/null 2>&1; then pass "$1"; else echo "$BODY" | head -c 1200; echo; fail "$1"; fi
+    }
+    FUN="$(request GET /v1/categories "$A_TOKEN"; echo "$BODY" | jq -r '.[] | select(.name=="Fun") | .id')"
+    FILL_DATE="$(date -u -d "$TODAY_UTC -6 days" +%F)"
+    MONTH_UTC="$(date -u +%Y-%m)"
+
+    echo "--- v5: pending lifecycle (phase 4: pending THE DINER −40.00 + a \$1.00 fuel hold)"
+    phase 4
+    wait_for "pending THE DINER and the fuel hold synced" "/v1/inbox?status=pending&limit=200" \
+      '([.items[] | select(.description=="THE DINER" and .pending and .amountCents==-4000)] | length==1) and ([.items[] | select(.description=="SHELL OIL 12345" and .pending and .amountCents==-100)] | length==1)'
+    TX_DINER="$(echo "$BODY" | jq -r '.items[] | select(.description=="THE DINER") | .id')"
+    TX_HOLD="$(echo "$BODY" | jq -r '.items[] | select(.description=="SHELL OIL 12345" and .amountCents==-100) | .id')"
+    request POST "/v1/inbox/$TX_DINER/confirm" "$A_TOKEN" "$(jq -nc --arg c "$FUN" '{as:"expense",categoryId:$c}')"; expect 200 "confirm the pending diner charge as a Fun expense"
+    DINER_EXP="$(echo "$BODY" | jq -r .expense.expenseId)"
+    check "InboxItem v5 fields: expense set, no match/transfer/ignoreReason" '.expense.categoryName=="Fun" and .expense.expenseId==.confirmed.expenseId and .match==null and .transfer==null and .ignoreReason==null'
+    request GET "/v1/accounts/$ACC" "$A_TOKEN"; expect 200 "linked account carries v5 balances"
+    check "availableCents 240000 (Bridge available-balance), linked, pendingOut = diner 40.00 + hold 1.00 + coffee 4.50" '.linked==true and .availableCents==240000 and .balanceCents==245050 and .pendingOutCents==4550'
+
+    echo "--- v5: phase 5 — the diner charge posts as a new id at −48.00 (tip), the hold vanishes, the fill-up posts at −45.12"
+    phase 5
+    wait_for "THE DINER posted in place: same row, −48.00, pending false, still confirmed" "/v1/inbox?status=confirmed&limit=200" \
+      ".items[] | select(.id==\"$TX_DINER\") | .pending==false and .amountCents==-4800 and .postedOn==\"$TODAY_UTC\" and .expense.expenseId==\"$DINER_EXP\""
+    request GET "/v1/inbox?includeHidden=1&limit=200" "$A_TOKEN"
+    check "exactly one THE DINER row (no duplicate)" '[.items[] | select(.description=="THE DINER")] | length==1'
+    request GET "/v1/expenses/$DINER_EXP" "$A_TOKEN"; expect 200 "the confirmed expense survives the re-issue"
+    check "expense amount follows the posted amount (4800) and date" ".amountCents==4800 and .spentOn==\"$TODAY_UTC\""
+    wait_for "the \$1.00 fuel hold is dropped after > 5 days absent" "/v1/inbox?status=ignored&includeHidden=1&limit=200" \
+      ".items[] | select(.id==\"$TX_HOLD\") | .ignoreReason==\"dropped\" and .status==\"ignored\""
+    request GET "/v1/inbox?limit=200" "$A_TOKEN"
+    check "dropped hold hidden from the inbox by default" "[.items[] | select(.id==\"$TX_HOLD\")] | length==0"
+    check "the \$45.12 fill-up did not replace the \$1.00 hold (new row)" '[.items[] | select(.description=="SHELL OIL 12345" and .amountCents==-4512 and .pending==false and .status=="pending")] | length==1'
+    TX_FILL="$(echo "$BODY" | jq -r '.items[] | select(.description=="SHELL OIL 12345" and .amountCents==-4512) | .id')"
+    request GET "/v1/accounts/$ACC" "$A_TOKEN"
+    check "pendingOut drops to the coffee only (450)" '.pendingOutCents==450'
+    request GET "/v1/activity?limit=100" "$A_TOKEN"
+    check "transaction.posted (−40.00 → −48.00) and transaction.dropped activity" \
+      "any(.events[]; .kind==\"transaction.posted\" and .data.fromCents==-4000 and .data.toCents==-4800 and .actorId==null) and any(.events[]; .kind==\"transaction.dropped\" and .data.reason==\"dropped\")"
+
+    echo "--- v5: transfers (phase 6: a savings account; 7: checking −500 / savings +500)"
+    phase 6
+    wait_for "savings account appears on the link" /v1/banks '.[0].accounts | any(.externalId=="ACT-SAVINGS")'
+    EXT_SAV="$(echo "$BODY" | jq -r '.[0].accounts[] | select(.externalId=="ACT-SAVINGS") | .id')"
+    request PUT "/v1/banks/accounts/$EXT_SAV" "$A_TOKEN" '{"create":{"name":"Demo Savings","type":"savings"}}'; expect 200 "create-and-map Demo Savings"
+    SAV_ACC="$(echo "$BODY" | jq -r .accountId)"
+    request GET /v1/couple "$A_TOKEN"; check "autoIgnoreTransfers defaults to true" '.autoIgnoreTransfers==true'
+    phase 7
+    wait_for "detected pair auto-ignored as a transfer (peers linked, auto)" "/v1/inbox?status=ignored&limit=200" \
+      '[.items[] | select(.ignoreReason=="transfer" and .transfer.auto==true and (.description|startswith("ONLINE TRANSFER")))] | length==2'
+    XFER_OUT1="$(echo "$BODY" | jq -r '.items[] | select(.description=="ONLINE TRANSFER TO SAV" and .amountCents==-50000) | .id')"
+    XFER_IN1="$(echo "$BODY" | jq -r '.items[] | select(.description=="ONLINE TRANSFER FROM CHK" and .amountCents==50000) | .id')"
+    check "peers point at each other with the other account's name" \
+      ".items[] | select(.id==\"$XFER_OUT1\") | .transfer.peerId==\"$XFER_IN1\" and .transfer.peerAccountId==\"$SAV_ACC\" and .transfer.peerAccountName==\"Demo Savings\""
+    request GET "/v1/transfers?month=$MONTH_UTC" "$A_TOKEN"; expect 200 "transfer report"
+    check "report: Joint checking → Demo Savings 500.00 · 1 pair (auto)" \
+      ".month==\"$MONTH_UTC\" and (.pairs|length==1) and .pairs[0].amountCents==50000 and .pairs[0].from.name==\"Joint checking\" and .pairs[0].to.name==\"Demo Savings\" and .pairs[0].auto and .pairs[0].from.transactionId==\"$XFER_OUT1\" and (.flows[] | select(.toName==\"Demo Savings\") | .totalCents==50000 and .count==1) and (.netByAccount[] | select(.accountId==\"$SAV_ACC\") | .inCents==50000 and .netCents==50000)"
+    request GET "/v1/transfers?month=2026-13" "$A_TOKEN"; expect 400 "bad transfer month → 400"
+    request GET "/v1/activity?limit=50" "$A_TOKEN"
+    check "one transfer.auto activity for the pair" 'any(.events[]; .kind=="transfer.auto" and .data.count==2 and .actorId==null)'
+
+    request PATCH /v1/couple "$A_TOKEN" '{"autoIgnoreTransfers":false}'; expect 200 "turn auto-ignore transfers off"
+    check "Household.autoIgnoreTransfers false" '.autoIgnoreTransfers==false'
+    request PATCH /v1/couple "$A_TOKEN" '{"autoIgnoreTransfers":null}'; expect 400 "autoIgnoreTransfers null → 400"
+    phase 8
+    wait_for "with auto-ignore off the next pair stays a transfer suggestion (80)" "/v1/inbox?status=pending&limit=200" \
+      '[.items[] | select((.description|startswith("ONLINE TRANSFER")) and .suggestion.kind=="transfer" and .suggestion.confidence==80)] | length==2'
+    XFER_OUT2="$(echo "$BODY" | jq -r '.items[] | select(.description=="ONLINE TRANSFER TO SAV" and .amountCents==-25000) | .id')"
+    XFER_IN2="$(echo "$BODY" | jq -r '.items[] | select(.description=="ONLINE TRANSFER FROM CHK" and .amountCents==25000) | .id')"
+    request GET "/v1/inbox/$XFER_OUT2/candidates" "$A_TOKEN"; expect 200 "candidates for the transfer leg"
+    check "transfer peer candidate is the savings leg" ".transferPeers[0].id==\"$XFER_IN2\""
+    request POST "/v1/inbox/$XFER_OUT2/transfer" "$A_TOKEN" "$(jq -nc --arg p "$TX_KROGER" '{peerId:$p}')"; expect 400 "peer with the same sign on the same account → 400"
+    check "errors name peerId" '.errors | has("peerId")'
+    request POST "/v1/inbox/$XFER_OUT2/transfer" "$A_TOKEN" '{"peerId":"00000000-0000-7000-8000-000000000000"}'; expect 400 "unknown peer → 400"
+    request POST "/v1/inbox/$XFER_OUT2/transfer" "$A_TOKEN" "$(jq -nc --arg p "$XFER_IN2" '{peerId:$p}')"; expect 200 "mark the pair as a transfer by hand"
+    check "manual pair: ignored/transfer, peer set, not auto" ".status==\"ignored\" and .ignoreReason==\"transfer\" and .transfer.peerId==\"$XFER_IN2\" and .transfer.auto==false"
+    request GET "/v1/transfers?month=$MONTH_UTC" "$A_TOKEN"
+    check "report now has 2 pairs (750.00)" '(.pairs|length==2) and .totalCents>=75000'
+    request POST "/v1/inbox/$XFER_IN2/unmatch" "$A_TOKEN"; expect 200 "Not a transfer (from the other leg)"
+    check "unmatched leg is pending again" '.status=="pending" and .transfer==null and .ignoreReason==null'
+    request GET "/v1/inbox?status=pending&limit=200" "$A_TOKEN"
+    check "…and so is its peer" "any(.items[]; .id==\"$XFER_OUT2\" and .status==\"pending\")"
+    request PATCH /v1/couple "$A_TOKEN" '{"autoIgnoreTransfers":true}'; expect 200 "turn auto-ignore transfers back on"
+
+    echo "--- v5: one-sided transfers (phase 9: TRANSFER TO BROKERAGE −1000)"
+    phase 9
+    wait_for "one-sided transfer keyword suggested at 60" "/v1/inbox?status=pending&limit=200" \
+      '.items[] | select(.description=="TRANSFER TO BROKERAGE") | .suggestion.kind=="transfer" and .suggestion.confidence==60'
+    TX_BROK1="$(echo "$BODY" | jq -r '.items[] | select(.description=="TRANSFER TO BROKERAGE") | .id')"
+    request POST /v1/inbox/bulk "$A_TOKEN" "$(jq -nc --arg a "$TX_BROK1" '{action:"confirm-suggested",ids:[$a]}')"; expect 200 "bulk confirm-suggested on the keyword transfer"
+    check "keyword transfers (60) are never bulk-confirmed" '.confirmed==0 and .ignored==0 and .skipped==1'
+    request POST "/v1/inbox/$TX_BROK1/transfer" "$A_TOKEN" '{}'; expect 200 "mark one-sided transfer (learns the payee)"
+    check "one-sided: ignored/transfer with no peer" '.status=="ignored" and .ignoreReason=="transfer" and .transfer.peerId==null and .transfer.auto==false'
+    phase 10
+    wait_for "learned transfer payee: the next one is auto-ignored at 85" "/v1/inbox?status=ignored&limit=200" \
+      ".items[] | select(.description==\"TRANSFER TO BROKERAGE\" and .id!=\"$TX_BROK1\") | .ignoreReason==\"transfer\" and .transfer.auto==true and .suggestion.confidence==85"
+    request GET "/v1/transfers?month=$MONTH_UTC" "$A_TOKEN"
+    check "report: one-sided brokerage transfers flow to Other account" \
+      '([.oneSided[] | select(.description=="TRANSFER TO BROKERAGE")] | length>=1) and any(.flows[]; .fromName=="Joint checking" and .toName=="Other account" and .totalCents>=100000)'
+
+    echo "--- v5: per-account transactions"
+    request POST /v1/expenses "$A_TOKEN" "$(jq -nc --arg c "$GROCERIES" --arg a "$ACC" --arg d "$TODAY_UTC" '{name:"Farmers market",amountCents:2300,categoryId:$c,accountId:$a,spentOn:$d,deduct:false}')"; expect 201 "manual expense on the linked account"
+    MANUAL_EXP="$(echo "$BODY" | jq -r .id)"
+    request GET "/v1/accounts/$ACC/transactions?limit=200" "$A_TOKEN"; expect 200 "account transactions (all)"
+    check "bank rows ∪ manual expense; hidden hold excluded; diner shows its expense" \
+      "any(.items[]; .id==\"$MANUAL_EXP\" and .kind==\"manual\" and .source==\"manual\" and .amountCents==-2300 and .expense.categoryName==\"Groceries\") and any(.items[]; .id==\"$TX_DINER\" and .kind==\"bank\" and .expense.expenseId==\"$DINER_EXP\") and ([.items[] | select(.id==\"$TX_HOLD\")] | length==0)"
+    check "totals over the set: in/out/count" '.totals.count==(.items|length) and .totals.inCents==([.items[].amountCents | select(.>0)] | add // 0) and .totals.outCents==([.items[].amountCents | select(.<0) | -.] | add // 0) and .totals.pendingOutCents==450'
+    # shellcheck disable=SC2016 # jq variables, not shell ones
+    check "newest first" '[.items[].postedOn] as $d | $d == ($d | sort | reverse)'
+    request GET "/v1/accounts/$ACC/transactions?filter=pending" "$A_TOKEN"; expect 200 "filter=pending"
+    check "pending filter = bank-pending rows only" '(.items|length>=1) and all(.items[]; .pending)'
+    request GET "/v1/accounts/$ACC/transactions?filter=review&limit=200" "$A_TOKEN"; expect 200 "filter=review"
+    check "review filter = to review only" "(.items|length>=1) and all(.items[]; .status==\"pending\" and .kind==\"bank\") and any(.items[]; .id==\"$TX_FILL\")"
+    request GET "/v1/accounts/$ACC/transactions?filter=matched&limit=200" "$A_TOKEN"; expect 200 "filter=matched"
+    check "matched filter = confirmed + manual expenses" "all(.items[]; .status==\"confirmed\") and any(.items[]; .id==\"$MANUAL_EXP\") and any(.items[]; .id==\"$TX_DINER\")"
+    request GET "/v1/accounts/$ACC/transactions?filter=transfers&limit=200" "$A_TOKEN"; expect 200 "filter=transfers"
+    check "transfers filter" "(.items|length>=3) and all(.items[]; .ignoreReason==\"transfer\") and any(.items[]; .id==\"$XFER_OUT1\") and any(.items[]; .id==\"$TX_BROK1\")"
+    request GET "/v1/accounts/$ACC/transactions?q=diner" "$A_TOKEN"; expect 200 "search q=diner"
+    check "search finds the diner row only" "(.items|length==1) and .items[0].id==\"$TX_DINER\" and .totals.count==1"
+    request GET "/v1/accounts/$ACC/transactions?q=market" "$A_TOKEN"; check "search covers manual expenses" "(.items|length==1) and .items[0].id==\"$MANUAL_EXP\""
+    request GET "/v1/accounts/$ACC/transactions?q=%25%27%3B%20DROP%20TABLE%20x%3B--" "$A_TOKEN"; expect 200 "search is parameterised (wildcards/quotes are literal)"
+    check "no rows for a literal %'; DROP…" '.items|length==0'
+    request GET "/v1/accounts/$ACC/transactions?month=$MONTH_UTC&limit=200" "$A_TOKEN"; expect 200 "month filter"
+    check "month filter keeps only that month" "all(.items[]; .postedOn|startswith(\"$MONTH_UTC\"))"
+    request GET "/v1/accounts/$ACC/transactions?includeHidden=1&limit=200" "$A_TOKEN"
+    check "includeHidden=1 shows the dropped hold" "any(.items[]; .id==\"$TX_HOLD\" and .ignoreReason==\"dropped\")"
+    request GET "/v1/accounts/$ACC/transactions?limit=3" "$A_TOKEN"; expect 200 "page 1 (limit 3)"
+    PAGE1="$(echo "$BODY" | jq -c '[.items[].id]')"; NEXT_TX="$(echo "$BODY" | jq -r .nextBefore)"
+    [[ "$NEXT_TX" != "null" ]] || fail "account transactions page 1 should carry nextBefore"
+    request GET "/v1/accounts/$ACC/transactions?limit=3&before=$NEXT_TX" "$A_TOKEN"; expect 200 "page 2 via keyset"
+    check "page 2 does not repeat page 1" "([.items[].id] - $PAGE1 | length) == (.items|length) and (.items|length) > 0"
+    request GET "/v1/accounts/$ACC/transactions?filter=bogus" "$A_TOKEN"; expect 400 "bad filter → 400"
+    request GET "/v1/accounts/$ACC/transactions?month=2026-1" "$A_TOKEN"; expect 400 "bad month → 400"
+    request GET /v1/accounts/00000000-0000-7000-8000-000000000000/transactions "$A_TOKEN"; expect 404 "foreign account → 404"
+
+    echo "--- v5: candidates, match from any status, unmatch"
+    request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg d "$TODAY_UTC" '{name:"Diner club",kind:"bill",amountCents:4800,frequency:"monthly",anchorDate:$d}')"; expect 201 "create a 48.00 monthly bill due today"
+    DINER_BILL="$(echo "$BODY" | jq -r .id)"
+    request GET "/v1/inbox/$TX_DINER/candidates" "$A_TOKEN"; expect 200 "candidates for the confirmed-expense row"
+    check "Diner club ranks first (exact amount, same day), sign-compatible only" \
+      ".occurrences[0].itemId==\"$DINER_BILL\" and .occurrences[0].dueDate==\"$TODAY_UTC\" and .occurrences[0].score>=80 and .occurrences[0].paid==null and .occurrences[0].paidByThis==false and all(.occurrences[]; .kind!=\"income\") and all(.occurrences[]; .score>=0 and .score<=100)"
+    request GET "/v1/inbox/$TX_DINER/candidates?days=0" "$A_TOKEN"; expect 400 "days=0 → 400"
+    request POST "/v1/inbox/$TX_DINER/match" "$A_TOKEN" "$(jq -nc --arg i "$DINER_BILL" '{itemId:$i,dueDate:"2020-01-01"}')"; expect 400 "match to a non-occurrence date → 400"
+    request POST "/v1/inbox/$TX_DINER/match" "$A_TOKEN" "$(jq -nc --arg i "$DINER_BILL" --arg d "$TODAY_UTC" '{itemId:$i,dueDate:$d}')"; expect 200 "match the confirmed-expense row to the bill"
+    check "row is now a bill payment (match set, expense gone)" ".status==\"confirmed\" and .match.itemId==\"$DINER_BILL\" and .match.itemName==\"Diner club\" and .match.itemKind==\"bill\" and .match.dueDate==\"$TODAY_UTC\" and .expense==null"
+    request GET "/v1/expenses/$DINER_EXP" "$A_TOKEN"; expect 404 "the previous expense was deleted"
+    request GET "/v1/calendar?from=$TODAY_UTC&to=$TODAY_UTC" "$A_TOKEN"
+    check "occurrence paid from the bank at 48.00" ".occurrences[] | select(.itemId==\"$DINER_BILL\") | .paid.amountCents==4800 and .paid.source==\"bank\" and .varianceCents==0"
+    request GET "/v1/inbox/$TX_DINER/candidates" "$A_TOKEN"
+    check "candidates mark the occurrence paidByThis" ".occurrences[] | select(.itemId==\"$DINER_BILL\") | .paidByThis==true and .paid!=null"
+    request POST "/v1/inbox/$TX_DINER/unmatch" "$A_TOKEN"; expect 200 "unmatch"
+    check "back to To review" '.status=="pending" and .match==null and .expense==null and .confirmed==null'
+    request GET "/v1/calendar?from=$TODAY_UTC&to=$TODAY_UTC" "$A_TOKEN"
+    check "occurrence unpaid again" ".occurrences[] | select(.itemId==\"$DINER_BILL\") | .paid==null"
+    request POST /v1/inbox/00000000-0000-7000-8000-000000000000/unmatch "$A_TOKEN"; expect 404 "unmatch unknown row → 404"
+
+    echo "--- v5: bill from a transaction, payments, link from the occurrence side"
+    request POST /v1/recurring/from-transaction "$A_TOKEN" "$(jq -nc --arg t "$TX_PAYROLL" '{transactionId:$t,kind:"bill"}')"; expect 400 "money in as a bill → 400"
+    check "errors name kind" '.errors | has("kind")'
+    request POST /v1/recurring/from-transaction "$A_TOKEN" '{"transactionId":"00000000-0000-7000-8000-000000000000"}'; expect 400 "unknown transaction → 400"
+    request POST /v1/recurring/from-transaction "$A_TOKEN" "$(jq -nc --arg t "$TX_FILL" '{transactionId:$t,name:"Fuel"}')"; expect 201 "create a bill from the fill-up"
+    FUEL="$(echo "$BODY" | jq -r .item.id)"
+    check "item: bill, monthly, 45.12, anchor = transaction date, payeeHint = description; transaction matched to it" \
+      ".item.name==\"Fuel\" and .item.kind==\"bill\" and .item.frequency==\"monthly\" and .item.amountCents==4512 and .item.anchorDate==\"$FILL_DATE\" and .item.payeeHint==\"SHELL OIL 12345\" and .transaction.status==\"confirmed\" and .transaction.match.itemId==.item.id and .transaction.match.dueDate==\"$FILL_DATE\""
+    request GET "/v1/recurring/$FUEL/payments" "$A_TOKEN"; expect 200 "bill payments"
+    check "next occurrence first, then the paid one with its transaction" \
+      "(.[0].paid==null) and (.[] | select(.dueDate==\"$FILL_DATE\") | .paid.amountCents==4512 and .paid.source==\"bank\" and .varianceCents==0 and .transaction.id==\"$TX_FILL\" and .transaction.accountName==\"Joint checking\" and .plannedCents==4512)"
+    request GET "/v1/recurring/$FUEL/payments?limit=0" "$A_TOKEN"; expect 400 "payments limit=0 → 400"
+    request GET "/v1/recurring/$DINER_BILL/occurrences/$TODAY_UTC/candidates" "$A_TOKEN"; expect 200 "transaction candidates from the occurrence side"
+    check "the unmatched diner row ranks first" ".[0].id==\"$TX_DINER\""
+    request POST "/v1/recurring/$DINER_BILL/occurrences/$TODAY_UTC/link" "$A_TOKEN" "$(jq -nc --arg t "$TX_DINER" '{transactionId:$t}')"; expect 200 "link the diner row to the occurrence"
+    check "Occurrence paid from the bank" '.paid.amountCents==4800 and .paid.source=="bank" and .status=="cleared"'
+    request POST "/v1/recurring/$DINER_BILL/occurrences/$TODAY_UTC/link" "$A_TOKEN" "$(jq -nc --arg t "$TX_KROGER" '{transactionId:$t}')"; expect 409 "occurrence already paid by another transaction → 409"
+    request POST "/v1/inbox/$TX_KROGER/match" "$A_TOKEN" "$(jq -nc --arg i "$DINER_BILL" --arg d "$TODAY_UTC" '{itemId:$i,dueDate:$d}')"; expect 409 "match to an occurrence paid by another transaction → 409"
+    request POST "/v1/recurring/$DINER_BILL/occurrences/2020-01-01/link" "$A_TOKEN" "$(jq -nc --arg t "$TX_KROGER" '{transactionId:$t}')"; expect 404 "link on a non-occurrence date → 404"
+    request GET "/v1/recurring/$DINER_BILL/payments?limit=3" "$A_TOKEN"
+    check "payments show the linked transaction" ".[] | select(.dueDate==\"$TODAY_UTC\") | .transaction.id==\"$TX_DINER\" and .transaction.amountCents==-4800"
+    request GET "/v1/activity?limit=100" "$A_TOKEN"
+    # shellcheck disable=SC2016 # jq variables, not shell ones
+    check "v5 activity kinds" '[.events[].kind] as $k | all(("transaction.matched","transaction.unmatched","transfer.paired","transfer.unpaired","recurring.from_transaction"); . as $x | $k | index($x))'
+
+    echo "--- v5: spendable uses the available balance"
+    request GET /v1/accounts "$A_TOKEN"
+    SPENDABLE="$(echo "$BODY" | jq '[.[] | select(.type=="checking" or .type=="cash") | (.availableCents // .balanceCents)] | add')"
+    BALANCES="$(echo "$BODY" | jq '[.[] | select(.type=="checking" or .type=="cash") | .balanceCents] | add')"
+    [[ "$SPENDABLE" -lt "$BALANCES" ]] || fail "available balance (2400.00) should be below the ledger balance (2450.50)"
+    request GET /v1/week "$A_TOKEN"; expect 200 "week view"
+    check "week spendableNowCents = Σ checking/cash (availableCents ?? balanceCents) = $SPENDABLE" ".spendableNowCents==$SPENDABLE"
+    request GET /v1/payperiod "$A_TOKEN"; expect 200 "pay period view"
+    check "pay-period spendable uses the available balance too" ".spendableCents==($SPENDABLE - .remainingCents)"
+
+    request DELETE "/v1/recurring/$DINER_BILL" "$A_TOKEN"; expect 204 "archive Diner club"
+    request DELETE "/v1/recurring/$FUEL" "$A_TOKEN"; expect 204 "archive Fuel"
+    request DELETE "/v1/expenses/$MANUAL_EXP" "$A_TOKEN"; expect 204 "delete the manual expense"
+  else
+    echo "--- v5 bank flows skipped (set SMOKE_SCHEDULER_WAIT > 0 with Sync__IntervalHours=0 to run them)"
+  fi
+
+
   BIG="$(jq -nc --arg a "$ACC" '{accountId:$a,filename:"big.csv",rows:[range(1500) | {postedOn:"2024-01-15",amountCents:(-(100+.)),description:("BULK STATEMENT ROW NUMBER " + tostring + " WITH A LONG DESCRIPTION TO MAKE THE BODY LARGE")}]}')"
   [[ "${#BIG}" -gt 70000 ]] || fail "big CSV body should exceed the 64 KB global limit (is ${#BIG} bytes)"
   request POST /v1/imports/csv "$A_TOKEN" "$BIG"; expect 201 "CSV body > 64 KB accepted on the import route (2 MB limit)"

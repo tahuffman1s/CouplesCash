@@ -27,6 +27,16 @@ public static class RecurringEndpoints
         group.MapDelete("/{id:guid}/occurrences/{date}/paid", MarkUnpaid)
             .WithSummary("Un-mark an occurrence (undo for autopay: the scheduler will not re-pay it)");
 
+        // v5: bills from transactions, payment history, linking a transaction from the occurrence side.
+        group.MapPost("/from-transaction", FromTransaction).WithValidation<FromTransactionRequest>()
+            .WithSummary("Create a bill/subscription/income from a bank transaction (anchor = its date, amount = |amount|, payeeHint = payee) and match it to the first occurrence");
+        group.MapGet("/{id:guid}/payments", Payments)
+            .WithSummary("Bill payments: the next occurrence and the last ?limit (default 12) with the paying transaction and variance, newest first");
+        group.MapGet("/{id:guid}/occurrences/{date}/candidates", OccurrenceCandidates)
+            .WithSummary("Unmatched bank rows within ±?days (default 10) of the due date, ranked (to review, or confirmed as an expense)");
+        group.MapPost("/{id:guid}/occurrences/{date}/link", LinkTransaction).WithValidation<LinkTransactionRequest>()
+            .WithSummary("Pay the occurrence with a bank transaction ({ transactionId }) · 409 when it is already paid by another transaction or by hand");
+
         return group;
     }
 
@@ -234,6 +244,218 @@ public static class RecurringEndpoints
         await uow.CommitAsync(ct);
         return TypedResults.Ok(item.ToOccurrence(date, null, time.Today()));
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // v5
+    // ---------------------------------------------------------------------------------------------
+
+    public const int DefaultOccurrenceCandidateDays = 10;
+    public const int MaxOccurrenceCandidateDays = 60;
+
+    private static async Task<Results<Created<FromTransactionResponse>, ValidationProblem, ProblemHttpResult>> FromTransaction(
+        FromTransactionRequest request,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        RecurringRepository items,
+        ImportRepository imports,
+        CategoryRepository categories,
+        AccountRepository accounts,
+        HouseholdRepository households,
+        InboxService inbox,
+        ActivityService activity,
+        TimeProvider time,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+        var actorName = principal.GetDisplayName();
+        var currency = await households.CurrencyAsync(householdId, ct);
+        var transactionId = request.TransactionId!.Value;
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        await imports.LockAsync(uow.Connection, householdId, transactionId, ct);
+        var row = await imports.GetAsync(uow.Connection, householdId, transactionId, ct);
+        if (row is null)
+        {
+            return Problems.Validation("transactionId", "Unknown transaction.");
+        }
+
+        if (row.IsHidden)
+        {
+            return Problems.Validation("transactionId", "This authorization was dropped or superseded by the bank.");
+        }
+
+        var kind = request.Kind ?? (row.IsOutflow ? Kind.Bill : Kind.Income);
+        if (!TransactionMatcher.SignMatchesKind(kind, row.IsOutflow))
+        {
+            return Problems.Validation("kind", row.IsOutflow ? "Money out makes a bill or subscription." : "Money in makes an income item.");
+        }
+
+        var source = (string.IsNullOrWhiteSpace(row.Payee) ? row.Description : row.Payee).Trim();
+        var name = string.IsNullOrWhiteSpace(request.Name) ? Truncate(source, 80) : request.Name.Trim();
+        if (name.Length == 0)
+        {
+            name = "Bank transaction";
+        }
+
+        Guid? categoryId = kind.IsOutflow() ? row.ConfirmedCategoryId ?? row.SuggestedCategoryId : null;
+        if (categoryId is { } c && !await categories.ExistsAsync(uow.Connection, householdId, c, ct))
+        {
+            categoryId = null;
+        }
+
+        Guid? accountId = row.AccountId is { } a && await accounts.ExistsAsync(uow.Connection, householdId, a, ct) ? a : null;
+        var hint = Truncate(source, 80);
+        var now = time.Now();
+        var fields = new RecurringFields(name, kind, row.Magnitude, categoryId, accountId, request.Frequency ?? Frequency.Monthly,
+            row.PostedOn, EndDate: null, AutoPay: false, Notes: null, Url: null, PayeeHint: hint.Length == 0 ? null : hint);
+        var item = await items.CreateAsync(uow.Connection, householdId, userId, fields, now, ct);
+        await SyncPayeeRuleAsync(imports, uow.Connection, householdId, item.Id, previousHint: null, item.PayeeHint, now, ct);
+
+        // The first occurrence is the transaction's own date; matching reverses whatever the row stood for before.
+        var error = await inbox.MatchAsync(uow, householdId, userId, actorName, currency, row, item.Id, item.AnchorDate, quiet: true, ct);
+        if (error is not null)
+        {
+            return error.Conflict ? Problems.Conflict("Occurrence already paid", error.Message) : Problems.Validation(error.Field, error.Message);
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "recurring.from_transaction", "recurring", item.Id,
+            ActivitySummaries.RecurringFromTransaction(item, currency),
+            new { itemId = item.Id, transactionId = row.Id, kind = item.Kind.ToDb(), amountCents = item.AmountCents, dueDate = item.AnchorDate, previousStatus = row.Status }, ct, actorName);
+
+        var fresh = await imports.GetAsync(uow.Connection, householdId, row.Id, ct) ?? row;
+        await uow.CommitAsync(ct);
+        return TypedResults.Created($"/v1/recurring/{item.Id}", new FromTransactionResponse(item.ToDto(time.Today()), fresh.ToDto()));
+    }
+
+    private static async Task<Results<Ok<List<BillPaymentDto>>, NotFound, ValidationProblem>> Payments(
+        Guid id,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        RecurringRepository items,
+        ImportRepository imports,
+        TimeProvider time,
+        CancellationToken ct,
+        int limit = PaymentHistory.DefaultLimit)
+    {
+        if (limit is < 1 or > PaymentHistory.MaxLimit)
+        {
+            return Problems.Validation("limit", $"Must be between 1 and {PaymentHistory.MaxLimit}.");
+        }
+
+        var householdId = principal.GetHouseholdId();
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var item = await items.GetAsync(conn, householdId, id, ct);
+        if (item is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        var dates = PaymentHistory.Dates(item.Rule, time.Today(), limit);
+        if (dates.Count == 0)
+        {
+            return TypedResults.Ok(new List<BillPaymentDto>());
+        }
+
+        var payments = (await items.ListItemPaymentsAsync(conn, householdId, item.Id, dates.Min(), dates.Max(), ct)).ToDictionary(p => p.DueDate);
+        var transactions = (await imports.ListConfirmedForItemAsync(conn, householdId, item.Id, ct))
+            .Where(t => t.ConfirmedDueDate is not null)
+            .GroupBy(t => t.ConfirmedDueDate!.Value)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        var result = dates.Select(d =>
+        {
+            var paid = payments.GetValueOrDefault(d);
+            var tx = transactions.GetValueOrDefault(d);
+            return new BillPaymentDto(
+                d,
+                item.AmountCents,
+                paid is null ? null : new PaidInfo(paid.PaidAt, paid.PaidBy, paid.AmountCents, paid.Auto, paid.Source),
+                WeekEngine.Variance(paid?.AmountCents, item.AmountCents),
+                tx is null ? null : new BillPaymentTransactionDto(tx.Id, tx.PostedOn, tx.AmountCents, tx.Description, tx.AccountName));
+        }).ToList();
+        return TypedResults.Ok(result);
+    }
+
+    private static async Task<Results<Ok<IReadOnlyList<InboxItemDto>>, NotFound, ValidationProblem>> OccurrenceCandidates(
+        Guid id,
+        DateOnly date,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        RecurringRepository items,
+        InboxService inbox,
+        CancellationToken ct,
+        int days = DefaultOccurrenceCandidateDays)
+    {
+        if (days is < 1 or > MaxOccurrenceCandidateDays)
+        {
+            return Problems.Validation("days", $"Must be between 1 and {MaxOccurrenceCandidateDays}.");
+        }
+
+        var householdId = principal.GetHouseholdId();
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var item = await items.GetAsync(conn, householdId, id, ct);
+        if (item is null || !RecurrenceEngine.IsOccurrence(item.Rule, date))
+        {
+            return TypedResults.NotFound();
+        }
+
+        return TypedResults.Ok(await inbox.TransactionCandidatesAsync(conn, householdId, item, date, days, ct));
+    }
+
+    private static async Task<Results<Ok<OccurrenceDto>, NotFound, ValidationProblem, ProblemHttpResult>> LinkTransaction(
+        Guid id,
+        DateOnly date,
+        LinkTransactionRequest request,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        RecurringRepository items,
+        ImportRepository imports,
+        HouseholdRepository households,
+        InboxService inbox,
+        TimeProvider time,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var currency = await households.CurrencyAsync(householdId, ct);
+        var transactionId = request.TransactionId!.Value;
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var item = await items.GetAsync(uow.Connection, householdId, id, ct);
+        if (item is null || !RecurrenceEngine.IsOccurrence(item.Rule, date))
+        {
+            return TypedResults.NotFound();
+        }
+
+        await imports.LockAsync(uow.Connection, householdId, transactionId, ct);
+        var row = await imports.GetAsync(uow.Connection, householdId, transactionId, ct);
+        if (row is null)
+        {
+            return Problems.Validation("transactionId", "Unknown transaction.");
+        }
+
+        if (row.IsHidden)
+        {
+            return Problems.Validation("transactionId", "This authorization was dropped or superseded by the bank.");
+        }
+
+        var error = await inbox.MatchAsync(uow, householdId, principal.GetUserId(), principal.GetDisplayName(), currency, row, item.Id, date, quiet: false, ct);
+        if (error is { Conflict: true })
+        {
+            return Problems.Conflict("Occurrence already paid", error.Message);
+        }
+
+        if (error is not null)
+        {
+            return Problems.Validation(error.Field == "itemId" ? "transactionId" : error.Field, error.Message);
+        }
+
+        var payment = await items.GetPaymentAsync(uow.Connection, item.Id, date, ct);
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(item.ToOccurrence(date, payment, time.Today()));
+    }
+
+    private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max].TrimEnd();
 
     /// <summary>categoryId / accountId must belong to the caller's household; otherwise a field-level 400 (not a 404, which is reserved for the route id).</summary>
     private static async Task<ValidationProblem?> CheckReferencesAsync(Guid householdId, RecurringRequest request, CategoryRepository categories, AccountRepository accounts, CancellationToken ct)

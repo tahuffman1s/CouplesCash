@@ -15,8 +15,8 @@ public sealed record MatchableOccurrence(Guid ItemId, string ItemName, Kind Kind
     public int WindowDays => Once ? TransactionMatcher.OnceWindowDays : TransactionMatcher.RecurringWindowDays;
 }
 
-/// <summary>A learned <c>payee_rules</c> row.</summary>
-public sealed record PayeeRule(string PayeeNorm, Guid? CategoryId, Guid? ItemId, int Hits);
+/// <summary>A learned <c>payee_rules</c> row. <paramref name="IsTransfer"/> (v5): the payee was marked as a one-sided transfer.</summary>
+public sealed record PayeeRule(string PayeeNorm, Guid? CategoryId, Guid? ItemId, int Hits, bool IsTransfer = false);
 
 public enum SuggestionKind
 {
@@ -35,13 +35,17 @@ public sealed record Suggestion(SuggestionKind Kind, Guid? CategoryId, Guid? Ite
     public static Suggestion Occurrence(Guid itemId, DateOnly dueDate, int confidence) => new(SuggestionKind.Occurrence, null, itemId, dueDate, confidence);
 
     public static readonly Suggestion Transfer = new(SuggestionKind.Transfer, null, null, null, TransactionMatcher.TransferConfidence);
+
+    /// <summary>v5: a transfer suggestion at another confidence (keyword 60, learned payee 85).</summary>
+    public static Suggestion TransferAt(int confidence) => new(SuggestionKind.Transfer, null, null, null, confidence);
 }
 
 /// <summary>
 /// The suggestion engine (PLAN-V3 "Suggestion engine"), pure and unit-tested. For each transaction, in order:
 /// recurring match (±5 days, max(2 %, $1); v4 one-offs: ±7 days, max(15 %, $10); sign ↔ kind, unpaid only) → 90, +5 when the item's learned payee rule matches;
 /// transfer between two mapped accounts (same |amount|, opposite sign, ≤ 3 days) → ignore, 80;
-/// payee rule → category, 70 + min(hits, 20); built-in keyword table → 40; otherwise none, 0.
+/// v5 learned transfer payee → transfer, 85; payee rule → category, 70 + min(hits, 20); v5 transfer keyword → transfer, 60;
+/// built-in keyword table → 40; otherwise none, 0.
 /// </summary>
 public static class TransactionMatcher
 {
@@ -53,6 +57,15 @@ public static class TransactionMatcher
     public const int TransferConfidence = 80;
     public const int RecurringWindowDays = 5;
     public const int TransferWindowDays = 3;
+
+    /// <summary>v5: one-sided transfer keyword ("ONLINE TRANSFER TO SAV") — shown, never auto-applied, below the bulk threshold.</summary>
+    public const int TransferKeywordConfidence = 60;
+
+    /// <summary>v5: a payee the household marked as a transfer before; auto-ignored when <c>autoIgnoreTransfers</c> is on.</summary>
+    public const int TransferRuleConfidence = 85;
+
+    /// <summary>v5 manual pairing: the other side within ±5 days and |amount| within 1 %.</summary>
+    public const int ManualTransferWindowDays = 5;
 
     /// <summary>v4: a planned one-off (<c>frequency = once</c>) may post up to a week either side of its planned date.</summary>
     public const int OnceWindowDays = 7;
@@ -67,6 +80,16 @@ public static class TransactionMatcher
     {
         "pos", "debit", "card", "purchase", "ach", "web", "id", "ref", "auth", "pending", "chk", "tst", "sq", "pp", "usd", "xx", "xxxx", "visa", "mastercard", "pymt", "txn", "trans", "des", "ppd", "ccd",
     };
+
+    /// <summary>v5 one-sided transfer phrases (normalised). The last three only count for money in (a card payment received).</summary>
+    private static readonly (string Phrase, bool InflowOnly)[] TransferKeywords =
+    [
+        ("online transfer", false), ("transfer to", false), ("transfer from", false), ("transfer", false), ("xfer", false),
+        ("payment thank you", true), ("autopay payment", true), ("online pmt", true),
+    ];
+
+    /// <summary>Payments to people, not transfers between your own accounts.</summary>
+    private static readonly string[] PeerToPeer = ["zelle", "venmo", "cash app", "cashapp", "square cash", "paypal"];
 
     /// <summary>(normalised keyword phrase, default category name, applies to inflows). Longer phrases first so "uber eats" wins over "uber".</summary>
     private static readonly (string Phrase, string Category, bool Inflow)[] Keywords =
@@ -108,6 +131,89 @@ public static class TransactionMatcher
         return result.Length > 0 ? result : Fingerprint.Normalise(source);
     }
 
+    /// <summary>Processor noise ("pos", "debit", "ach" …) that never identifies a payee.</summary>
+    public static bool IsNoiseToken(string token) => NoiseTokens.Contains(token);
+
+    /// <summary>
+    /// v5: does the description read like a transfer between own accounts ("ONLINE TRANSFER TO SAV", "XFER", and for money in
+    /// "PAYMENT THANK YOU" / "AUTOPAY PAYMENT" / "ONLINE PMT")? Zelle, Venmo, Cash App and PayPal never count.
+    /// </summary>
+    public static bool IsTransferKeyword(string? description, string? payee, bool isOutflow)
+    {
+        var haystack = $" {Fingerprint.Normalise(description)} {Fingerprint.Normalise(payee)} ";
+        if (haystack.Trim().Length == 0 || PeerToPeer.Any(p => haystack.Contains($" {p} ", StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        foreach (var (phrase, inflowOnly) in TransferKeywords)
+        {
+            if (inflowOnly && isOutflow)
+            {
+                continue;
+            }
+
+            if (haystack.Contains($" {phrase} ", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>v5 manual pairing: other account, opposite sign, ≤ 5 days apart, |amount| within 1 % (at least 1 cent).</summary>
+    public static bool IsTransferPeer(MatchTransaction a, MatchTransaction b)
+    {
+        if (a.Id == b.Id || a.AmountCents == 0 || b.AmountCents == 0 || Math.Sign(a.AmountCents) == Math.Sign(b.AmountCents))
+        {
+            return false;
+        }
+
+        if (a.AccountId is { } x && b.AccountId is { } y && x == y)
+        {
+            return false;
+        }
+
+        if (Math.Abs(a.PostedOn.DayNumber - b.PostedOn.DayNumber) > ManualTransferWindowDays)
+        {
+            return false;
+        }
+
+        var tolerance = Math.Max(1, (long)Math.Round(Math.Max(a.Magnitude, b.Magnitude) * 0.01, MidpointRounding.AwayFromZero));
+        return Math.Abs(a.Magnitude - b.Magnitude) <= tolerance;
+    }
+
+    /// <summary>
+    /// v5 "Match to a bill or income" ranking, 0–100: <c>50·amount closeness + 30·date closeness + 20·payee rule hit</c>, or null when
+    /// the sign does not fit the kind or the amount is off by more than max(50 %, $10) without a rule naming the item.
+    /// </summary>
+    public static int? CandidateScore(Kind kind, long expectedCents, DateOnly dueDate, MatchTransaction tx, int windowDays, bool ruleHit)
+    {
+        if (!SignMatchesKind(kind, tx.IsOutflow))
+        {
+            return null;
+        }
+
+        var days = Math.Abs(dueDate.DayNumber - tx.PostedOn.DayNumber);
+        if (days > Math.Max(0, windowDays))
+        {
+            return null;
+        }
+
+        var allowed = Math.Max(1000, (long)Math.Round(Math.Abs(expectedCents) * 0.5, MidpointRounding.AwayFromZero));
+        var diff = Math.Abs(Math.Abs(expectedCents) - tx.Magnitude);
+        if (diff > allowed && !ruleHit)
+        {
+            return null;
+        }
+
+        var amount = Math.Max(0.0, 1.0 - ((double)diff / allowed));
+        var date = windowDays <= 0 ? 1.0 : Math.Max(0.0, 1.0 - ((double)days / (windowDays + 1)));
+        var score = (50 * amount) + (30 * date) + (ruleHit ? 20 : 0);
+        return Math.Clamp((int)Math.Round(score, MidpointRounding.AwayFromZero), 0, 100);
+    }
+
     /// <summary>Recurring: max(2 % of the expected amount, $1.00). One-off (<paramref name="once"/>, v4): max(15 %, $10.00). In cents.</summary>
     public static long Tolerance(long expectedCents, bool once = false) => once
         ? Math.Max(1000, (long)Math.Round(Math.Abs(expectedCents) * 0.15, MidpointRounding.AwayFromZero))
@@ -144,13 +250,19 @@ public static class TransactionMatcher
     }
 
     /// <summary>Transactions that form a transfer pair: both accounts mapped and different, amounts opposite, ≤ 3 days apart. Each transaction pairs at most once.</summary>
-    public static IReadOnlySet<Guid> DetectTransfers(IEnumerable<MatchTransaction> transactions, IReadOnlySet<Guid> mappedAccountIds)
+    public static IReadOnlySet<Guid> DetectTransfers(IEnumerable<MatchTransaction> transactions, IReadOnlySet<Guid> mappedAccountIds) =>
+        DetectTransferPairs(transactions, mappedAccountIds).SelectMany(p => new[] { p.A, p.B }).ToHashSet();
+
+    /// <summary>The pairs behind <see cref="DetectTransfers"/>: (earlier, later) by posted date, then id.</summary>
+    public static IReadOnlyList<(Guid A, Guid B)> DetectTransferPairs(IEnumerable<MatchTransaction> transactions, IReadOnlySet<Guid> mappedAccountIds)
     {
         var candidates = transactions
             .Where(t => t.AccountId is { } a && mappedAccountIds.Contains(a) && t.AmountCents != 0)
+            .DistinctBy(t => t.Id)
             .OrderBy(t => t.PostedOn).ThenBy(t => t.Id)
             .ToList();
         var paired = new HashSet<Guid>();
+        var pairs = new List<(Guid, Guid)>();
 
         for (var i = 0; i < candidates.Count; i++)
         {
@@ -177,12 +289,13 @@ public static class TransactionMatcher
                 {
                     paired.Add(a.Id);
                     paired.Add(b.Id);
+                    pairs.Add((a.Id, b.Id));
                     break;
                 }
             }
         }
 
-        return paired;
+        return pairs;
     }
 
     /// <summary>Best unpaid occurrence for one transaction (closest due date, then closest amount), or null.</summary>
@@ -262,11 +375,25 @@ public static class TransactionMatcher
         return result;
     }
 
+    /// <summary>
+    /// After recurring and pair-transfer checks: learned transfer payee (85) → learned category (70 + hits) → transfer keyword (60)
+    /// → category keyword (40) → none.
+    /// </summary>
     private static Suggestion SuggestCategory(MatchTransaction tx, PayeeRule? rule, IReadOnlyDictionary<string, Guid> categoriesByName)
     {
+        if (rule is { IsTransfer: true })
+        {
+            return Suggestion.TransferAt(TransferRuleConfidence);
+        }
+
         if (rule?.CategoryId is { } ruleCategory)
         {
             return Suggestion.Category(ruleCategory, RuleConfidence + Math.Clamp(rule.Hits, 0, RuleMaxHits));
+        }
+
+        if (IsTransferKeyword(tx.Description, tx.Payee, tx.IsOutflow))
+        {
+            return Suggestion.TransferAt(TransferKeywordConfidence);
         }
 
         if (KeywordCategory(tx.Description, tx.IsOutflow) is { } name && categoriesByName.TryGetValue(name, out var categoryId))

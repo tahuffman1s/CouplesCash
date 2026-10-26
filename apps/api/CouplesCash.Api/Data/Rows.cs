@@ -37,6 +37,9 @@ public sealed class HouseholdRow
 
     /// <summary>Overall weekly spending target (v4); null = none.</summary>
     public long? WeeklySpendCents { get; init; }
+
+    /// <summary>v5: ignore detected transfer pairs and learned transfer payees automatically (default on).</summary>
+    public bool AutoIgnoreTransfers { get; init; } = true;
 }
 
 public sealed class MemberRow
@@ -88,6 +91,17 @@ public sealed class AccountRow
     public DateTime UpdatedAt { get; init; }
 
     public DateTime? ArchivedAt { get; init; }
+
+    // v5, computed by the account queries.
+
+    /// <summary>The mapped external account's available balance (Bridge <c>available-balance</c>); null when unmapped or not reported.</summary>
+    public long? AvailableCents { get; init; }
+
+    /// <summary>Σ |amount| of bank rows on this account that are still pending at the bank (review status pending or confirmed).</summary>
+    public long PendingOutCents { get; init; }
+
+    /// <summary>Mapped to an external (bank) account.</summary>
+    public bool Linked { get; init; }
 }
 
 public sealed class SnapshotRow
@@ -585,6 +599,32 @@ public sealed class ImportedTransactionRow
 
     public string? ConfirmedItemName { get; init; }
 
+    // v5
+
+    /// <summary>manual | transfer | dropped | superseded (only when <see cref="Status"/> is ignored).</summary>
+    public string? IgnoreReason { get; init; }
+
+    public Guid? TransferPeerId { get; init; }
+
+    public bool TransferAuto { get; init; }
+
+    public DateTime? LastSeenAt { get; init; }
+
+    public string? ConfirmedItemKind { get; init; }
+
+    public Guid? ConfirmedCategoryId { get; init; }
+
+    public Guid? PeerAccountId { get; init; }
+
+    public string? PeerAccountName { get; init; }
+
+    /// <summary>Account transaction lists: bank (an imported row) or manual (a typed expense on the account; id = expense id).</summary>
+    public string Kind { get; init; } = "bank";
+
+    public bool IsHidden => IgnoreReason is "dropped" or "superseded";
+
+    public bool IsTransfer => Status == "ignored" && IgnoreReason == "transfer";
+
     public bool IsPending => Status == "pending";
 
     public bool IsOutflow => AmountCents < 0;
@@ -603,6 +643,9 @@ public sealed class PayeeRuleRow
     public Guid? ItemId { get; init; }
 
     public int Hits { get; init; }
+
+    /// <summary>v5: learned from a one-sided "Mark as transfer".</summary>
+    public bool IsTransfer { get; init; }
 
     public DateTime UpdatedAt { get; init; }
 }

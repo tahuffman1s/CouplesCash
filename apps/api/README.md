@@ -7,7 +7,12 @@ expenses, budgets, savings goals, a to-pay checklist, household settings, the pa
 and an in-process scheduler (autopay, reminders, hygiene). v3 adds SimpleFIN bank sync (encrypted access URLs,
 scheduled + manual sync, balance updates), CSV import, the review inbox with a suggestion engine, and auto-matching. v4 adds the
 week view (`/v1/week`: planned items per day, left at end of week, overdue), planned one-offs with a `payeeHint` that reconciles
-from the bank, weekly budgets + an overall weekly target (`/v1/budgets/week`, `?period=weekly`) and week-summary pushes.
+from the bank, weekly budgets + an overall weekly target (`/v1/budgets/week`, `?period=weekly`) and week-summary pushes. v5 adds
+the pending lifecycle (a posted transaction with a new id replaces its pending row in place; stale authorizations are dropped),
+available balances + pending outflow on linked accounts (spendable uses the available balance), transfer detection with
+auto-ignore, learned transfer payees and a transfer report (`/v1/transfers`), per-account transactions
+(`/v1/accounts/{id}/transactions`), and matching any transaction to bills from either side (candidates, match, unmatch,
+bill from a transaction, bill payments, link).
 
 ```
 apps/api/
@@ -23,7 +28,8 @@ apps/api/
 │  ├─ Auth/                       # Argon2idPasswordHasher, TokenService, CoupleCodeService, JwtOptions, WebAuthnOptions
 │  ├─ Domain/                     # pure, unit-tested: RecurrenceEngine, PayPeriodEngine, GoalProjection, SchedulerRules, BudgetMath, Money,
 │  │                              # TransactionMatcher (suggestions), Fingerprint (dedupe), BankSyncRules (interval, cooldown, window),
-│  │                              # WeekEngine (week bounds, status/variance, left-at-end, weekly budget rows + history)
+│  │                              # WeekEngine (week bounds, status/variance, left-at-end, weekly budget rows + history, spendable),
+│  │                              # PendingReconciler (v5 pending → posted / dropped / superseded), TransferAnalysis (+ PaymentHistory)
 │  ├─ Data/                       # NpgsqlDataSource, Dapper repositories, UnitOfWork, DbUpMigrator
 │  ├─ Services/                   # AuthSessionService, OccurrenceService, SummaryService, BudgetService, GoalService,
 │  │                              # ActivityService (+ summaries), PasskeyService (Fido2NetLib), DTO mapping,
@@ -35,11 +41,12 @@ apps/api/
 │  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene, bank sync, week summaries)
 │  ├─ Validation/                 # FluentValidation validators + endpoint filter
 │  ├─ Infrastructure/             # ProblemDetails, exception handler, rate limiting, OpenAPI bearer, options, feature filters
-│  └─ Migrations/000N_*.sql       # embedded, journaled in public.schema_versions (0001 = v1, 0002 = v2, 0003 = v3 imports, 0004 = v4 week)
+│  └─ Migrations/000N_*.sql       # embedded, journaled in public.schema_versions (0001 = v1, 0002 = v2, 0003 = v3 imports, 0004 = v4 week,
+│                                 # 0005 = v5 transactions)
 └─ CouplesCash.Api.Tests/         # xunit: recurrence, pay period, goal projection, scheduler rules (+ week summaries), budget math,
                                   # WeekEngine, VAPID keys, activity summaries, WebAuthn config, couple codes, tokens, Argon2,
                                   # DataProtector, Fingerprint, TransactionMatcher (+ one-off tolerances), SimpleFIN parser/client helpers,
-                                  # bank sync rules, v3 + v4 validators
+                                  # bank sync rules, v3 + v4 validators, PendingReconciler, v5 transfers/candidates/analysis/validators
 ```
 
 ## Run locally
@@ -120,6 +127,18 @@ route → unlink. Before the bank part the smoke also covers the always-on v4 ch
 `PUT /budgets/{id}?period=weekly` returning a `WeekBudgetRow`, `/week` for the current, a past (no snapshots → `leftAtEndCents`
 null) and a future (`projected`) week, and that planning the one-off lowers `leftAtEndCents` by exactly its amount.
 
+With `SMOKE_SCHEDULER_WAIT > 0` the bank part also walks **v5** through further fake-Bridge phases (each picked up by the
+scheduler, so every step polls for its effect): a pending "THE DINER" −40.00 confirmed as an expense posts under a new id at
+−48.00 → one row, `pending: false`, still confirmed, the expense follows to 48.00 (`transaction.posted`); a $1.00 fuel hold
+7 days old vanishes → `ignored/dropped`, hidden unless `includeHidden=1`, and the $45.12 fill-up is a separate row; a savings
+account appears and is mapped → checking −500 / savings +500 are auto-ignored as a pair (`/v1/transfers` shows the flow);
+with `autoIgnoreTransfers` off the next pair stays an 80 suggestion, is paired by hand and un-paired ("Not a transfer");
+"TRANSFER TO BROKERAGE" is a 60 suggestion that bulk confirm skips → marked as a one-sided transfer → the next one is
+auto-ignored at 85; `/v1/accounts/{id}/transactions` filters, search (parameterised), month, keyset paging, totals and a
+manual expense; candidates + match a confirmed-expense row to a bill (expense deleted, occurrence paid) → unmatch; a bill
+from a transaction + `/payments`; occurrence-side candidates + link + 409; `/week` and `/payperiod` spendable use
+`availableCents`.
+
 ## Configuration
 
 | Setting (env form) | Default | Notes |
@@ -191,6 +210,8 @@ against `GET /health`.
   only inside a sync, masked in logs (`https://***@…`) and never part of any response. Suggestion scoring, confirm/ignore/
   restore semantics, cursor format and every deviation from the contract tables are listed in
   [`docs/API-CONTRACT.md`](../../docs/API-CONTRACT.md) "v3 implementation notes".
+- v5: the pending lifecycle, transfer rules, candidate scoring and the deviations from the "# v5 additions" tables are listed in
+  [`docs/API-CONTRACT.md`](../../docs/API-CONTRACT.md) "v5 implementation notes (API)".
 
 ## Scheduler
 
@@ -215,6 +236,12 @@ listening:
    inbox row confirmed with `auto`, `transaction.automatched` event), push Bridge balances onto mapped accounts
    (credit/loan: negative-when-owed → positive owed, snapshot only when changed), write `bank.synced`, and push
    "Synced Chase · N to review" when N > 0. Failures land in `last_error` + a `bank.error` event and never stop the loop.
+   v5: per external account the stored rows are first reconciled with the response (`Domain/PendingReconciler.cs`): same-id
+   posts refresh in place, a posted transaction with a new id takes over its absent pending row (confirmation kept, expense /
+   payment amount follows, `transaction.posted`), absent authorizations > 5 days old inside the fetch window are dropped
+   (confirmation reversed, `transaction.dropped`) — absence is judged only on a response without Bridge errors — and every row
+   in the response gets `last_seen_at`. After the matcher, detected transfer pairs and learned transfer payees are auto-ignored
+   when the household's `autoIgnoreTransfers` is on (one `transfer.auto` event per sync).
 
 Selection logic is pure (`Domain/SchedulerRules.cs`, `Domain/BankSyncRules.cs`, `Domain/TransactionMatcher.cs`,
 unit-tested); the service only does I/O and catches every exception. Logs are under the `CouplesCash.Api.Scheduler.SchedulerService` category (`make scheduler-logs`).

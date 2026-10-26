@@ -119,6 +119,28 @@ public static class ActivitySummaries
 
     public static string TransactionRestored(string name, long amountCents, string currency) => $"restored {Bold(name)} · {Money(amountCents, currency)} to the inbox";
 
+    // v5: pending lifecycle, matching anywhere, transfers
+    public static string TransactionPosted(string name, long fromCents, long toCents, string currency) =>
+        $"{Bold(name)} posted · {Money(Math.Abs(fromCents), currency)} → {Money(Math.Abs(toCents), currency)}";
+
+    public static string TransactionDropped(string name, long amountCents, string currency) => $"{Bold(name)} · {Money(amountCents, currency)} authorization dropped by the bank";
+
+    public static string TransactionSuperseded(string name, long amountCents, string currency) => $"{Bold(name)} · {Money(amountCents, currency)} replaced by its posted transaction";
+
+    public static string TransactionUnmatched(string name, long amountCents, string currency) => $"unmatched {Bold(name)} · {Money(amountCents, currency)}";
+
+    public static string TransferAuto(int count) => $"ignored {Plural(count, "transfer")} (auto)";
+
+    public static string TransferPaired(string? fromName, string? toName, long amountCents, string currency) =>
+        $"marked a transfer {Bold(fromName ?? "Other account")} → {Bold(toName ?? "Other account")} · {Money(amountCents, currency)}";
+
+    public static string TransferOneSided(string name, long amountCents, string currency) => $"marked {Bold(name)} · {Money(amountCents, currency)} as a transfer";
+
+    public static string TransferUnpaired(string name, long amountCents, string currency) => $"marked {Bold(name)} · {Money(amountCents, currency)} as not a transfer";
+
+    public static string RecurringFromTransaction(RecurringItemRow i, string currency) =>
+        $"created {KindName(i.Kind)} {Bold(i.Name)} · {Money(i.AmountCents, currency)} {FrequencyName(i.Frequency)} from a bank transaction";
+
     public static string Plural(int count, string noun) => $"{count} {noun}{(count == 1 ? "" : "s")}";
 
     // Users

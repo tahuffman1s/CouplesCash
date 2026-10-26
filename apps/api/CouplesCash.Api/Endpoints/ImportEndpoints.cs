@@ -82,7 +82,8 @@ public static class ImportEndpoints
         }
 
         var newRows = await imports.ListByIdsAsync(uow.Connection, householdId, newIds, ct);
-        await inbox.SuggestAsync(uow.Connection, householdId, newRows, ct);
+        var suggested = await inbox.SuggestAsync(uow.Connection, householdId, newRows, ct);
+        await inbox.AutoIgnoreTransfersAsync(uow, householdId, newRows, suggested, ct);
 
         var record = await imports.InsertCsvImportAsync(uow.Connection, householdId, userId, accountId, filename, request.Rows.Length, imported, duplicates, now, ct);
         await activity.RecordAsync(uow, householdId, userId, "import.csv", "import", record.Id,

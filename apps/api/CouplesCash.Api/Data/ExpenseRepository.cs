@@ -80,6 +80,12 @@ public sealed class ExpenseRepository(NpgsqlDataSource db)
                 Now = now,
             }, ct));
 
+    /// <summary>v5: a bank row confirmed as this expense posted at a different amount/date — the expense follows.</summary>
+    public Task<int> SetAmountAsync(NpgsqlConnection conn, Guid householdId, Guid id, long amountCents, DateOnly spentOn, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            "UPDATE expenses SET amount_cents = @AmountCents, spent_on = @SpentOn, updated_at = @Now WHERE id = @Id AND household_id = @HouseholdId",
+            new { Id = id, HouseholdId = householdId, AmountCents = amountCents, SpentOn = spentOn, Now = now }, ct));
+
     public Task<ExpenseRow?> DeleteAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct) =>
         conn.QuerySingleOrDefaultAsync<ExpenseRow>(Cmd(
             $"DELETE FROM expenses WHERE id = @Id AND household_id = @HouseholdId RETURNING {Columns}",

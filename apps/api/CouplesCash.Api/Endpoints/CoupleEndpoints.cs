@@ -184,7 +184,8 @@ public static class CoupleEndpoints
             DefaultAccountId: request.DefaultAccountId,
             PayPeriod: request.PayPeriod.HasValue ? request.PayPeriod.Value : null,
             PayAnchorDate: request.PayAnchorDate,
-            WeeklySpendCents: request.WeeklySpendCents);
+            WeeklySpendCents: request.WeeklySpendCents,
+            AutoIgnoreTransfers: request.AutoIgnoreTransfers.HasValue ? request.AutoIgnoreTransfers.Value : null);
 
         var changed = new List<string>();
         if (update.Currency is not null)
@@ -217,6 +218,11 @@ public static class CoupleEndpoints
             changed.Add("weekly spending target");
         }
 
+        if (update.AutoIgnoreTransfers is not null)
+        {
+            changed.Add("auto-ignore transfers");
+        }
+
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         if (!await households.UpdateSettingsAsync(uow.Connection, householdId, update, ct))
         {
@@ -242,6 +248,7 @@ public static class CoupleEndpoints
             payPeriod = update.PayPeriod,
             payAnchorDate = update.PayAnchorDate.HasValue ? update.PayAnchorDate.Value : null,
             weeklySpendCents = update.WeeklySpendCents.HasValue ? update.WeeklySpendCents.Value : null,
+            autoIgnoreTransfers = update.AutoIgnoreTransfers,
         };
         await activity.RecordAsync(uow, householdId, userId, "couple.settings", "household", householdId, summary, data, ct, principal.GetDisplayName());
         await uow.CommitAsync(ct);

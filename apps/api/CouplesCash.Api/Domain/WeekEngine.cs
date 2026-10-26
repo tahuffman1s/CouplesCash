@@ -26,6 +26,9 @@ public sealed record WeekOccurrence(Guid ItemId, Kind Kind, long AmountCents, Da
 /// <summary>An expense (unplanned spending) as the week math sees it.</summary>
 public sealed record WeekExpense(DateOnly SpentOn, long AmountCents, Guid? CategoryId = null);
 
+/// <summary>An account as the spendable math sees it (v5): <paramref name="AvailableCents"/> is the bank's available balance when linked.</summary>
+public sealed record SpendableAccount(AccountType Type, long BalanceCents, long? AvailableCents);
+
 /// <summary>A category that has a weekly budget.</summary>
 public sealed record WeekBudgetCategory(Guid Id, string Name, string Color, string Icon, long BudgetCents);
 
@@ -141,6 +144,13 @@ public static class WeekEngine
         var unplanned = expenses.Where(e => week.Contains(e.SpentOn)).Sum(e => e.AmountCents);
         return new WeekTotals(incomeExpected, incomeReceived, plannedOut, paidOut, remainingOut, unplanned);
     }
+
+    /// <summary>
+    /// v5 spendable now: Σ over checking and cash accounts of <c>availableCents ?? balanceCents</c> — a linked account's available balance
+    /// already nets out pending authorizations and holds, so it is what can really be spent.
+    /// </summary>
+    public static long Spendable(IEnumerable<SpendableAccount> accounts) =>
+        accounts.Where(a => a.Type.IsSpendable()).Sum(a => a.AvailableCents ?? a.BalanceCents);
 
     /// <summary>
     /// <c>spendableNow + Σ unpaid income due in [from, to] − Σ unpaid bill/subscription due in [from, to]</c> (planned amounts).

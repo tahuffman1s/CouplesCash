@@ -13,13 +13,26 @@ public sealed record AccountFields(string Name, string Institution, AccountType 
 /// </summary>
 public sealed class AccountRepository(NpgsqlDataSource db)
 {
-    private const string Columns = "id, household_id, name, institution, type, balance_cents, color, icon, note, created_by, created_at, updated_at, archived_at";
+    /// <summary>
+    /// Every statement aliases <c>accounts</c> as <c>a</c> (also in INSERT/UPDATE … RETURNING) so the v5 derived columns can be computed:
+    /// the mapped external account's available balance, Σ still-pending bank outflows, and whether a bank account is mapped.
+    /// </summary>
+    private const string Columns =
+        """
+        a.id, a.household_id, a.name, a.institution, a.type, a.balance_cents, a.color, a.icon, a.note, a.created_by, a.created_at, a.updated_at, a.archived_at,
+        (SELECT e.available_cents FROM external_accounts e WHERE e.account_id = a.id AND e.household_id = a.household_id
+         ORDER BY e.updated_at DESC, e.id DESC LIMIT 1) AS available_cents,
+        COALESCE((SELECT sum(-t.amount_cents) FROM imported_transactions t
+                  WHERE t.household_id = a.household_id AND t.account_id = a.id AND t.pending AND t.amount_cents < 0
+                    AND t.status IN ('pending', 'confirmed')), 0)::bigint AS pending_out_cents,
+        EXISTS (SELECT 1 FROM external_accounts e WHERE e.account_id = a.id AND e.household_id = a.household_id) AS linked
+        """;
 
     public async Task<IReadOnlyList<AccountRow>> ListAsync(Guid householdId, CancellationToken ct)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<AccountRow>(Cmd(
-            $"SELECT {Columns} FROM accounts WHERE household_id = @HouseholdId AND archived_at IS NULL",
+            $"SELECT {Columns} FROM accounts a WHERE a.household_id = @HouseholdId AND a.archived_at IS NULL",
             new { HouseholdId = householdId }, ct));
         return rows.OrderBy(a => a.Type).ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
@@ -32,7 +45,7 @@ public sealed class AccountRepository(NpgsqlDataSource db)
 
     public Task<AccountRow?> GetAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct) =>
         conn.QuerySingleOrDefaultAsync<AccountRow>(Cmd(
-            $"SELECT {Columns} FROM accounts WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL",
+            $"SELECT {Columns} FROM accounts a WHERE a.id = @Id AND a.household_id = @HouseholdId AND a.archived_at IS NULL",
             new { Id = id, HouseholdId = householdId }, ct));
 
     public async Task<bool> ExistsAsync(Guid householdId, Guid id, CancellationToken ct)
@@ -51,7 +64,7 @@ public sealed class AccountRepository(NpgsqlDataSource db)
         var id = Guid.CreateVersion7();
         var row = await conn.QuerySingleAsync<AccountRow>(Cmd(
             $"""
-            INSERT INTO accounts (id, household_id, name, institution, type, balance_cents, color, icon, note, created_by, created_at, updated_at)
+            INSERT INTO accounts AS a (id, household_id, name, institution, type, balance_cents, color, icon, note, created_by, created_at, updated_at)
             VALUES (@Id, @HouseholdId, @Name, @Institution, @Type, @BalanceCents, @Color, @Icon, @Note, @UserId, @Now, @Now)
             RETURNING {Columns}
             """,
@@ -87,10 +100,10 @@ public sealed class AccountRepository(NpgsqlDataSource db)
 
         var row = await conn.QuerySingleAsync<AccountRow>(Cmd(
             $"""
-            UPDATE accounts
+            UPDATE accounts AS a
             SET name = @Name, institution = @Institution, type = @Type, balance_cents = @BalanceCents,
                 color = @Color, icon = @Icon, note = @Note, updated_at = @Now
-            WHERE id = @Id
+            WHERE a.id = @Id
             RETURNING {Columns}
             """,
             new
@@ -118,8 +131,8 @@ public sealed class AccountRepository(NpgsqlDataSource db)
     {
         var row = await conn.QuerySingleOrDefaultAsync<AccountRow>(Cmd(
             $"""
-            UPDATE accounts SET balance_cents = @BalanceCents, updated_at = @Now
-            WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL
+            UPDATE accounts AS a SET balance_cents = @BalanceCents, updated_at = @Now
+            WHERE a.id = @Id AND a.household_id = @HouseholdId AND a.archived_at IS NULL
             RETURNING {Columns}
             """,
             new { Id = id, HouseholdId = householdId, BalanceCents = balanceCents, Now = now }, ct));
@@ -142,8 +155,8 @@ public sealed class AccountRepository(NpgsqlDataSource db)
 
         var row = await conn.QuerySingleOrDefaultAsync<AccountRow>(Cmd(
             $"""
-            UPDATE accounts SET balance_cents = balance_cents + @Delta, updated_at = @Now
-            WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL
+            UPDATE accounts AS a SET balance_cents = a.balance_cents + @Delta, updated_at = @Now
+            WHERE a.id = @Id AND a.household_id = @HouseholdId AND a.archived_at IS NULL
             RETURNING {Columns}
             """,
             new { Id = id, HouseholdId = householdId, Delta = deltaCents, Now = now }, ct));
@@ -160,8 +173,8 @@ public sealed class AccountRepository(NpgsqlDataSource db)
     public Task<AccountRow?> ArchiveAsync(NpgsqlConnection conn, Guid householdId, Guid id, DateTime now, CancellationToken ct) =>
         conn.QuerySingleOrDefaultAsync<AccountRow>(Cmd(
             $"""
-            UPDATE accounts SET archived_at = @Now, updated_at = @Now
-            WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL
+            UPDATE accounts AS a SET archived_at = @Now, updated_at = @Now
+            WHERE a.id = @Id AND a.household_id = @HouseholdId AND a.archived_at IS NULL
             RETURNING {Columns}
             """,
             new { Id = id, HouseholdId = householdId, Now = now }, ct));

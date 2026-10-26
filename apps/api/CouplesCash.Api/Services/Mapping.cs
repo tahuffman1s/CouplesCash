@@ -10,7 +10,7 @@ public static class Mapping
     public static UserDto ToDto(this UserRow u) => new(u.Id, u.Email, u.DisplayName, u.CreatedAt);
 
     public static AccountDto ToDto(this AccountRow a) =>
-        new(a.Id, a.Name, a.Institution, a.Type, a.BalanceCents, a.Color, a.Icon, a.Note, a.CreatedAt, a.UpdatedAt);
+        new(a.Id, a.Name, a.Institution, a.Type, a.BalanceCents, a.Color, a.Icon, a.Note, a.CreatedAt, a.UpdatedAt, a.AvailableCents, a.PendingOutCents, a.Linked);
 
     public static BalanceSnapshotDto ToDto(this SnapshotRow s) => new(s.BalanceCents, s.RecordedAt, s.RecordedBy);
 
@@ -108,8 +108,51 @@ public static class MappingV3
         t.Pending,
         t.Status,
         Suggestion(t),
-        t.Status == "pending" ? null : new InboxConfirmedDto(t.ConfirmedExpenseId, t.ConfirmedItemId, t.ConfirmedDueDate, t.ReviewedBy, t.ReviewedByName, t.ReviewedAt, t.ConfirmedAuto, t.ConfirmedCategoryName, t.ConfirmedItemName),
-        t.CreatedAt);
+        Confirmed(t),
+        t.CreatedAt,
+        IgnoreReason(t),
+        Transfer(t),
+        Match(t),
+        Expense(t));
+
+    public static AccountTransactionDto ToAccountTransaction(this ImportedTransactionRow t) => new(
+        t.Id,
+        t.Source,
+        t.AccountId,
+        t.AccountName,
+        t.PostedOn,
+        t.AmountCents,
+        t.Description,
+        t.Payee,
+        t.Memo,
+        t.Pending,
+        t.Status,
+        Suggestion(t),
+        Confirmed(t),
+        t.CreatedAt,
+        IgnoreReason(t),
+        Transfer(t),
+        Match(t),
+        Expense(t),
+        t.Kind);
+
+    private static InboxConfirmedDto? Confirmed(ImportedTransactionRow t) =>
+        t.Status == "pending"
+            ? null
+            : new InboxConfirmedDto(t.ConfirmedExpenseId, t.ConfirmedItemId, t.ConfirmedDueDate, t.ReviewedBy, t.ReviewedByName, t.ReviewedAt, t.ConfirmedAuto, t.ConfirmedCategoryName, t.ConfirmedItemName);
+
+    private static string? IgnoreReason(ImportedTransactionRow t) => t.Status == "ignored" ? t.IgnoreReason ?? "manual" : null;
+
+    private static InboxTransferDto? Transfer(ImportedTransactionRow t) =>
+        t.IsTransfer ? new InboxTransferDto(t.TransferPeerId, t.TransferPeerId is null ? null : t.PeerAccountId, t.TransferPeerId is null ? null : t.PeerAccountName, t.TransferAuto) : null;
+
+    private static InboxMatchDto? Match(ImportedTransactionRow t) =>
+        t is { Status: "confirmed", ConfirmedItemId: { } itemId, ConfirmedDueDate: { } dueDate }
+            ? new InboxMatchDto(itemId, t.ConfirmedItemName ?? "", Enum.TryParse<Kind>(t.ConfirmedItemKind, ignoreCase: true, out var kind) ? kind : Kind.Bill, dueDate)
+            : null;
+
+    private static InboxExpenseDto? Expense(ImportedTransactionRow t) =>
+        t is { Status: "confirmed", ConfirmedExpenseId: { } expenseId } ? new InboxExpenseDto(expenseId, t.ConfirmedCategoryId, t.ConfirmedCategoryName) : null;
 
     private static SuggestionDto? Suggestion(ImportedTransactionRow t)
     {

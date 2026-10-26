@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Claims;
 using CouplesCash.Api.Auth;
 using CouplesCash.Api.Contracts;
@@ -26,6 +27,8 @@ public static class AccountEndpoints
         group.MapDelete("/{id:guid}", Archive).WithSummary("Archive (soft delete) an account");
         group.MapPost("/{id:guid}/balance", SetBalance).WithValidation<BalanceRequest>().WithSummary("Update the balance and record a snapshot");
         group.MapGet("/{id:guid}/history", History).WithSummary("Balance snapshots, newest first");
+        group.MapGet("/{id:guid}/transactions", Transactions)
+            .WithSummary("v5: bank rows and manual expenses on this account, newest first; ?filter=all|pending|review|matched|transfers&q=&month=YYYY-MM&before=&limit≤200&includeHidden=1");
 
         return group;
     }
@@ -153,6 +156,73 @@ public static class AccountEndpoints
     {
         var rows = await accounts.HistoryAsync(principal.GetHouseholdId(), id, Math.Clamp(limit, 1, 365), ct);
         return rows is null ? TypedResults.NotFound() : TypedResults.Ok(rows.Select(s => s.ToDto()).ToList());
+    }
+
+    public static readonly string[] TransactionFilters = ["all", "pending", "review", "matched", "transfers"];
+    public const int MaxSearchLength = 100;
+
+    private static async Task<Results<Ok<AccountTransactionsPage>, NotFound, ValidationProblem>> Transactions(
+        Guid id,
+        ClaimsPrincipal principal,
+        AccountRepository accounts,
+        ImportRepository imports,
+        CancellationToken ct,
+        string? filter = null,
+        string? q = null,
+        string? month = null,
+        string? before = null,
+        int limit = InboxEndpoints.DefaultLimit,
+        string? includeHidden = null)
+    {
+        var mode = string.IsNullOrWhiteSpace(filter) ? "all" : filter.Trim().ToLowerInvariant();
+        if (!TransactionFilters.Contains(mode, StringComparer.Ordinal))
+        {
+            return Problems.Validation("filter", "Must be one of: all, pending, review, matched, transfers.");
+        }
+
+        var search = string.IsNullOrWhiteSpace(q) ? null : q.Trim();
+        if (search is { Length: > MaxSearchLength })
+        {
+            return Problems.Validation("q", $"At most {MaxSearchLength} characters.");
+        }
+
+        DateOnly? from = null, to = null;
+        if (!string.IsNullOrWhiteSpace(month))
+        {
+            if (!DateOnly.TryParseExact(month, "yyyy-MM", CultureInfo.InvariantCulture, DateTimeStyles.None, out var start))
+            {
+                return Problems.Validation("month", "Must be YYYY-MM.");
+            }
+
+            from = start;
+            to = start.AddMonths(1).AddDays(-1);
+        }
+
+        InboxCursor? cursor = null;
+        if (!string.IsNullOrWhiteSpace(before))
+        {
+            if (!InboxEndpoints.TryParseCursor(before, out var parsed))
+            {
+                return Problems.Validation("before", "Must be a nextBefore value from a previous page.");
+            }
+
+            cursor = parsed;
+        }
+
+        var householdId = principal.GetHouseholdId();
+        if (await accounts.GetAsync(householdId, id, ct) is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        var size = Math.Clamp(limit, 1, InboxEndpoints.MaxLimit);
+        var query = new AccountTransactionQuery(id, mode, search, from, to, InboxEndpoints.IsTrue(includeHidden));
+        var rows = await imports.ListAccountTransactionsAsync(householdId, query, cursor, size, ct);
+        var totals = await imports.AccountTransactionTotalsAsync(householdId, query, ct);
+        var page = rows.Take(size).Select(r => r.ToAccountTransaction()).ToList();
+        var nextBefore = rows.Count > size ? InboxEndpoints.Cursor(rows[size - 1]) : null;
+        return TypedResults.Ok(new AccountTransactionsPage(page, nextBefore,
+            new AccountTransactionTotalsDto(totals.InCents, totals.OutCents, totals.PendingOutCents, totals.Count)));
     }
 
     private static AccountFields ToFields(AccountRequest r)

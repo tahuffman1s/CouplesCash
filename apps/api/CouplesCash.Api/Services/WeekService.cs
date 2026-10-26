@@ -66,7 +66,7 @@ public sealed class WeekService(
             startingBalance = await accounts.SpendableBalanceBeforeAsync(householdId, SchedulerRules.LocalMidnightUtc(week.Start, household.Timezone), ct);
         }
 
-        var spendableNow = accountRows.Where(a => a.Type.IsSpendable()).Sum(a => a.BalanceCents);
+        var spendableNow = WeekEngine.Spendable(accountRows.Select(a => new SpendableAccount(a.Type, a.BalanceCents, a.AvailableCents)));
         var weekOccurrences = occurrenceDtos.Select(ToWeekOccurrence).ToList();
         var weekExpenses = expenseRows.Select(e => new WeekExpense(e.SpentOn, e.AmountCents, e.CategoryId)).ToList();
 

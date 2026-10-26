@@ -19,7 +19,8 @@ public sealed record HouseholdDto(
     Guid? DefaultAccountId,
     PayPeriod PayPeriod,
     DateOnly? PayAnchorDate,
-    long? WeeklySpendCents);
+    long? WeeklySpendCents,
+    bool AutoIgnoreTransfers);
 
 public sealed record AuthResult(
     UserDto User,
@@ -43,7 +44,10 @@ public sealed record AccountDto(
     string Icon,
     string? Note,
     DateTime CreatedAt,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    long? AvailableCents,
+    long PendingOutCents,
+    bool Linked);
 
 public sealed record BalanceSnapshotDto(long BalanceCents, DateTime RecordedAt, Guid RecordedBy);
 
@@ -279,7 +283,16 @@ public sealed record TransferSuggestionDto(int Confidence) : SuggestionDto(Confi
 
 public sealed record InboxConfirmedDto(Guid? ExpenseId, Guid? ItemId, DateOnly? DueDate, Guid? By, string? ByName, DateTime? At, bool Auto, string? CategoryName, string? ItemName);
 
-public sealed record InboxItemDto(
+/// <summary>v5: set when the row is ignored as a transfer. <paramref name="PeerId"/> null = one-sided.</summary>
+public sealed record InboxTransferDto(Guid? PeerId, Guid? PeerAccountId, string? PeerAccountName, bool Auto);
+
+/// <summary>v5: set when the row is confirmed as a bill/income payment.</summary>
+public sealed record InboxMatchDto(Guid ItemId, string ItemName, Kind ItemKind, DateOnly DueDate);
+
+/// <summary>v5: set when the row is confirmed as an expense (or is a manual expense in an account list).</summary>
+public sealed record InboxExpenseDto(Guid ExpenseId, Guid? CategoryId, string? CategoryName);
+
+public record InboxItemDto(
     Guid Id,
     string Source,
     Guid? AccountId,
@@ -293,7 +306,11 @@ public sealed record InboxItemDto(
     string Status,
     SuggestionDto? Suggestion,
     InboxConfirmedDto? Confirmed,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    string? IgnoreReason,
+    InboxTransferDto? Transfer,
+    InboxMatchDto? Match,
+    InboxExpenseDto? Expense);
 
 public sealed record InboxPage(IReadOnlyList<InboxItemDto> Items, string? NextBefore);
 
@@ -359,3 +376,60 @@ public sealed record WeekViewDto(
     IReadOnlyList<WeekDayDto> Days,
     IReadOnlyList<OccurrenceDto> Overdue,
     WeekBudgetDto Budget);
+
+// ---------------------------------------------------------------------------------------------
+// v5
+// ---------------------------------------------------------------------------------------------
+
+/// <summary><c>GET /v1/accounts/{id}/transactions</c> row: an InboxItem plus <paramref name="Kind"/> (bank | manual; manual id = expense id, source 'manual').</summary>
+public sealed record AccountTransactionDto(
+    Guid Id,
+    string Source,
+    Guid? AccountId,
+    string? AccountName,
+    DateOnly PostedOn,
+    long AmountCents,
+    string Description,
+    string? Payee,
+    string? Memo,
+    bool Pending,
+    string Status,
+    SuggestionDto? Suggestion,
+    InboxConfirmedDto? Confirmed,
+    DateTime CreatedAt,
+    string? IgnoreReason,
+    InboxTransferDto? Transfer,
+    InboxMatchDto? Match,
+    InboxExpenseDto? Expense,
+    string Kind)
+    : InboxItemDto(Id, Source, AccountId, AccountName, PostedOn, AmountCents, Description, Payee, Memo, Pending, Status, Suggestion, Confirmed, CreatedAt, IgnoreReason, Transfer, Match, Expense);
+
+public sealed record AccountTransactionTotalsDto(long InCents, long OutCents, long PendingOutCents, int Count);
+
+public sealed record AccountTransactionsPage(IReadOnlyList<AccountTransactionDto> Items, string? NextBefore, AccountTransactionTotalsDto Totals);
+
+public sealed record MatchCandidateDto(Guid ItemId, string ItemName, Kind Kind, DateOnly DueDate, long AmountCents, PaidInfo? Paid, bool PaidByThis, int Score);
+
+public sealed record CandidatesResponse(IReadOnlyList<MatchCandidateDto> Occurrences, IReadOnlyList<InboxItemDto> TransferPeers);
+
+public sealed record FromTransactionResponse(RecurringItemDto Item, InboxItemDto Transaction);
+
+public sealed record BillPaymentTransactionDto(Guid Id, DateOnly PostedOn, long AmountCents, string Description, string? AccountName);
+
+public sealed record BillPaymentDto(DateOnly DueDate, long PlannedCents, PaidInfo? Paid, long? VarianceCents, BillPaymentTransactionDto? Transaction);
+
+public sealed record TransferSideDto(Guid? AccountId, string Name, Guid TransactionId);
+
+public sealed record TransferPairDto(Guid Id, DateOnly Date, long AmountCents, TransferSideDto From, TransferSideDto To, bool Auto);
+
+public sealed record TransferFlowDto(Guid? FromAccountId, string FromName, Guid? ToAccountId, string ToName, long TotalCents, int Count);
+
+public sealed record TransferNetDto(Guid? AccountId, string Name, long InCents, long OutCents, long NetCents);
+
+public sealed record TransferReportDto(
+    string Month,
+    long TotalCents,
+    IReadOnlyList<TransferFlowDto> Flows,
+    IReadOnlyList<TransferNetDto> NetByAccount,
+    IReadOnlyList<TransferPairDto> Pairs,
+    IReadOnlyList<InboxItemDto> OneSided);

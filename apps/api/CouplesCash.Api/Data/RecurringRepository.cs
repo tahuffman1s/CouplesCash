@@ -205,6 +205,30 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
             """,
             new { ItemId = itemId, DueDate = dueDate, Now = now, AmountCents = amountCents }, ct));
 
+    /// <summary>v5: the bank row that paid this occurrence posted at a different amount — the payment follows (variance updates).</summary>
+    public Task<int> SetPaymentAmountAsync(NpgsqlConnection conn, Guid householdId, Guid itemId, DateOnly dueDate, long amountCents, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE occurrence_payments p SET amount_cents = @AmountCents
+            FROM recurring_items i
+            WHERE p.recurring_item_id = i.id AND i.household_id = @HouseholdId AND p.recurring_item_id = @ItemId AND p.due_date = @DueDate
+            """,
+            new { HouseholdId = householdId, ItemId = itemId, DueDate = dueDate, AmountCents = amountCents }, ct));
+
+    /// <summary>Payments of one item due within [from, to] (bill payments view).</summary>
+    public async Task<IReadOnlyList<PaymentRow>> ListItemPaymentsAsync(NpgsqlConnection conn, Guid householdId, Guid itemId, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<PaymentRow>(Cmd(
+            """
+            SELECT p.recurring_item_id, p.due_date, p.paid_at, p.paid_by, p.amount_cents, p.auto, p.source
+            FROM occurrence_payments p
+            JOIN recurring_items i ON i.id = p.recurring_item_id
+            WHERE i.household_id = @HouseholdId AND p.recurring_item_id = @ItemId AND p.due_date BETWEEN @From AND @To
+            """,
+            new { HouseholdId = householdId, ItemId = itemId, From = from, To = to }, ct));
+        return rows.ToList();
+    }
+
     /// <summary>Un-marks an occurrence. Returns the removed payment (null when it was not paid).</summary>
     public Task<PaymentRow?> DeletePaymentAsync(NpgsqlConnection conn, Guid itemId, DateOnly dueDate, CancellationToken ct) =>
         conn.QuerySingleOrDefaultAsync<PaymentRow>(Cmd(

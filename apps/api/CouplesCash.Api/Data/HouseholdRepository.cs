@@ -15,11 +15,12 @@ public sealed record HouseholdSettingsUpdate(
     Optional<Guid?> DefaultAccountId,
     PayPeriod? PayPeriod,
     Optional<DateOnly?> PayAnchorDate,
-    Optional<long?> WeeklySpendCents = default);
+    Optional<long?> WeeklySpendCents = default,
+    bool? AutoIgnoreTransfers = null);
 
 public sealed class HouseholdRepository(NpgsqlDataSource db)
 {
-    private const string Columns = "id, name, created_at, currency, week_start, timezone, default_account_id, pay_period, pay_anchor_date, weekly_spend_cents";
+    private const string Columns = "id, name, created_at, currency, week_start, timezone, default_account_id, pay_period, pay_anchor_date, weekly_spend_cents, auto_ignore_transfers";
 
     private const string SelectHousehold = $"SELECT {Columns} FROM households WHERE id = @Id";
 
@@ -158,7 +159,8 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
                 pay_period         = COALESCE(@PayPeriod, pay_period),
                 default_account_id = CASE WHEN @SetDefaultAccount THEN @DefaultAccountId ELSE default_account_id END,
                 pay_anchor_date    = CASE WHEN @SetPayAnchor THEN @PayAnchorDate ELSE pay_anchor_date END,
-                weekly_spend_cents = CASE WHEN @SetWeeklySpend THEN @WeeklySpendCents ELSE weekly_spend_cents END
+                weekly_spend_cents = CASE WHEN @SetWeeklySpend THEN @WeeklySpendCents ELSE weekly_spend_cents END,
+                auto_ignore_transfers = COALESCE(@AutoIgnoreTransfers, auto_ignore_transfers)
             WHERE id = @Id
             """,
             new
@@ -175,6 +177,7 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
                 PayAnchorDate = update.PayAnchorDate.Value,
                 SetWeeklySpend = update.WeeklySpendCents.HasValue,
                 WeeklySpendCents = update.WeeklySpendCents.Value,
+                update.AutoIgnoreTransfers,
             }, ct));
         return rows > 0;
     }
@@ -218,6 +221,7 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
             household.DefaultAccountId,
             household.PayPeriod,
             household.PayAnchorDate,
-            household.WeeklySpendCents);
+            household.WeeklySpendCents,
+            household.AutoIgnoreTransfers);
     }
 }

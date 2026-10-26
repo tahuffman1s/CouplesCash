@@ -6,7 +6,13 @@
   GET  /simplefin/accounts       -> 200 JSON { errors: [], accounts: [...] }; needs Basic auth user:pass (else 403);
                                     honours start-date / end-date (exclusive) / pending=1
   POST /__phase/<n>              -> enables a data-set phase (phases accumulate): 2 adds a second RENT PAYMENT so auto-match can be
-                                    observed; 3 adds "JIFFY LUBE #42" -54.20 today, which clears a planned $60 one-off (v4)
+                                    observed; 3 adds "JIFFY LUBE #42" -54.20 today, which clears a planned $60 one-off (v4);
+                                    v5 pending lifecycle and transfers (a later phase may also remove what an earlier one added):
+                                    4 pending "THE DINER" -40.00 (id tx-diner-p1, yesterday) + a pending $1.00 "SHELL OIL" fuel hold 7 days old;
+                                    5 both pendings vanish, "THE DINER" posts as tx-diner-d1 -48.00 (tip) and the fill-up posts at -45.12;
+                                    6 a savings account appears; 7 checking -500 "ONLINE TRANSFER TO SAV" + savings +500;
+                                    8 a second pair -250/+250; 9 one-sided "TRANSFER TO BROKERAGE" -1000 two days ago;
+                                    10 another "TRANSFER TO BROKERAGE" -1000 today
   GET  /__health                 -> 200 ok
 
 Usage: fake-simplefin.py --port 8765 --rent-date YYYY-MM-DD --rent2-date YYYY-MM-DD [--today YYYY-MM-DD]
@@ -28,20 +34,45 @@ def noon(date_str):
     return int(d.timestamp())
 
 
+def days_ago(args, n):
+    d = datetime.strptime(args.today, "%Y-%m-%d").replace(hour=12, tzinfo=timezone.utc)
+    return int(d.timestamp()) - n * 86400
+
+
 def accounts(args):
     today = noon(args.today)
     rent = noon(args.rent_date)
+    phases = STATE["phases"]
     checking_tx = [
         {"id": "tx-rent-1", "posted": rent, "amount": "-1850.00", "description": "RENT PAYMENT"},
         {"id": "tx-kroger-1", "posted": today, "amount": "-12.49", "description": "KROGER #123", "payee": "Kroger", "memo": "card 1234"},
         {"id": "tx-payroll-1", "posted": today, "amount": "3200.00", "description": "ACME CORP PAYROLL DIRECT DEP"},
         {"id": "tx-coffee-1", "posted": today, "amount": "-4.50", "description": "SQ *BLUE BOTTLE COFFEE", "pending": True},
     ]
-    if 2 in STATE["phases"]:
+    savings_tx = []
+    if 2 in phases:
         checking_tx.append({"id": "tx-rent-2", "posted": noon(args.rent2_date), "amount": "-1850.00", "description": "RENT PAYMENT"})
-    if 3 in STATE["phases"]:
+    if 3 in phases:
         checking_tx.append({"id": "tx-jiffy-1", "posted": today, "amount": "-54.20", "description": "JIFFY LUBE #42", "payee": "Jiffy Lube"})
-    return [
+    # v5: pending authorizations (phase 4) that post under a new id / fall off the feed (phase 5)
+    if 4 in phases and 5 not in phases:
+        checking_tx.append({"id": "tx-diner-p1", "posted": days_ago(args, 1), "amount": "-40.00", "description": "THE DINER", "pending": True})
+        checking_tx.append({"id": "tx-shell-hold", "posted": days_ago(args, 7), "amount": "-1.00", "description": "SHELL OIL 12345", "pending": True})
+    if 5 in phases:
+        checking_tx.append({"id": "tx-diner-d1", "posted": today, "amount": "-48.00", "description": "THE DINER"})
+        checking_tx.append({"id": "tx-shell-fill", "posted": days_ago(args, 6), "amount": "-45.12", "description": "SHELL OIL 12345"})
+    # v5: transfers between linked accounts (phases 7, 8) and one-sided transfers (9, 10)
+    if 7 in phases:
+        checking_tx.append({"id": "tx-xfer-out-1", "posted": today, "amount": "-500.00", "description": "ONLINE TRANSFER TO SAV"})
+        savings_tx.append({"id": "tx-xfer-in-1", "posted": today, "amount": "500.00", "description": "ONLINE TRANSFER FROM CHK"})
+    if 8 in phases:
+        checking_tx.append({"id": "tx-xfer-out-2", "posted": days_ago(args, 1), "amount": "-250.00", "description": "ONLINE TRANSFER TO SAV"})
+        savings_tx.append({"id": "tx-xfer-in-2", "posted": today, "amount": "250.00", "description": "ONLINE TRANSFER FROM CHK"})
+    if 9 in phases:
+        checking_tx.append({"id": "tx-brokerage-1", "posted": days_ago(args, 2), "amount": "-1000.00", "description": "TRANSFER TO BROKERAGE"})
+    if 10 in phases:
+        checking_tx.append({"id": "tx-brokerage-2", "posted": today, "amount": "-1000.00", "description": "TRANSFER TO BROKERAGE"})
+    result = [
         {
             "org": {"domain": "demobank.example", "name": "Demo Bank", "url": "https://demobank.example"},
             "id": "ACT-CHECKING",
@@ -64,6 +95,17 @@ def accounts(args):
             ],
         },
     ]
+    if 6 in phases:
+        result.append({
+            "org": {"domain": "demobank.example", "name": "Demo Bank", "url": "https://demobank.example"},
+            "id": "ACT-SAVINGS",
+            "name": "High-Yield Savings",
+            "currency": "USD",
+            "balance": "10000.00",
+            "balance-date": today,
+            "transactions": savings_tx,
+        })
+    return result
 
 
 class Handler(BaseHTTPRequestHandler):

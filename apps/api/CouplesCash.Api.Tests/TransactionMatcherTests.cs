@@ -351,7 +351,9 @@ public class TransactionMatcherTests
 
         Assert.Equal(Suggestion.Transfer, result[outgoing.Id]);
         Assert.Equal(80, result[incoming.Id].Confidence);
-        Assert.Equal(SuggestionKind.None, result[secondIncoming.Id].Kind);
+        // v5: the unpaired third leg is no pair, but "TRANSFER" still reads as a one-sided transfer keyword (60).
+        Assert.Equal(SuggestionKind.Transfer, result[secondIncoming.Id].Kind);
+        Assert.Equal(TransactionMatcher.TransferKeywordConfidence, result[secondIncoming.Id].Confidence);
     }
 
     [Fact]

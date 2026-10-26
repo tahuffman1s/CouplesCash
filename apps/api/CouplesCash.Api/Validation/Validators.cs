@@ -88,6 +88,8 @@ public sealed class HouseholdSettingsRequestValidator : AbstractValidator<Househ
         RuleFor(x => x.PayPeriod.Value).NotNull().IsInEnum().When(x => x.PayPeriod.HasValue).OverridePropertyName("PayPeriod");
         RuleFor(x => x.WeeklySpendCents.Value!.Value).InclusiveBetween(0, Rules.MaxCents)
             .When(x => x.WeeklySpendCents is { HasValue: true, Value: not null }).OverridePropertyName("WeeklySpendCents");
+        RuleFor(x => x.AutoIgnoreTransfers.Value).NotNull().When(x => x.AutoIgnoreTransfers.HasValue).OverridePropertyName("AutoIgnoreTransfers")
+            .WithMessage("Must be true or false.");
     }
 
     public static bool IsKnownTimeZone(string? id) => !string.IsNullOrWhiteSpace(id) && TimeZoneInfo.TryFindSystemTimeZoneById(id, out _);
@@ -338,4 +340,40 @@ public sealed class CsvImportRequestValidator : AbstractValidator<CsvImportReque
             .WithMessage($"Provide between 1 and {ImportEndpoints.MaxRows} rows.");
         RuleForEach(x => x.Rows).SetValidator(new CsvRowRequestValidator()).When(x => x.Rows is not null);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// v5
+// ---------------------------------------------------------------------------------------------
+
+public sealed class InboxMatchRequestValidator : AbstractValidator<InboxMatchRequest>
+{
+    public InboxMatchRequestValidator()
+    {
+        RuleFor(x => x.ItemId).NotNull().NotEqual(Guid.Empty).WithMessage("itemId is required.");
+        RuleFor(x => x.DueDate).NotNull().WithMessage("dueDate is required (YYYY-MM-DD).");
+    }
+}
+
+public sealed class InboxTransferRequestValidator : AbstractValidator<InboxTransferRequest>
+{
+    public InboxTransferRequestValidator() =>
+        RuleFor(x => x.PeerId).NotEqual(Guid.Empty).When(x => x.PeerId is not null).WithMessage("peerId must be a transaction id or null.");
+}
+
+public sealed class FromTransactionRequestValidator : AbstractValidator<FromTransactionRequest>
+{
+    public FromTransactionRequestValidator()
+    {
+        RuleFor(x => x.TransactionId).NotNull().NotEqual(Guid.Empty).WithMessage("transactionId is required.");
+        RuleFor(x => x.Name).NotEmpty().MaximumLength(80).When(x => x.Name is not null);
+        RuleFor(x => x.Kind).IsInEnum().When(x => x.Kind is not null);
+        RuleFor(x => x.Frequency).IsInEnum().When(x => x.Frequency is not null);
+    }
+}
+
+public sealed class LinkTransactionRequestValidator : AbstractValidator<LinkTransactionRequest>
+{
+    public LinkTransactionRequestValidator() =>
+        RuleFor(x => x.TransactionId).NotNull().NotEqual(Guid.Empty).WithMessage("transactionId is required.");
 }

@@ -12,7 +12,7 @@ public class V4ValidatorTests
         ValidationFilter<object>.ToErrors(validator.Validate(value)).Keys.Order().ToArray();
 
     private static HouseholdSettingsRequest Settings(Optional<long?> weekly) =>
-        new(default, default, default, default, default, default, default, weekly);
+        new(default, default, default, default, default, default, default, weekly, default);
 
     private static RecurringRequest OneOff(string? hint) =>
         new("Oil change", Kind.Bill, 6000, null, null, Frequency.Once, new DateOnly(2026, 10, 22), null, null, null, null, hint);

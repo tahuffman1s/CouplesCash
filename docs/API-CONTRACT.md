@@ -584,6 +584,93 @@ type BillPayment = { dueDate: string; plannedCents: number; paid: Paid | null; v
 `GET /v1/inbox` excludes `ignoreReason ∈ {dropped, superseded}` unless `?includeHidden=1`. Existing `confirm` / `ignore` / `restore` stay.
 Activity kinds added: `transaction.posted`, `transaction.dropped`, `transaction.matched`, `transaction.unmatched`, `transfer.paired`, `transfer.auto`, `transfer.unpaired`, `recurring.from_transaction`.
 
+## v5 implementation notes (API)
+
+Deviations and clarifications from the "# v5 additions" tables, as built in `apps/api`:
+
+- **Pending reconciliation** (`Domain/PendingReconciler.cs`, pure) runs per external account on every SimpleFIN sync, before new
+  rows are inserted. Inputs: the stored rows whose fingerprint is in the response plus the account's bank-pending rows posted on or
+  after `fetchStart − 7`. A posted transaction with a new id replaces an **absent**, not hidden, pending row when the posted date is in
+  `[pending − 1, pending + 7]`, the sign matches, `||amount| − |pending|| ≤ max(25 %, $5.00)` and the descriptions are similar
+  (significant-token overlap coefficient ≥ 0.5 — tokens normalised, digits / processor noise / stop words dropped — or the same first
+  significant token, or equal normalised payees). Score = `0.5·similarity + 0.3·amount closeness + 0.2·date closeness`; best pairs first,
+  one-to-one. The row keeps id, status, suggestion, confirmation; it takes the new `external_id` + fingerprint, amount, date,
+  description, payee, memo, `pending = false`, `last_seen_at`. Same-id posts are refreshed the same way (the v3 upsert no longer runs
+  for them). When the amount **or date** changed, a confirmed expense follows (`amount_cents`, `spent_on`) and a matched occurrence's
+  payment follows (`amount_cents` → variance); `transaction.posted` (actor null, `data: { transactionId, fromCents, toCents, postedOn,
+  newExternalId, status, expenseId, itemId }`) is written only when the amount changed.
+- **Dropped**: an absent pending row dated in `[fetchStart, today]` and **more than 5 days** old (`today − postedOn > 5`) becomes
+  `ignored / dropped` (`reviewed_by NULL`); a confirmation is reversed through the same path as unmatch (expense deleted, payment
+  removed + autopay skip for autoPay items, transfer peer back to pending), then `transaction.dropped` (actor null, `data.reason:
+  'dropped'`). Absence is judged only when the response carried **no Bridge errors** (and only for accounts present in it);
+  replacements still happen on a response with errors. A dropped row whose id reappears is restored to pending
+  (`transaction.restored`, `data.reason: 'reappeared'`).
+- **Superseded** (rows imported before v5, where the posted copy was stored as its own row while the authorization stayed pending):
+  an untouched absent authorization whose posted copy (created later, present in the response, same matching rules) exists is hidden
+  as `ignored / superseded`; if the authorization was reviewed and the copy was not, the copy is hidden and the authorization takes the
+  posted values; if both were reviewed neither is touched (and the authorization is not dropped). The event is `transaction.dropped`
+  with `data.reason: 'superseded'`.
+- `last_seen_at` is set on every stored row present in a response. The `bank.synced` event data gains `autoIgnoredTransfers, posted,
+  replaced, dropped, superseded`; `SyncResult` is unchanged. The "N to review" push excludes auto-matched and auto-ignored rows.
+- **Account** `availableCents` = the mapped external account's raw Bridge `available-balance` (null when unmapped or not reported);
+  `pendingOutCents` = Σ |amount| of bank rows on the account with `pending = true`, amount < 0 and status `pending|confirmed`;
+  `linked` = an external account is mapped to it. Spendable (`/week` `spendableNowCents`, `/payperiod` `spendableCents`) =
+  Σ over active checking + cash accounts of `availableCents ?? balanceCents`. Past-week starting balances still use snapshots.
+- **Matcher order** (v5): recurring (90/95) → detected pair (80) → learned transfer payee (`payee_rules.is_transfer`, 85) → learned
+  category (70 + hits) → transfer keyword (60) → category keyword (40). Keywords (normalised, whole words): `transfer`, `xfer`,
+  `online transfer`, `transfer to|from`; money in only: `payment thank you`, `autopay payment`, `online pmt`. Anything mentioning
+  `zelle`, `venmo`, `cash app`/`cashapp`, `square cash` or `paypal` is never a keyword transfer. Bulk `confirm-suggested` keeps its ≥ 70
+  floor, so 60 is never bulk-applied; a bulk-ignored transfer suggestion gets `ignoreReason: 'transfer'` (no peer).
+- **Auto-ignore** (`households.auto_ignore_transfers`, default true; SimpleFIN syncs **and** CSV imports): every detected pair that
+  involves a new row, where both rows are still to review and neither has an occurrence suggestion, becomes `ignored / transfer`, peers
+  linked, `transfer_auto = true`; new rows suggested by a learned transfer payee (85) become one-sided auto transfers. One
+  `transfer.auto` event per sync/import (`data: { count, pairs, oneSided, transactionIds }`, actor null). Off → they stay suggestions.
+- **`POST /inbox/{id}/transfer`**: `peerId` must be another visible row of the household on a different account (an unmapped row
+  counts as different), opposite sign, `|amount|` within 1 % (≥ 1 cent), ≤ 5 days apart, not paired with a third row → else
+  `400 errors.peerId`. Any previous state of both rows is reversed first. No peer = one-sided; the row's normalised payee is saved with
+  `is_transfer = true` (an explicit category/item confirmation of that payee later clears the flag). Re-sending the same state is a
+  no-op `200`. Activity `transfer.paired` (`data.oneSided`). Dropped/superseded rows → `400 errors.status`.
+- **`POST /inbox/{id}/unmatch`** works for every status (incl. dropped/superseded rows, which return to pending); already pending =
+  no-op `200`. A transfer writes `transfer.unpaired` (the peer returns to pending too), anything else `transaction.unmatched`. The
+  learned transfer flag is kept. v3 `restore` keeps its `400` for already-pending rows.
+- **Candidates** `GET /inbox/{id}/candidates?days=30` (1–90, else 400): occurrences of active items due within ±days, sign-compatible
+  only, `score = round(50·amount + 30·date + 20·rule)` clamped 0–100 where `amount = max(0, 1 − diff / max(50 %, $10))`,
+  `date = max(0, 1 − |days| / (window + 1))`, `rule` = the row's learned payee rule names the item; an occurrence more than
+  max(50 %, $10) off is left out unless the rule names it. The occurrence this row already pays is always listed (`paidByThis`). Paid
+  occurrences are listed with `paid` set. Max 20, best first. `transferPeers` = rows that would pass the transfer peer check
+  (already paired to this row first), max 20.
+- **`POST /inbox/{id}/match`** (any status): `400 errors.itemId` sign/kind, `400 errors.dueDate` not an occurrence, `400 errors.status`
+  for dropped/superseded rows, `409` (problem title "Occurrence already paid") when the occurrence is paid by another transaction, by
+  hand or by autopay. Matching the occurrence the row already pays is a no-op. Payment: `source 'bank'`, `auto false`, `paidBy` = caller,
+  amount = |bank amount|; learns payee → item. Event `transaction.matched` (`data.previousStatus`, `reversedExpense`, `reversedPayment`,
+  `unpairedPeerId`).
+- **`GET /accounts/{id}/transactions`**: `filter` all (default) | pending (bank `pending = true`) | review (status pending) | matched
+  (status confirmed + manual expenses) | transfers (`ignored / transfer`); manual expenses (`kind: 'manual'`, `source: 'manual'`, id =
+  expense id, amount negative, status confirmed, `expense` set) appear under all and matched, except expenses created by confirming a
+  bank row. `q` (≤ 100 chars) is a parameterised `ILIKE` over description / payee / memo (expense name / note) with `%`, `_` and `\`
+  escaped. `month=YYYY-MM`, keyset `before` (same cursor as the inbox), `limit` ≤ 200. Hidden rows only with `includeHidden=1` (all
+  filter). `totals` cover the whole filtered set (not just the page); `pendingOutCents` there counts pending outflows with status
+  pending|confirmed. Unknown/archived account → 404; bad filter/month/cursor → 400.
+- **`POST /recurring/from-transaction`**: unknown `transactionId` → `400 errors.transactionId`; `kind` defaults to bill (money out) or
+  income (money in) and must match the sign (`400 errors.kind`); `frequency` defaults to monthly; name defaults to payee ?? description
+  (≤ 80); category = the row's confirmed-expense or suggested category (outflows); account = the row's account; `payeeHint` = payee ??
+  description (≤ 80, seeds the item payee rule). The row is matched to the occurrence on its own date (previous state reversed).
+  One `recurring.from_transaction` event. `201 { item, transaction }`.
+- **`GET /recurring/{id}/payments?limit=12`** (1–60): the next occurrence after today (unpaid) first, then the last `limit` occurrences
+  on or before today (an ended item counts back from its end date), newest first. `transaction` = the confirmed row paying that date.
+- **`GET /recurring/{id}/occurrences/{date}/candidates?days=10`** (1–60): visible rows within ±days that are to review or confirmed as an
+  expense (not paying an occurrence, not transfers), ranked by the candidate score. 404 when `{date}` is not an occurrence.
+- **`POST /recurring/{id}/occurrences/{date}/link`** = `match` from the other side: `400 errors.transactionId` unknown / dropped /
+  sign mismatch, `409` already paid, `200 Occurrence`.
+- **`GET /transfers?month=`** (default this UTC month): pairs are dated and counted by their outflow leg (a pair whose outflow is in
+  another month is not listed); `flows`/`netByAccount` cover pairs and one-sided rows (one-sided rows flow to/from "Other account",
+  `null` id); `TransferPair.id` = the outflow row id; `from/to.accountId` may be null for an unmapped SimpleFIN row.
+- `PATCH /couple { autoIgnoreTransfers }` must be a boolean (`null` → 400); the `couple.settings` event lists "auto-ignore transfers".
+- **Migration 0005**: `imported_transactions.ignore_reason` (CHECK manual|transfer|dropped|superseded), `transfer_peer_id`
+  (self-FK `ON DELETE SET NULL`), `last_seen_at`, `transfer_auto`; indexes `(household_id, account_id, posted_on DESC, id DESC)`,
+  `(transfer_peer_id)` and a partial `(external_account_id, posted_on) WHERE pending`; `payee_rules.is_transfer`;
+  `households.auto_ignore_transfers DEFAULT true`; existing ignored rows backfilled `ignore_reason = 'manual'`.
+
 ---
 
 # v6 additions

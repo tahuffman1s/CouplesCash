@@ -19,6 +19,14 @@ public sealed record NewImportedTransaction(
     string? Memo,
     bool Pending);
 
+/// <summary>
+/// v5 per-account transaction list. <paramref name="Filter"/>: all | pending | review | matched | transfers (validated by the endpoint).
+/// <paramref name="From"/>/<paramref name="To"/> bound <c>posted_on</c> (a month). Hidden rows (dropped/superseded) only with filter all.
+/// </summary>
+public sealed record AccountTransactionQuery(Guid AccountId, string Filter, string? Search, DateOnly? From, DateOnly? To, bool IncludeHidden);
+
+public sealed record AccountTransactionTotals(long InCents, long OutCents, long PendingOutCents, int Count);
+
 /// <summary>Keyset cursor for the inbox list: rows strictly before (<paramref name="PostedOn"/>, <paramref name="Id"/>) in newest-first order.</summary>
 public readonly record struct InboxCursor(DateOnly PostedOn, Guid Id);
 
@@ -30,9 +38,11 @@ public sealed class ImportRepository(NpgsqlDataSource db)
         SELECT t.id, t.household_id, t.source, t.external_account_id, t.account_id, t.external_id, t.posted_on, t.amount_cents,
                t.description, t.payee, t.memo, t.pending, t.status, t.suggested_category_id, t.suggested_item_id, t.suggested_due_date,
                t.suggested_transfer, t.confidence, t.confirmed_expense_id, t.confirmed_item_id, t.confirmed_due_date, t.confirmed_auto,
-               t.reviewed_by, t.reviewed_at, t.created_at,
+               t.reviewed_by, t.reviewed_at, t.created_at, t.ignore_reason, t.transfer_peer_id, t.transfer_auto, t.last_seen_at,
                a.name AS account_name, c.name AS suggested_category_name, i.name AS suggested_item_name, i.kind AS suggested_item_kind,
-               u.display_name AS reviewed_by_name, cc.name AS confirmed_category_name, ci.name AS confirmed_item_name
+               u.display_name AS reviewed_by_name, cc.name AS confirmed_category_name, ci.name AS confirmed_item_name,
+               ci.kind AS confirmed_item_kind, ex.category_id AS confirmed_category_id, pt.account_id AS peer_account_id, pa.name AS peer_account_name,
+               'bank' AS kind
         FROM imported_transactions t
         LEFT JOIN accounts a ON a.id = t.account_id
         LEFT JOIN categories c ON c.id = t.suggested_category_id
@@ -41,7 +51,35 @@ public sealed class ImportRepository(NpgsqlDataSource db)
         LEFT JOIN expenses ex ON ex.id = t.confirmed_expense_id
         LEFT JOIN categories cc ON cc.id = ex.category_id
         LEFT JOIN recurring_items ci ON ci.id = t.confirmed_item_id
+        LEFT JOIN imported_transactions pt ON pt.id = t.transfer_peer_id AND pt.household_id = t.household_id
+        LEFT JOIN accounts pa ON pa.id = pt.account_id
         """;
+
+    /// <summary>
+    /// A manual expense shaped like <see cref="Select"/> (same column order) for the per-account transaction list: id = expense id,
+    /// source/kind 'manual', amount negative (money out), status confirmed.
+    /// </summary>
+    private const string SelectManual =
+        """
+        SELECT e.id, e.household_id, 'manual'::text AS source, NULL::uuid AS external_account_id, e.account_id, NULL::text AS external_id,
+               e.spent_on AS posted_on, -e.amount_cents AS amount_cents, e.name AS description, NULL::text AS payee, e.note AS memo,
+               false AS pending, 'confirmed'::text AS status, NULL::uuid AS suggested_category_id, NULL::uuid AS suggested_item_id,
+               NULL::date AS suggested_due_date, false AS suggested_transfer, 0::smallint AS confidence, e.id AS confirmed_expense_id,
+               NULL::uuid AS confirmed_item_id, NULL::date AS confirmed_due_date, false AS confirmed_auto,
+               e.created_by AS reviewed_by, e.created_at AS reviewed_at, e.created_at, NULL::text AS ignore_reason, NULL::uuid AS transfer_peer_id,
+               false AS transfer_auto, NULL::timestamptz AS last_seen_at,
+               a.name AS account_name, NULL::text AS suggested_category_name, NULL::text AS suggested_item_name, NULL::text AS suggested_item_kind,
+               u.display_name AS reviewed_by_name, cc.name AS confirmed_category_name, NULL::text AS confirmed_item_name,
+               NULL::text AS confirmed_item_kind, e.category_id AS confirmed_category_id, NULL::uuid AS peer_account_id, NULL::text AS peer_account_name,
+               'manual' AS kind
+        FROM expenses e
+        LEFT JOIN accounts a ON a.id = e.account_id
+        LEFT JOIN users u ON u.id = e.created_by
+        LEFT JOIN categories cc ON cc.id = e.category_id
+        """;
+
+    /// <summary>Rows hidden from the inbox and account lists unless asked for (v5).</summary>
+    private const string NotHidden = "(t.ignore_reason IS NULL OR t.ignore_reason NOT IN ('dropped', 'superseded'))";
 
     // ---------------------------------------------------------------------------------------------
     // Inserts
@@ -117,7 +155,7 @@ public sealed class ImportRepository(NpgsqlDataSource db)
     }
 
     /// <summary>Newest posted_on first, then newest id; returns one row more than <paramref name="limit"/> so the caller can build the cursor.</summary>
-    public async Task<IReadOnlyList<ImportedTransactionRow>> ListAsync(Guid householdId, string? status, InboxCursor? before, int limit, CancellationToken ct)
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListAsync(Guid householdId, string? status, InboxCursor? before, int limit, CancellationToken ct, bool includeHidden = false)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
@@ -125,11 +163,12 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             {Select}
             WHERE t.household_id = @HouseholdId
               AND (@Status::text IS NULL OR t.status = @Status)
+              AND (@IncludeHidden OR {NotHidden})
               AND (@BeforeDate::date IS NULL OR (t.posted_on, t.id) < (@BeforeDate, @BeforeId))
             ORDER BY t.posted_on DESC, t.id DESC
             LIMIT @Limit
             """,
-            new { HouseholdId = householdId, Status = status, BeforeDate = before?.PostedOn, BeforeId = before?.Id ?? Guid.Empty, Limit = limit + 1 }, ct));
+            new { HouseholdId = householdId, Status = status, IncludeHidden = includeHidden, BeforeDate = before?.PostedOn, BeforeId = before?.Id ?? Guid.Empty, Limit = limit + 1 }, ct));
         return rows.ToList();
     }
 
@@ -207,7 +246,8 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             """
             UPDATE imported_transactions
             SET status = 'confirmed', confirmed_expense_id = @ExpenseId, confirmed_item_id = NULL, confirmed_due_date = NULL,
-                confirmed_auto = false, reviewed_by = @Reviewer, reviewed_at = @Now
+                confirmed_auto = false, reviewed_by = @Reviewer, reviewed_at = @Now,
+                ignore_reason = NULL, transfer_peer_id = NULL, transfer_auto = false
             WHERE id = @Id AND household_id = @HouseholdId
             """,
             new { Id = id, HouseholdId = householdId, ExpenseId = expenseId, Reviewer = reviewer, Now = now }, ct));
@@ -217,27 +257,43 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             """
             UPDATE imported_transactions
             SET status = 'confirmed', confirmed_expense_id = NULL, confirmed_item_id = @ItemId, confirmed_due_date = @DueDate,
-                confirmed_auto = @Auto, reviewed_by = @Reviewer, reviewed_at = @Now
+                confirmed_auto = @Auto, reviewed_by = @Reviewer, reviewed_at = @Now,
+                ignore_reason = NULL, transfer_peer_id = NULL, transfer_auto = false
             WHERE id = @Id AND household_id = @HouseholdId
             """,
             new { Id = id, HouseholdId = householdId, ItemId = itemId, DueDate = dueDate, Auto = auto, Reviewer = reviewer, Now = now }, ct));
 
-    public Task<int> IgnoreAsync(NpgsqlConnection conn, Guid householdId, Guid id, Guid? reviewer, DateTime now, CancellationToken ct) =>
+    /// <summary>Ignores a row. <paramref name="reason"/> (v5): manual | transfer | dropped | superseded. Never touches the transfer peer columns.</summary>
+    public Task<int> IgnoreAsync(NpgsqlConnection conn, Guid householdId, Guid id, Guid? reviewer, DateTime now, CancellationToken ct, string reason = "manual") =>
         conn.ExecuteAsync(Cmd(
             """
             UPDATE imported_transactions
             SET status = 'ignored', confirmed_expense_id = NULL, confirmed_item_id = NULL, confirmed_due_date = NULL, confirmed_auto = false,
+                reviewed_by = @Reviewer, reviewed_at = @Now, ignore_reason = @Reason,
+                transfer_peer_id = CASE WHEN @Reason = 'transfer' THEN transfer_peer_id END,
+                transfer_auto = CASE WHEN @Reason = 'transfer' THEN transfer_auto ELSE false END
+            WHERE id = @Id AND household_id = @HouseholdId
+            """,
+            new { Id = id, HouseholdId = householdId, Reviewer = reviewer, Now = now, Reason = reason }, ct));
+
+    /// <summary>v5: marks a row as a transfer (ignored, reason transfer) with its peer (null = one-sided).</summary>
+    public Task<int> MarkTransferAsync(NpgsqlConnection conn, Guid householdId, Guid id, Guid? peerId, bool auto, Guid? reviewer, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE imported_transactions
+            SET status = 'ignored', ignore_reason = 'transfer', transfer_peer_id = @PeerId, transfer_auto = @Auto,
+                confirmed_expense_id = NULL, confirmed_item_id = NULL, confirmed_due_date = NULL, confirmed_auto = false,
                 reviewed_by = @Reviewer, reviewed_at = @Now
             WHERE id = @Id AND household_id = @HouseholdId
             """,
-            new { Id = id, HouseholdId = householdId, Reviewer = reviewer, Now = now }, ct));
+            new { Id = id, HouseholdId = householdId, PeerId = peerId, Auto = auto, Reviewer = reviewer, Now = now }, ct));
 
     public Task<int> RestoreAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct) =>
         conn.ExecuteAsync(Cmd(
             """
             UPDATE imported_transactions
             SET status = 'pending', confirmed_expense_id = NULL, confirmed_item_id = NULL, confirmed_due_date = NULL, confirmed_auto = false,
-                reviewed_by = NULL, reviewed_at = NULL
+                reviewed_by = NULL, reviewed_at = NULL, ignore_reason = NULL, transfer_peer_id = NULL, transfer_auto = false
             WHERE id = @Id AND household_id = @HouseholdId
             """,
             new { Id = id, HouseholdId = householdId }, ct));
@@ -249,18 +305,218 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             new { HouseholdId = householdId, ExternalAccountId = externalAccountId, AccountId = accountId }, ct));
 
     // ---------------------------------------------------------------------------------------------
+    // v5: pending lifecycle (reconciliation)
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Rows the reconciler needs for one external account: every row whose fingerprint is in this response (same id), plus the account's
+    /// bank-pending rows posted on or after <paramref name="pendingSince"/> (candidates for replacement / dropping).
+    /// </summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListForReconcileAsync(NpgsqlConnection conn, Guid householdId, Guid externalAccountId, IReadOnlyCollection<byte[]> fingerprints, DateOnly pendingSince, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"""
+            {Select}
+            WHERE t.household_id = @HouseholdId
+              AND (t.fingerprint = ANY(@Fingerprints) OR (t.external_account_id = @ExternalAccountId AND t.pending AND t.posted_on >= @Since))
+            ORDER BY t.created_at, t.id
+            """,
+            new { HouseholdId = householdId, ExternalAccountId = externalAccountId, Fingerprints = fingerprints.ToArray(), Since = pendingSince }, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>
+    /// The posted version of a row: amount, date, description, payee, memo and <c>pending = false</c>. A replacement (new posted id) also
+    /// moves the row onto the new external id + fingerprint. Id, status, suggestion and confirmation are kept.
+    /// </summary>
+    public Task<int> ApplyPostedAsync(NpgsqlConnection conn, Guid householdId, Guid id, string? externalId, byte[]? fingerprint, DateOnly postedOn, long amountCents, string description, string? payee, string? memo, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE imported_transactions
+            SET pending = false, posted_on = @PostedOn, amount_cents = @AmountCents, description = @Description, payee = @Payee, memo = @Memo,
+                external_id = COALESCE(@ExternalId, external_id), fingerprint = COALESCE(@Fingerprint, fingerprint), last_seen_at = @Now
+            WHERE id = @Id AND household_id = @HouseholdId
+            """,
+            new { Id = id, HouseholdId = householdId, ExternalId = externalId, Fingerprint = fingerprint, PostedOn = postedOn, AmountCents = amountCents, Description = description, Payee = payee, Memo = memo, Now = now }, ct));
+
+    /// <summary>Hides a row as dropped / superseded (ignored, no confirmation, no peer). The caller reverses the confirmation first.</summary>
+    public Task<int> HideAsync(NpgsqlConnection conn, Guid householdId, Guid id, string reason, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE imported_transactions
+            SET status = 'ignored', ignore_reason = @Reason, confirmed_expense_id = NULL, confirmed_item_id = NULL, confirmed_due_date = NULL,
+                confirmed_auto = false, transfer_peer_id = NULL, transfer_auto = false, reviewed_by = NULL, reviewed_at = @Now
+            WHERE id = @Id AND household_id = @HouseholdId
+            """,
+            new { Id = id, HouseholdId = householdId, Reason = reason, Now = now }, ct));
+
+    /// <summary>Every row present in a Bridge response gets <c>last_seen_at</c>.</summary>
+    public Task<int> TouchSeenAsync(NpgsqlConnection conn, Guid householdId, IReadOnlyCollection<byte[]> fingerprints, DateTime now, CancellationToken ct) =>
+        fingerprints.Count == 0
+            ? Task.FromResult(0)
+            : conn.ExecuteAsync(Cmd(
+                "UPDATE imported_transactions SET last_seen_at = @Now WHERE household_id = @HouseholdId AND fingerprint = ANY(@Fingerprints)",
+                new { HouseholdId = householdId, Fingerprints = fingerprints.ToArray(), Now = now }, ct));
+
+    // ---------------------------------------------------------------------------------------------
+    // v5: transfers and candidates
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>Visible rows posted within [from, to] (transfer peers, occurrence candidates). Ranking happens in the caller.</summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListVisibleInWindowAsync(NpgsqlConnection conn, Guid householdId, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"{Select} WHERE t.household_id = @HouseholdId AND t.posted_on BETWEEN @From AND @To AND {NotHidden} ORDER BY t.posted_on, t.id",
+            new { HouseholdId = householdId, From = from, To = to }, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>Rows confirmed against any occurrence of <paramref name="itemId"/> (bill payments view).</summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListConfirmedForItemAsync(NpgsqlConnection conn, Guid householdId, Guid itemId, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"{Select} WHERE t.household_id = @HouseholdId AND t.status = 'confirmed' AND t.confirmed_item_id = @ItemId ORDER BY t.confirmed_due_date DESC, t.id DESC",
+            new { HouseholdId = householdId, ItemId = itemId }, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>Rows ignored as transfers posted within [from, to] (the transfer report).</summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListTransfersAsync(Guid householdId, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"""
+            {Select}
+            WHERE t.household_id = @HouseholdId AND t.status = 'ignored' AND t.ignore_reason = 'transfer' AND t.posted_on BETWEEN @From AND @To
+            ORDER BY t.posted_on DESC, t.id DESC
+            """,
+            new { HouseholdId = householdId, From = from, To = to }, ct));
+        var list = rows.ToList();
+
+        // Peers outside the month still make the pair.
+        var missing = list.Select(r => r.TransferPeerId).OfType<Guid>().Where(id => list.All(r => r.Id != id)).Distinct().ToList();
+        if (missing.Count > 0)
+        {
+            list.AddRange(await ListByIdsAsync(conn, householdId, missing, ct));
+        }
+
+        return list;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // v5: per-account transactions (bank rows ∪ manual expenses on the account)
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>Newest first by (posted_on, id); returns one row more than <paramref name="limit"/> for the cursor.</summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListAccountTransactionsAsync(Guid householdId, AccountTransactionQuery query, InboxCursor? before, int limit, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"""
+            SELECT * FROM ({AccountUnion(query)}) u
+            WHERE (@BeforeDate::date IS NULL OR (u.posted_on, u.id) < (@BeforeDate, @BeforeId))
+            ORDER BY u.posted_on DESC, u.id DESC
+            LIMIT @Limit
+            """,
+            AccountParameters(householdId, query, before, limit + 1), ct));
+        return rows.ToList();
+    }
+
+    /// <summary>Totals over the whole filtered set (not just the page): money in, money out, still-pending outflow, row count.</summary>
+    public async Task<AccountTransactionTotals> AccountTransactionTotalsAsync(Guid householdId, AccountTransactionQuery query, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        return await conn.QuerySingleAsync<AccountTransactionTotals>(Cmd(
+            $"""
+            SELECT COALESCE(sum(u.amount_cents) FILTER (WHERE u.amount_cents > 0), 0)::bigint AS in_cents,
+                   COALESCE(sum(-u.amount_cents) FILTER (WHERE u.amount_cents < 0), 0)::bigint AS out_cents,
+                   COALESCE(sum(-u.amount_cents) FILTER (WHERE u.amount_cents < 0 AND u.pending AND u.status IN ('pending', 'confirmed')), 0)::bigint AS pending_out_cents,
+                   count(*)::int AS count
+            FROM ({AccountUnion(query)}) u
+            """,
+            AccountParameters(householdId, query, null, 0), ct));
+    }
+
+    /// <summary>The filter fragments come from a fixed whitelist; user input (search, dates, ids) is always a parameter.</summary>
+    private static string AccountUnion(AccountTransactionQuery query)
+    {
+        var bank = new List<string> { "t.household_id = @HouseholdId", "t.account_id = @AccountId" };
+        var manual = new List<string>
+        {
+            "e.household_id = @HouseholdId", "e.account_id = @AccountId",
+            "NOT EXISTS (SELECT 1 FROM imported_transactions x WHERE x.household_id = @HouseholdId AND x.confirmed_expense_id = e.id)",
+        };
+        var includeManual = query.Filter is "all" or "matched";
+
+        switch (query.Filter)
+        {
+            case "pending":
+                bank.Add("t.pending");
+                break;
+            case "review":
+                bank.Add("t.status = 'pending'");
+                break;
+            case "matched":
+                bank.Add("t.status = 'confirmed'");
+                break;
+            case "transfers":
+                bank.Add("t.status = 'ignored' AND t.ignore_reason = 'transfer'");
+                break;
+        }
+
+        if (!(query.Filter == "all" && query.IncludeHidden))
+        {
+            bank.Add(NotHidden);
+        }
+
+        if (query.From is not null)
+        {
+            bank.Add("t.posted_on BETWEEN @From AND @To");
+            manual.Add("e.spent_on BETWEEN @From AND @To");
+        }
+
+        if (!string.IsNullOrWhiteSpace(query.Search))
+        {
+            bank.Add(@"(t.description ILIKE @Pattern ESCAPE '\' OR t.payee ILIKE @Pattern ESCAPE '\' OR t.memo ILIKE @Pattern ESCAPE '\')");
+            manual.Add(@"(e.name ILIKE @Pattern ESCAPE '\' OR e.note ILIKE @Pattern ESCAPE '\')");
+        }
+
+        var sql = $"{Select} WHERE {string.Join(" AND ", bank)}";
+        return includeManual ? $"{sql} UNION ALL {SelectManual} WHERE {string.Join(" AND ", manual)}" : sql;
+    }
+
+    private static object AccountParameters(Guid householdId, AccountTransactionQuery query, InboxCursor? before, int limit) => new
+    {
+        HouseholdId = householdId,
+        query.AccountId,
+        From = query.From ?? DateOnly.MinValue,
+        To = query.To ?? DateOnly.MaxValue,
+        Pattern = string.IsNullOrWhiteSpace(query.Search) ? "" : $"%{EscapeLike(query.Search.Trim())}%",
+        BeforeDate = before?.PostedOn,
+        BeforeId = before?.Id ?? Guid.Empty,
+        Limit = limit,
+    };
+
+    /// <summary>Escapes LIKE wildcards so a search for "50%" matches the text "50%".</summary>
+    public static string EscapeLike(string value) =>
+        value.Replace(@"\", @"\\", StringComparison.Ordinal).Replace("%", @"\%", StringComparison.Ordinal).Replace("_", @"\_", StringComparison.Ordinal);
+
+    // ---------------------------------------------------------------------------------------------
     // Payee rules
     // ---------------------------------------------------------------------------------------------
 
     public async Task<IReadOnlyList<PayeeRuleRow>> ListRulesAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct)
     {
         var rows = await conn.QueryAsync<PayeeRuleRow>(Cmd(
-            "SELECT household_id, payee_norm, category_id, item_id, hits, updated_at FROM payee_rules WHERE household_id = @HouseholdId",
+            "SELECT household_id, payee_norm, category_id, item_id, hits, is_transfer, updated_at FROM payee_rules WHERE household_id = @HouseholdId",
             new { HouseholdId = householdId }, ct));
         return rows.ToList();
     }
 
-    /// <summary>Learns or strengthens a rule: a category confirmation sets the category, an occurrence confirmation sets the item; the other half is kept.</summary>
+    /// <summary>
+    /// Learns or strengthens a rule: a category confirmation sets the category, an occurrence confirmation sets the item; the other half is
+    /// kept. Either explicit choice clears a learned transfer flag (v5: the last explicit choice wins).
+    /// </summary>
     public Task<int> UpsertRuleAsync(NpgsqlConnection conn, Guid householdId, string payeeNorm, Guid? categoryId, Guid? itemId, DateTime now, CancellationToken ct) =>
         conn.ExecuteAsync(Cmd(
             """
@@ -270,9 +526,21 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             SET category_id = COALESCE(EXCLUDED.category_id, payee_rules.category_id),
                 item_id = COALESCE(EXCLUDED.item_id, payee_rules.item_id),
                 hits = payee_rules.hits + 1,
+                is_transfer = false,
                 updated_at = EXCLUDED.updated_at
             """,
             new { HouseholdId = householdId, PayeeNorm = payeeNorm, CategoryId = categoryId, ItemId = itemId, Now = now }, ct));
+
+    /// <summary>v5: "this payee is a transfer" (one-sided Mark as transfer). Keeps any learned category/item but they lose to the flag.</summary>
+    public Task<int> SetTransferRuleAsync(NpgsqlConnection conn, Guid householdId, string payeeNorm, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            INSERT INTO payee_rules (household_id, payee_norm, category_id, item_id, hits, is_transfer, updated_at)
+            VALUES (@HouseholdId, @PayeeNorm, NULL, NULL, 1, true, @Now)
+            ON CONFLICT (household_id, payee_norm) DO UPDATE
+            SET is_transfer = true, hits = payee_rules.hits + 1, updated_at = EXCLUDED.updated_at
+            """,
+            new { HouseholdId = householdId, PayeeNorm = payeeNorm, Now = now }, ct));
 
     /// <summary>
     /// v4 payee hint: points the rule for <paramref name="payeeNorm"/> at the item (hits stay as they are; a fresh rule starts at 1).
@@ -284,7 +552,7 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             INSERT INTO payee_rules (household_id, payee_norm, category_id, item_id, hits, updated_at)
             VALUES (@HouseholdId, @PayeeNorm, NULL, @ItemId, 1, @Now)
             ON CONFLICT (household_id, payee_norm) DO UPDATE
-            SET item_id = EXCLUDED.item_id, updated_at = EXCLUDED.updated_at
+            SET item_id = EXCLUDED.item_id, is_transfer = false, updated_at = EXCLUDED.updated_at
             """,
             new { HouseholdId = householdId, PayeeNorm = payeeNorm, ItemId = itemId, Now = now }, ct));
 

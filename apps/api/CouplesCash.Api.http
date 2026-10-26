@@ -507,6 +507,70 @@ Content-Type: application/json
 GET {{host}}/v1/imports/csv
 Authorization: Bearer {{accessToken}}
 
+### v5: account transactions (bank rows + manual expenses), filters all|pending|review|matched|transfers, search, month, keyset
+GET {{host}}/v1/accounts/{{account.response.body.id}}/transactions?filter=all&q=kroger&month=2026-10&limit=50
+Authorization: Bearer {{accessToken}}
+
+### v5: ranked bill/income candidates (±30 days) and transfer peers for one row
+GET {{host}}/v1/inbox/{{inbox.response.body.items.0.id}}/candidates?days=30
+Authorization: Bearer {{accessToken}}
+
+### v5: match a row in any status to an occurrence (reverses a previous expense/transfer; 409 when paid by something else)
+POST {{host}}/v1/inbox/{{inbox.response.body.items.0.id}}/match
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "itemId": "{{rent.response.body.id}}", "dueDate": "2026-10-31" }
+
+### v5: back to To review from any status (reverses expense / payment / transfer and the transfer peer)
+POST {{host}}/v1/inbox/{{inbox.response.body.items.0.id}}/unmatch
+Authorization: Bearer {{accessToken}}
+
+### v5: mark as transfer — with peerId pairs both rows; without it the row is one-sided and its payee is learned
+POST {{host}}/v1/inbox/{{inbox.response.body.items.1.id}}/transfer
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "peerId": null }
+
+### v5: create a bill from a transaction (anchor = its date, amount = |amount|, payeeHint = payee) and match it
+# @name fromTx
+POST {{host}}/v1/recurring/from-transaction
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "transactionId": "{{inbox.response.body.items.0.id}}", "name": "Gym", "kind": "subscription", "frequency": "monthly" }
+
+### v5: bill payments (next occurrence + the last 12, with the paying transaction and variance)
+GET {{host}}/v1/recurring/{{rent.response.body.id}}/payments?limit=12
+Authorization: Bearer {{accessToken}}
+
+### v5: unmatched transactions around a due date (occurrence side)
+GET {{host}}/v1/recurring/{{rent.response.body.id}}/occurrences/2026-10-31/candidates?days=10
+Authorization: Bearer {{accessToken}}
+
+### v5: pay an occurrence with a transaction
+POST {{host}}/v1/recurring/{{rent.response.body.id}}/occurrences/2026-10-31/link
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "transactionId": "{{inbox.response.body.items.0.id}}" }
+
+### v5: transfer report for a month
+GET {{host}}/v1/transfers?month=2026-10
+Authorization: Bearer {{accessToken}}
+
+### v5: household setting — auto-ignore detected transfer pairs (default true)
+PATCH {{host}}/v1/couple
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "autoIgnoreTransfers": false }
+
+### v5: inbox including dropped / superseded authorizations
+GET {{host}}/v1/inbox?status=ignored&includeHidden=1
+Authorization: Bearer {{accessToken}}
+
 ### Banks: unlink (inbox rows and mapped accounts are kept)
 DELETE {{host}}/v1/banks/{{link.response.body.id}}
 Authorization: Bearer {{accessToken}}

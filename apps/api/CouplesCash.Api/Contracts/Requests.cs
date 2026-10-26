@@ -28,7 +28,8 @@ public sealed record HouseholdSettingsRequest(
     Optional<Guid?> DefaultAccountId,
     Optional<PayPeriod?> PayPeriod,
     Optional<DateOnly?> PayAnchorDate,
-    Optional<long?> WeeklySpendCents);
+    Optional<long?> WeeklySpendCents,
+    Optional<bool?> AutoIgnoreTransfers);
 
 public sealed record AccountRequest(
     string Name,
@@ -129,3 +130,19 @@ public sealed record InboxBulkRequest(string Action, Guid[]? Ids)
 public sealed record CsvRowRequest(DateOnly? PostedOn, long AmountCents, string Description, string? Payee, string? Memo);
 
 public sealed record CsvImportRequest(Guid? AccountId, string Filename, CsvRowRequest[]? Rows);
+
+// ---------------------------------------------------------------------------------------------
+// v5
+// ---------------------------------------------------------------------------------------------
+
+/// <summary><c>POST /v1/inbox/{id}/match</c> and the payment link from the occurrence side.</summary>
+public sealed record InboxMatchRequest(Guid? ItemId, DateOnly? DueDate);
+
+/// <summary><c>POST /v1/inbox/{id}/transfer</c>: <paramref name="PeerId"/> null = one-sided (the other account is not linked).</summary>
+public sealed record InboxTransferRequest(Guid? PeerId);
+
+/// <summary><c>POST /v1/recurring/from-transaction</c>.</summary>
+public sealed record FromTransactionRequest(Guid? TransactionId, string? Name, Kind? Kind, Frequency? Frequency);
+
+/// <summary><c>POST /v1/recurring/{id}/occurrences/{date}/link</c>.</summary>
+public sealed record LinkTransactionRequest(Guid? TransactionId);
