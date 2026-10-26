@@ -27,6 +27,19 @@ jobs:
     defaults:
       run:
         working-directory: apps/api
+    # Real-database tests (e.g. the pending-transactions regression in V7DbTests) run against this.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: couplescash_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      COUPLESCASH_TEST_DB: Host=localhost;Port=5432;Database=couplescash_test;Username=postgres;Password=ci
     steps:
       - uses: actions/checkout@v7
 
