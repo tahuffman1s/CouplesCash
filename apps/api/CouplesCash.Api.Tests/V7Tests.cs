@@ -535,6 +535,17 @@ public class V7Tests
     }
 
     [Fact]
+    public void Starting_over_needs_the_word_reset()
+    {
+        var validator = new ResetHouseholdRequestValidator();
+        Assert.Empty(Fields(validator, new ResetHouseholdRequest("RESET")));
+        Assert.Empty(Fields(validator, new ResetHouseholdRequest(" reset ")));
+        Assert.Equal(["confirm"], Fields(validator, new ResetHouseholdRequest("")));
+        Assert.Equal(["confirm"], Fields(validator, new ResetHouseholdRequest("yes")));
+        Assert.Equal(["confirm"], Fields(validator, new ResetHouseholdRequest(null!)));
+    }
+
+    [Fact]
     public void Account_role_requests_name_a_role()
     {
         var validator = new AccountRoleRequestValidator();

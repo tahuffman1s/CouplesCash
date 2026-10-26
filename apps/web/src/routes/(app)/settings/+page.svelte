@@ -362,6 +362,60 @@
 					</span>
 					<Icon name="chevron-right" size={18} class="text-base-content/40" />
 				</a>
+
+				<details
+					class="group border-t border-base-300/60 pt-4"
+					open={typeof f?.resetError === 'string'}
+					data-testid="start-over"
+				>
+					<summary
+						class="flex min-h-11 cursor-pointer list-none items-center gap-3 text-error [&::-webkit-details-marker]:hidden"
+					>
+						<span
+							class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-error/10 text-error"
+							><Icon name="trash" size={20} /></span
+						>
+						<span class="flex-1">
+							<span class="block font-medium">Start over</span>
+							<span class="block text-xs text-base-content/60">Erase all data for both of you</span>
+						</span>
+						<Icon
+							name="chevron-down"
+							size={18}
+							class="text-base-content/40 transition-transform group-open:rotate-180"
+						/>
+					</summary>
+					<form
+						method="POST"
+						action="?/reset"
+						class="mt-3 flex flex-col gap-3 rounded-xl border border-error/40 bg-error/5 p-4"
+						use:enhance
+					>
+						<p class="text-sm">
+							This deletes every account, bill, transaction, linked bank and setting in this
+							household, <strong>for both of you</strong>. It can't be undone. You both stay signed
+							in and stay a couple. To link your banks again you'll need a new setup token from
+							SimpleFIN.
+						</p>
+						{#if typeof f?.resetError === 'string'}
+							<div class="alert text-sm alert-error" role="alert">{f.resetError}</div>
+						{/if}
+						<label class="flex flex-col gap-1 text-sm">
+							<span>Type <strong>RESET</strong> to confirm</span>
+							<input
+								name="confirm"
+								class="input min-h-12 w-full"
+								autocomplete="off"
+								autocapitalize="characters"
+								spellcheck="false"
+								data-testid="reset-confirm"
+							/>
+						</label>
+						<button class="btn min-h-12 rounded-full btn-error" data-testid="reset-submit">
+							Erase everything and start over
+						</button>
+					</form>
+				</details>
 			</div>
 		</section>
 

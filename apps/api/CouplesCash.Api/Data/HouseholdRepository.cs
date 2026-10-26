@@ -133,26 +133,56 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
             "INSERT INTO household_members (household_id, user_id, joined_at) VALUES (@HouseholdId, @UserId, @Now)",
             new { HouseholdId = id, UserId = userId, Now = now }, ct));
 
-        var categories = DefaultCategories.Select((c, i) => new
-        {
-            Id = Guid.CreateVersion7(),
-            HouseholdId = id,
-            c.Name,
-            c.Color,
-            c.Icon,
-            SortOrder = i,
-        });
-        await conn.ExecuteAsync(Cmd(
-            """
-            INSERT INTO categories (id, household_id, name, color, icon, sort_order, is_default)
-            VALUES (@Id, @HouseholdId, @Name, @Color, @Icon, @SortOrder, true)
-            """,
-            categories, ct));
+        await SeedCategoriesAsync(conn, id, ct);
 
         var household = await LoadAsync(conn, id, ct) ?? throw new InvalidOperationException("Household vanished inside its own transaction");
         await tx.CommitAsync(ct);
         return household;
     }
+
+    private static Task SeedCategoriesAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            INSERT INTO categories (id, household_id, name, color, icon, sort_order, is_default)
+            VALUES (@Id, @HouseholdId, @Name, @Color, @Icon, @SortOrder, true)
+            """,
+            DefaultCategories.Select((c, i) => new { Id = Guid.CreateVersion7(), HouseholdId = householdId, c.Name, c.Color, c.Icon, SortOrder = i }),
+            ct));
+
+    /// <summary>
+    /// "Start over": deletes every piece of the household's money data — accounts (with balance history), bills and their payments,
+    /// bank links (stored credentials included), transactions, sweeps, rules, expenses, budgets, goals, to-dos, categories and the
+    /// activity feed — and puts the settings back to their defaults (name, currency and time zone stay). Members, logins, passkeys,
+    /// push subscriptions and notification preferences are untouched. The default categories are seeded again. Caller commits.
+    /// </summary>
+    public async Task ResetDataAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct)
+    {
+        // Children first where a delete would otherwise only null a reference; the rest cascade (payments, skips, reminders,
+        // balance snapshots, goal contributions, external accounts).
+        string[] tables =
+        [
+            "sweeps", "imported_transactions", "csv_imports", "bank_links", "external_accounts", "bill_suggestions", "payee_rules",
+            "budgets", "expenses", "todos", "savings_goals", "recurring_items", "accounts", "categories", "activity_events",
+        ];
+        foreach (var table in tables)
+        {
+            await conn.ExecuteAsync(Cmd($"DELETE FROM {table} WHERE household_id = @Id", new { Id = householdId }, ct));
+        }
+
+        await conn.ExecuteAsync(Cmd(
+            """
+            UPDATE households
+            SET default_account_id = NULL, week_start = 0, pay_period = 'monthly', pay_anchor_date = NULL, weekly_spend_cents = NULL,
+                auto_ignore_transfers = true, auto_match_level = 'all', payday_weekday = 5
+            WHERE id = @Id
+            """,
+            new { Id = householdId }, ct));
+        await SeedCategoriesAsync(conn, householdId, ct);
+    }
+
+    /// <summary>Row lock on the household for the length of the caller's transaction (serialises a reset with other writers of it).</summary>
+    public Task LockAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd("SELECT 1 FROM households WHERE id = @Id FOR UPDATE", new { Id = householdId }, ct));
 
     /// <summary>Applies a settings patch. Returns false when the household does not exist.</summary>
     public async Task<bool> UpdateSettingsAsync(NpgsqlConnection conn, Guid householdId, HouseholdSettingsUpdate update, CancellationToken ct)

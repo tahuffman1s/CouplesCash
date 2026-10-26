@@ -158,6 +158,77 @@ public class V7DbTests
     }
 
     [DbFact]
+    public async Task Starting_over_empties_the_household_but_keeps_both_people_and_the_couple()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
+        await using var sp = Services(connectionString);
+        Assert.True(sp.GetRequiredService<DbUpMigrator>().Run());
+
+        var ct = CancellationToken.None;
+        var now = DateTime.UtcNow;
+        var today = DateOnly.FromDateTime(now);
+        var users = sp.GetRequiredService<UserRepository>();
+        var households = sp.GetRequiredService<HouseholdRepository>();
+        var accounts = sp.GetRequiredService<AccountRepository>();
+        var banks = sp.GetRequiredService<BankRepository>();
+        var items = sp.GetRequiredService<RecurringRepository>();
+        var db = sp.GetRequiredService<NpgsqlDataSource>();
+
+        var travis = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Travis", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var partner = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Partner", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var household = await households.CreateAsync(travis.Id, "Our money", now, ct);
+        var householdId = household.Id;
+        try
+        {
+            AccountRow checking;
+            BankLinkRow link;
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                await uow.Connection.ExecuteAsync("INSERT INTO household_members (household_id, user_id, joined_at) VALUES (@H, @U, @N)", new { H = householdId, U = partner.Id, N = now });
+                checking = await accounts.CreateAsync(uow.Connection, householdId, travis.Id, new AccountFields("US Bank", "U.S. Bank", AccountType.Checking, 0, "#000000", "landmark", null), now, ct);
+                var savings = await accounts.CreateAsync(uow.Connection, householdId, travis.Id, new AccountFields("Savings", "U.S. Bank", AccountType.Savings, 0, "#000000", "piggy-bank", null), now, ct);
+                link = await banks.InsertLinkAsync(uow.Connection, householdId, travis.Id, "U.S. Bank", sp.GetRequiredService<DataProtector>().Protect("https://user:pass@bridge.example/simplefin"), now, ct);
+                var set = SimpleFinParser.Parse(Feed(), today);
+                await banks.SetMappingAsync(uow.Connection, householdId, (await banks.UpsertExternalAccountAsync(uow.Connection, householdId, link.Id, set.Accounts[0], now, ct)).Id, checking.Id, now, ct);
+                await banks.SetMappingAsync(uow.Connection, householdId, (await banks.UpsertExternalAccountAsync(uow.Connection, householdId, link.Id, set.Accounts[1], now, ct)).Id, savings.Id, now, ct);
+                var rent = await items.CreateAsync(uow.Connection, householdId, travis.Id,
+                    new RecurringFields("Rent", Kind.Bill, 185_000, null, checking.Id, Frequency.Monthly, today, null, false, null, null), now, ct);
+                await items.UpsertPaymentAsync(uow.Connection, rent.Id, today, travis.Id, 185_000, now, auto: false, PaymentSource.Manual, ct);
+                await accounts.SetRoleAsync(uow.Connection, householdId, checking.Id, AccountRole.Bills, null, now, ct);
+                await uow.Connection.ExecuteAsync("UPDATE households SET payday_weekday = 2, auto_match_level = 'off' WHERE id = @H", new { H = householdId });
+                await uow.CommitAsync(ct);
+            }
+
+            await sp.GetRequiredService<BankSyncService>().SyncAsync(link, travis.Id, "Travis", manual: true, ct);
+
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                await households.LockAsync(uow.Connection, householdId, ct);
+                await households.ResetDataAsync(uow.Connection, householdId, ct);
+                await uow.CommitAsync(ct);
+            }
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+            foreach (var table in new[] { "accounts", "recurring_items", "bank_links", "external_accounts", "imported_transactions", "sweeps", "payee_rules", "activity_events", "expenses" })
+            {
+                Assert.Equal(0, await conn.ExecuteScalarAsync<int>($"SELECT count(*) FROM {table} WHERE household_id = @H", new { H = householdId }));
+            }
+
+            Assert.Equal(HouseholdRepository.DefaultCategories.Count, await conn.ExecuteScalarAsync<int>("SELECT count(*) FROM categories WHERE household_id = @H", new { H = householdId }));
+            Assert.Equal(2, await households.MemberCountAsync(householdId, ct));
+            var after = await households.GetForUserAsync(partner.Id, ct) ?? throw new InvalidOperationException("household");
+            Assert.Equal(("Our money", 5, AutoMatchLevel.All), (after.Name, after.PaydayWeekday, after.AutoMatchLevel));
+            Assert.NotNull(await users.FindByIdAsync(travis.Id, ct));
+        }
+        finally
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = householdId });
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = ANY(@Ids)", new { Ids = new[] { travis.Id, partner.Id } });
+        }
+    }
+
+    [DbFact]
     public async Task Five_pending_transactions_on_one_account_are_all_stored_and_listed()
     {
         var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;

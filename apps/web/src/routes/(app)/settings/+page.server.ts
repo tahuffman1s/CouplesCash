@@ -202,6 +202,19 @@ export const actions: Actions = {
 		const r = await saveFun(event, await event.request.formData());
 		return 'ok' in r ? { section: 'fun', saved: true } : r;
 	},
+	reset: async (event) => {
+		const confirm = String((await event.request.formData()).get('confirm') ?? '');
+		if (confirm.trim().toUpperCase() !== 'RESET')
+			return fail(400, { resetError: 'Type RESET to confirm.' });
+		try {
+			await endpoints(event).household.reset(confirm);
+		} catch (e) {
+			return fail(isApiError(e) ? e.status : 500, {
+				resetError: (isApiError(e) && e.field('confirm')) || 'Could not start over. Try again.'
+			});
+		}
+		redirect(303, '/week');
+	},
 	// --- Accounts
 	roles: async (event) => {
 		const r = await saveRoles(event, await event.request.formData());

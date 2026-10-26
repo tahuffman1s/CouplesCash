@@ -848,6 +848,7 @@ type Plan = {
 | PATCH | `/v1/couple` | `{ paydayWeekday? }` | `200 Household` |
 | POST | `/v1/recurring/bulk` | `{ items: RecurringRequest[] }` (≤ 100; all-or-nothing validation, per-index errors `items[3].amountCents`) | `201 { items: RecurringItem[] }` |
 | POST/PUT | `/v1/recurring` | `kind: 'transfer'` requires `fromAccountId` and `toAccountId` (different, both in household) | `RecurringItem` |
+| POST | `/v1/couple/reset` | `{ confirm: "RESET" }` (case and spaces ignored) | `200 Household` (settings back to defaults) · `400 errors.confirm` without the word · `409` "No household" |
 | GET | `/v1/banks` | — | `BankLink.accounts[].lastFeed: FeedStats` |
 Transactions on `fun` accounts never enter To review (status confirmed, `ignoreReason` null, no suggestion) but appear in
 the account's transaction list. Activity kinds added: `sweep.done`, `sweep.auto`, `transfer.planned_paid`. Push tag
@@ -941,6 +942,14 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   account ordered bills, savings, fun, other, then name. `setup`: `banksLinked` (a bank link exists), `rolesSet` (a bills account exists),
   `paycheckKnown` (an active income item), `billsAdded` (an active bill / subscription), `partnerJoined` (two members). `toReviewCount` =
   household rows to review. `sweep` = this week's sweep row (`Sweep` gains `leftCents`, `transactionId`).
+  **Start over (`POST /couple/reset`).** One transaction under a row lock on the household: deletes every account (balance history
+  cascades), recurring item (payments, skips, reminders), bank link and external account (stored credentials included — the SimpleFIN
+  connection on the Bridge stays; linking again needs a new setup token), imported transaction, CSV import, sweep, payee rule, bill
+  suggestion, expense, budget, goal, to-do, category and activity event of the household; settings go back to their defaults
+  (`paydayWeekday 5`, `autoMatchLevel all`, `autoIgnoreTransfers true`, `payPeriod monthly`, no anchor / weekly target / default account;
+  name, currency and time zone stay) and the default categories are seeded again. Members, logins, refresh tokens, passkeys, push
+  subscriptions and notification preferences are untouched, so both partners stay signed in and coupled. The new feed holds one event,
+  **`household.reset`** (actor = caller). Either member may do it.
   **Fetch window (v7).** A sync covers `today − 30` (`− 90` on the first sync) … `today + 14` (exclusive): some banks put the
   expected post day in a pending charge's `posted`, and `end-date` is midnight UTC, so a window ending tomorrow missed both. Each Bridge
   request is at most 44 days (the Bridge warns in `errors` above 45 days and cuts ranges over 90): a regular sync is one request; the

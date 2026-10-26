@@ -80,6 +80,8 @@ public static class ActivitySummaries
 
     public static string CoupleLeft() => "left the household";
 
+    public static string HouseholdReset() => "reset the household's data and started over";
+
     public static string CoupleRenamed(string name) => $"renamed the household to {Bold(name)}";
 
     public static string CoupleSettings(IReadOnlyCollection<string> changedFields) =>

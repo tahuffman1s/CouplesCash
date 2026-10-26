@@ -26,6 +26,8 @@ public static class CoupleEndpoints
             .WithSummary("Join a household with a typed code or QR payload");
         group.MapPost("/leave", Leave)
             .WithSummary("Leave the household (deleted when empty)");
+        group.MapPost("/reset", Reset).RequireHousehold().WithValidation<ResetHouseholdRequest>()
+            .WithSummary("Start over: delete all of the household's money data for both members (logins and the couple stay)");
         group.MapPatch("", UpdateSettings).RequireHousehold().WithValidation<HouseholdSettingsRequest>()
             .WithSummary("Update household name and settings (currency, week start, time zone, default account, pay period, weekly spending target, auto-ignore transfers, auto-match level, v7 paydayWeekday 0–6 — the pay week)");
 
@@ -159,6 +161,37 @@ public static class CoupleEndpoints
         }
 
         return TypedResults.Ok(await sessions.StartAsync(user, http.UserAgent(), ct));
+    }
+
+    private static async Task<Results<Ok<HouseholdDto>, NotFound>> Reset(
+        ResetHouseholdRequest request,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        UserRepository users,
+        HouseholdRepository households,
+        ActivityService activity,
+        TimeProvider time,
+        ILoggerFactory loggers,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+        var user = await users.FindByIdAsync(userId, ct);
+
+        await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+        {
+            await households.LockAsync(uow.Connection, householdId, ct);
+            await households.ResetDataAsync(uow.Connection, householdId, ct);
+
+            // The one event left in the new, empty feed: who started over.
+            await activity.RecordAsync(uow, householdId, userId, "household.reset", "household", householdId,
+                ActivitySummaries.HouseholdReset(), new { userId }, ct, user?.DisplayName);
+            await uow.CommitAsync(ct);
+        }
+
+        loggers.CreateLogger("CouplesCash.Household").LogInformation("Household {HouseholdId} reset by {UserId}", householdId, userId);
+        var household = await households.GetForUserAsync(userId, ct);
+        return household is null ? TypedResults.NotFound() : TypedResults.Ok(household);
     }
 
     private static async Task<Results<Ok<HouseholdDto>, NotFound, ValidationProblem>> UpdateSettings(

@@ -1381,6 +1381,18 @@ echo "$BODY" | jq -e '.events[] | select(.kind=="couple.settings" and .data.week
 request POST /v1/auth/password "$A_TOKEN" "$(jq -nc --arg p "$PASSWORD" '{currentPassword:$p,newPassword:"a brand new passphrase"}')"; expect 204 "change password"
 request POST /v1/auth/refresh '' "$(jq -nc --arg r "$A_REFRESH" '{refreshToken:$r}')"; expect 401 "all refresh tokens revoked after password change"
 
+# Start over: wipes the household's money data for both of them; the couple stays.
+request POST /v1/couple/reset "$A_TOKEN" '{"confirm":"yes"}'; expect 400 "reset without the word RESET → 400"
+echo "$BODY" | jq -e '.errors | has("confirm")' >/dev/null || fail "reset error names confirm"
+request POST /v1/couple/reset "$A_TOKEN" '{"confirm":"RESET"}'; expect 200 "Alex starts over (RESET)"
+echo "$BODY" | jq -e '.paydayWeekday==5 and .autoMatchLevel=="all"' >/dev/null || fail "settings back to defaults: $BODY"
+request GET /v1/accounts "$B_TOKEN"; expect 200 "Sam's view after the reset"
+echo "$BODY" | jq -e 'length==0' >/dev/null || fail "no accounts left for either member"
+request GET /v1/recurring "$B_TOKEN"; echo "$BODY" | jq -e 'length==0' >/dev/null || fail "no bills left: $(echo "$BODY" | head -c 300)"
+request GET /v1/categories "$A_TOKEN"; echo "$BODY" | jq -e 'length>0' >/dev/null || fail "default categories seeded again"
+request GET /v1/activity "$B_TOKEN"; echo "$BODY" | jq -e '[.events[].kind]==["household.reset"]' >/dev/null || fail "the feed holds only the reset: $(echo "$BODY" | head -c 300)"
+pass "reset: accounts, bills and activity gone for both, categories re-seeded, still a couple"
+
 request POST /v1/couple/leave "$B_TOKEN"; expect 200 "Sam leaves"
 [[ "$(echo "$BODY" | jq -r .household)" == "null" ]] || fail "after leave household is null"
 request GET /v1/couple "$A_TOKEN"; expect 200 "household kept for Alex"

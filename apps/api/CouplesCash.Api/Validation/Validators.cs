@@ -73,6 +73,16 @@ public sealed class JoinRequestValidator : AbstractValidator<JoinRequest>
     public JoinRequestValidator() => RuleFor(x => x.Code).NotEmpty().MaximumLength(64);
 }
 
+public sealed class ResetHouseholdRequestValidator : AbstractValidator<ResetHouseholdRequest>
+{
+    public const string Word = "RESET";
+
+    public ResetHouseholdRequestValidator() =>
+        RuleFor(x => x.Confirm)
+            .Must(c => string.Equals(c?.Trim(), Word, StringComparison.OrdinalIgnoreCase))
+            .WithMessage($"Type {Word} to confirm.");
+}
+
 public sealed class HouseholdSettingsRequestValidator : AbstractValidator<HouseholdSettingsRequest>
 {
     public const string CurrencyPattern = "^[A-Z]{3}$";

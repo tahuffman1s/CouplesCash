@@ -19,6 +19,9 @@ public sealed record CoupleCodeRequest(string? Name);
 
 public sealed record JoinRequest(string Code);
 
+/// <summary>POST /v1/couple/reset: <c>confirm</c> must be the word RESET.</summary>
+public sealed record ResetHouseholdRequest(string Confirm);
+
 /// <summary>PATCH /v1/couple: every field optional; nullable settings are cleared by sending <c>null</c>.</summary>
 public sealed record HouseholdSettingsRequest(
     Optional<string?> Name,

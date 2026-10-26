@@ -518,10 +518,15 @@ function createHousehold(name: string, owner: User): Household {
 	};
 	households.set(h.id, h);
 	owner.householdId = h.id;
+	seedCategories(h.id);
+	return h;
+}
+
+function seedCategories(hh: string) {
 	DEFAULT_CATEGORIES.forEach(([n, color, icon], i) => {
 		const c: Category = {
 			id: randomUUID(),
-			householdId: h.id,
+			householdId: hh,
 			name: n,
 			color,
 			icon,
@@ -530,7 +535,44 @@ function createHousehold(name: string, owner: User): Household {
 		};
 		categories.set(c.id, c);
 	});
-	return h;
+}
+
+/** v7 POST /couple/reset: every piece of the household's money data goes; members and logins stay. */
+function resetHousehold(h: Household) {
+	const hh = h.id;
+	const drop = <T extends { householdId: string | null }>(m: Map<string, T>) => {
+		for (const [k, v] of m) if (v.householdId === hh) m.delete(k);
+	};
+	for (const [id, i] of items)
+		if (i.householdId === hh)
+			for (const key of payments.keys()) if (key.startsWith(`${id}:`)) payments.delete(key);
+	for (const [id, a] of accounts) if (a.householdId === hh) snapshots.delete(id);
+	for (const [id, l] of bankLinks) if (l.householdId === hh) bridge.delete(id);
+	drop(accounts);
+	drop(categories);
+	drop(items);
+	drop(expenses);
+	drop(todos);
+	drop(goals);
+	drop(bankLinks);
+	drop(extAccounts);
+	drop(txs);
+	drop(csvImports);
+	drop(billSuggestions);
+	for (const m of [budgets, weeklyBudgets, payeeRules, sweeps] as Map<string, unknown>[])
+		for (const k of m.keys()) if (k.startsWith(`${hh}:`)) m.delete(k);
+	activity.splice(0, activity.length, ...activity.filter((e) => e.householdId !== hh));
+	Object.assign(h, {
+		weekStart: 0,
+		defaultAccountId: null,
+		payPeriod: 'monthly',
+		payAnchorDate: null,
+		weeklySpendCents: null,
+		autoIgnoreTransfers: true,
+		autoMatchLevel: 'all',
+		paydayWeekday: 5
+	} satisfies Partial<Household>);
+	seedCategories(hh);
 }
 
 // ---- helpers ----------------------------------------------------------------------------
@@ -4008,6 +4050,32 @@ const server = createServer(async (req, res) => {
 		const hh = user.householdId;
 		if (!hh) return problem(res, 409, 'No household');
 		const $ = (cents: number) => money(hh, cents);
+
+		if (p === '/v1/couple/reset' && m === 'POST') {
+			const b = await readJson(req);
+			if (
+				String(b.confirm ?? '')
+					.trim()
+					.toUpperCase() !== 'RESET'
+			)
+				return send(res, 400, {
+					type: 'about:blank',
+					title: 'Validation failed',
+					status: 400,
+					errors: { confirm: ['Type RESET to confirm.'] }
+				});
+			const h = households.get(hh)!;
+			resetHousehold(h);
+			record(
+				hh,
+				user,
+				'household.reset',
+				'household',
+				hh,
+				"reset the household's data and started over"
+			);
+			return send(res, 200, householdView(h));
+		}
 
 		// --- accounts
 		if (p === '/v1/accounts' && m === 'GET') {

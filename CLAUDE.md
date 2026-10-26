@@ -134,7 +134,9 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   00:00 from last week's left-at-end and auto-done by a bills→savings transfer; until ticked it is subtracted from this
   week's left-at-end (`sweepOutCents`, "− Move to savings"). A line ticked by hand or by autopay keeps counting until its
   bank row arrives, which takes the payment over (`PayFromBankAsync`; only `source = 'bank'` closes an occurrence for
-  matching), so a tick never moves "Left on …". Sync window `today − 30 … today + 14`, ≤ 44 days per Bridge request. The web has three tabs (This week ·
+  matching), so a tick never moves "Left on …". Sync window `today − 30 … today + 14`, ≤ 44 days per Bridge request.
+  Settings → Household → Start over (`POST /couple/reset`, type RESET) wipes every household data table in
+  `HouseholdRepository.ResetDataAsync` — add any new household table there. The web has three tabs (This week ·
   Transactions · Bills) + Settings; removed screens redirect to `/week` — don't re-add them without a plan change.
 - **Week view**: a *planned item* is any occurrence due in the week (incl. `frequency: once` one-offs);
   `varianceCents = paid.amountCents − amountCents`; left-at-end = spendable (checking+cash) + unpaid income

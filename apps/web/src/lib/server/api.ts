@@ -238,7 +238,9 @@ export function endpoints(event: RequestEvent) {
 		categories: () => c.get<Category[]>('/categories'),
 		household: {
 			get: () => c.get<Household | null>('/couple'),
-			update: (patch: HouseholdPatch) => c.patch<Household>('/couple', patch)
+			update: (patch: HouseholdPatch) => c.patch<Household>('/couple', patch),
+			// v7 "Start over": every account, bill, transaction and bank link, for both of you
+			reset: (confirm: string) => c.post<Household>('/couple/reset', { confirm })
 		},
 		recurring: {
 			create: (body: RecurringBody) => c.post<RecurringItem>('/recurring', body),
