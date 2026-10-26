@@ -37,13 +37,13 @@ category rule (fuzzy ≥ 90, rule hits ≥ 2). Every automatic action is visible
 The app grew to 3 overlapping "home" screens (dashboard, week, pay period), a 14-item More menu and 5 separate
 settings pages. v6 collapses it so a first-time user can explain every tab in one sentence.
 
-**Five tabs, each with one job**
+**Five tabs, each with one job** (reconciled with §5)
 | Tab | Route | One sentence |
 |---|---|---|
 | **Week** | `/week` (home) | "How much is left this week, and what's coming." |
-| **Review** | `/inbox` | "Bank transactions the app couldn't match on its own." Badge = count; hidden from the dock when bank sync and CSV were never used. |
-| **Money** | `/accounts` | "Every account, what's pending, and your savings goals." |
-| **Bills** | `/bills` | "Everything that repeats, plus one-offs." List ⇄ Calendar toggle in the app bar. |
+| **Transactions** | `/transactions` | "Everything that hit your accounts." **To review** rows on top (one-tap buttons, §5), then **Pending** pinned, then posted by day; account chips + search. Badge = to-review count. `/inbox` redirects here. |
+| **Bills** | `/bills` | "Everything that repeats, plus one-offs." List ⇄ Calendar toggle; *Found bills* card (§5). |
+| **Money** | `/accounts` | "Every account, what's pending by account, your goals, and money moved between accounts." |
 | **More** | `/more` | Insights, To-pay list, Activity, Settings — four rows. |
 
 **Removed or folded in**
@@ -53,9 +53,10 @@ settings pages. v6 collapses it so a first-time user can explain every tab in on
 - **Pay period** (`/payperiod`, PaydayCard) — removed; the week header shows "Next payday Fri Nov 6 · $3,200" when a
   pay period is configured. The pay-period settings stay (they drive that line and the income projection).
 - **Calendar tab** — becomes the Calendar view inside Bills (`/bills?view=calendar`; `/calendar` redirects).
-- **Pending** — not a separate page; Money shows a "Pending" section at the top grouping every pending transaction by
-  account (the `/pending` API powers it), each account row shows "N pending · $X", and the account Transactions tab keeps
-  its Pending filter. `/pending` redirects to `/accounts#pending`.
+- **Pending** — pinned at the top of Transactions (all accounts) and grouped by account in Money (the `/pending` API
+  powers it); each account row shows "N pending · $X"; the account Transactions tab and the week day list include pending
+  rows, marked, never hidden. `/pending` redirects to `/accounts#pending`.
+- **Review / Inbox** — not a separate tab; it is the To-review section of Transactions.
 - **Transfers** — a section in Money ("Moved between accounts this month", link to the full `/transfers` view), not a menu item.
 - **Goals** — a section in Money, not a separate list page (detail pages stay).
 - **Settings** — one `/settings` page with grouped sections: *You* (name, password, passkeys, theme, notifications),
@@ -84,8 +85,12 @@ recurring_items + bank_names text[] NOT NULL DEFAULT '{}'   (backfill from payee
                 + amount_varies boolean NOT NULL DEFAULT false
 households      + auto_match_level text NOT NULL DEFAULT 'all' CHECK (auto_match_level IN ('off','bills','all'))
 imported_transactions + match_score smallint NULL, + match_detail jsonb NULL   -- {name, amount, date, reason, engine: 'fuzzy'|'builtin'}
+bill_suggestions  id, household_id, name, kind, amount_cents, amount_varies, frequency, next_due, bank_name,
+                  sample_transaction_ids uuid[], score smallint, status ('open'|'accepted'|'dismissed'),
+                  fingerprint bytea UNIQUE per household (normalised name + frequency), created_at, updated_at
 ```
-`payee_hint` stays readable for compatibility (= first bank name) but is no longer written.
+`payee_hint` stays readable for compatibility (= first bank name) but is no longer written. Dismissed bill suggestions never
+come back for the same fingerprint.
 
 ## Agents
 | Agent | Owns | Starts |
@@ -94,7 +99,7 @@ imported_transactions + match_score smallint NULL, + match_detail jsonb NULL   -
 | API | `apps/api/**` | after v5 lands |
 | Web | `apps/web/**` | after v5 lands |
 
-## 4. Radically simple (applies to everything above)
+## 5. Radically simple (applies to everything above)
 **Principle:** the common path is one tap or one short sentence; anything else is one "Something else" away.
 
 ### Adding a bill = one button + a few words
@@ -133,14 +138,4 @@ imported_transactions + match_score smallint NULL, + match_detail jsonb NULL   -
 - The per-account Transactions tab and the week day list also include pending rows (marked), never hide them.
 - `/pending` from §3 becomes the Pending section's "See by account" link.
 
-### Navigation (5 tabs, the order people use them)
-**Week** · **Transactions** (badge = to review) · **Bills** (list ↔ calendar toggle; calendar lives here now) ·
-**Accounts** · **More**. Overview, Insights, Goals, To-pay, Activity, Transfers, Settings live under More.
-
-### Data model additions (`0006_matcher.sql`)
-```
-bill_suggestions  id, household_id, name, kind, amount_cents, amount_varies, frequency, next_due, bank_name,
-                  sample_transaction_ids uuid[], score smallint, status ('open'|'accepted'|'dismissed'),
-                  fingerprint bytea UNIQUE per household (normalised name + frequency), created_at, updated_at
-```
-Dismissed suggestions never come back for the same fingerprint.
+§4 and §5 together define the v6 web scope; §2's matcher also owns `POST /v1/detect-recurring` (found bills).
