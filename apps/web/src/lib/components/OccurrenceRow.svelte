@@ -65,7 +65,11 @@
 	></span>
 	<a href="/bills/{occ.itemId}" class="min-w-0 flex-1 rounded-lg">
 		<p class="flex items-center gap-1.5">
-			<span class="truncate font-medium {occ.paid ? 'text-base-content/50 line-through' : ''}">
+			<span
+				class="min-w-[3.5rem] truncate font-medium {occ.paid
+					? 'text-base-content/50 line-through'
+					: ''}"
+			>
 				{occ.name}
 			</span>
 			{#if occ.autoPay && !autoPaid}
@@ -111,14 +115,16 @@
 		</p>
 	</a>
 	{#if fromBank && onBank}
+		<!-- icon-only so a paid row keeps room for its name on a phone (44 px target) -->
 		<button
 			type="button"
-			class="btn min-h-11 shrink-0 gap-1 rounded-full border-0 bg-info/15 px-2.5 text-[0.7rem] font-medium text-info btn-sm"
+			class="btn min-h-11 w-11 shrink-0 rounded-full border-0 bg-info/15 p-0 text-info btn-sm"
 			aria-label="Open the bank transaction that paid {occ.name}"
+			title="Bank transaction"
 			data-testid="from-bank"
 			onclick={() => onBank(occ)}
 		>
-			<Icon name="landmark" size={12} strokeWidth={2.5} /> Bank
+			<Icon name="landmark" size={16} strokeWidth={2.25} />
 		</button>
 	{/if}
 	<span class="flex shrink-0 flex-col items-end">
