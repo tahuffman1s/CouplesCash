@@ -67,7 +67,10 @@ test('notifications and passkeys degrade gracefully when the server has neither'
 }) => {
 	await registerWithHousehold(page);
 	await page.goto('/settings#you');
-	await expect(page.getByTestId('push-not-configured')).toBeVisible();
+	const notConfigured = page.getByTestId('push-not-configured');
+	await expect(notConfigured.or(page.getByTestId('payday-push-toggle')).first()).toBeVisible();
+	test.skip((await notConfigured.count()) === 0, 'this API has push configured');
+	await expect(notConfigured).toBeVisible();
 	await page.getByRole('link', { name: /Passkeys/ }).click();
 	await expect(page).toHaveURL(/\/settings\/passkeys$/);
 });

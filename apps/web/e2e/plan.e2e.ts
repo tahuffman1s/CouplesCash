@@ -19,6 +19,7 @@ import {
  * a weekly $2,450 paycheck and $20 + $150 fun money each, planned by the setup.
  */
 const AVAILABLE = 234567;
+const cents = (text: string) => Math.round(Number(text.replace(/[^\d.]/g, '')) * 100);
 
 function expectedFun(start: string): number {
 	const end = shiftDays(start, 6);
@@ -45,9 +46,14 @@ test('the plan reads like her note and its math follows bills paid and one-offs 
 	const fun = expectedFun(start);
 	// this week's paycheck (due on payday) counts until the bank shows it arrived
 	const income = 245000;
-	let left = AVAILABLE - 6000 - fun + income;
-
 	const receipt = page.getByTestId('plan-receipt');
+	// last week's leftover, frozen at payday and not moved yet, is not this week's money
+	const sweepLine = page.getByTestId('plan-amount-sweep');
+	const sweepOut = (await sweepLine.count()) ? cents(await sweepLine.innerText()) : 0;
+	if (sweepOut)
+		await expect(receipt.getByTestId('plan-row-sweep')).toContainText('Move to savings');
+	let left = AVAILABLE - sweepOut - 6000 - fun + income;
+
 	await expect(page.getByTestId('week-label')).toHaveText(
 		/^Fri \w{3} \d{1,2} – Thu \w{3} \d{1,2}$/
 	);

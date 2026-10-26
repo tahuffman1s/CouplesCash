@@ -151,7 +151,7 @@ export function pendingLine(
 }
 
 export type ReceiptLine = {
-	key: 'available' | 'bills' | 'fun' | 'oneoffs' | 'income';
+	key: 'available' | 'sweep' | 'bills' | 'fun' | 'oneoffs' | 'income';
 	/** the operator in front of the label, like her note: "", "−", "+" */
 	op: '' | '−' | '+';
 	label: string;
@@ -174,15 +174,24 @@ export function receiptLines(plan: Plan): ReceiptLine[] {
 			label: `${b.name}, available now`,
 			cents: b.availableCents,
 			lines: []
-		},
-		{
-			key: 'bills',
-			op: '−',
-			label: billsLabel(plan.nextPayday),
-			cents: -plan.billsOutCents,
-			lines: plan.bills
 		}
 	];
+	// last week's leftover is still in the account until it moves to savings
+	if (plan.sweepOutCents > 0)
+		out.push({
+			key: 'sweep',
+			op: '−',
+			label: 'Move to savings',
+			cents: -plan.sweepOutCents,
+			lines: []
+		});
+	out.push({
+		key: 'bills',
+		op: '−',
+		label: billsLabel(plan.nextPayday),
+		cents: -plan.billsOutCents,
+		lines: plan.bills
+	});
 	if (plan.funMoney.length || plan.funOutCents)
 		out.push({
 			key: 'fun',

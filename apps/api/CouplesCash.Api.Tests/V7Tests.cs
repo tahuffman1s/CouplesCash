@@ -299,6 +299,14 @@ public class V7Tests
     }
 
     [Fact]
+    public void The_sweep_counts_against_this_week_until_it_moves()
+    {
+        Assert.Equal(234_567, PlanEngine.SweepOut(234_567, done: false));  // − Move to savings
+        Assert.Equal(0, PlanEngine.SweepOut(234_567, done: true));         // moved: already out of available
+        Assert.Equal(0, PlanEngine.SweepOut(0, done: false));              // nothing to move
+    }
+
+    [Fact]
     public void Freezing_late_takes_back_what_already_moved_in_the_new_week()
     {
         // Frozen on payday 2026-11-06 for the week that just ended: only Phone ($85) is still unpaid → left = available − 85.

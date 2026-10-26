@@ -50,8 +50,9 @@
 			<p class="text-sm text-base-content/70">
 				CouplesCash reads balances and transactions through <strong>SimpleFIN Bridge</strong>, a
 				read-only service built for self-hosters. It costs <strong>$1.50 a month</strong>, never
-				sees your CouplesCash login, and can't move money. Every pulled transaction lands in the
-				<a href="/transactions" class="link link-primary">To review</a> for you to confirm.
+				sees your CouplesCash login, and can't move money. Transactions are matched to your bills
+				and transfers by themselves; only what it can't place waits in
+				<a href="/transactions" class="link link-primary">To review</a>.
 			</p>
 			<ol class="list-inside list-decimal space-y-1 text-sm text-base-content/80">
 				<li>

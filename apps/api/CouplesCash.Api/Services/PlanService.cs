@@ -130,8 +130,11 @@ public sealed class PlanService(
         var totals = PlanEngine.Totals(week, available, lines.Select(l => (l.Plan, l.Bucket)));
         var sweep = await sweeps.GetAsync(householdId, week.Start, ct);
 
+        // This week's sweep, until it moves, is last week's money still in the bills account.
+        var sweepOut = isCurrent && sweep is not null ? PlanEngine.SweepOut(sweep.PlannedCents, sweep.IsDone) : 0;
+
         // A past week shows the number that was frozen for the next payday's sweep (its "Left on Thursday"), when known.
-        var left = totals.LeftAtEndCents;
+        var left = totals.LeftAtEndCents - sweepOut;
         if (week.End < today && await sweeps.GetAsync(householdId, week.Start.AddDays(7), ct) is { } next)
         {
             left = next.LeftCents;
@@ -222,6 +225,7 @@ public sealed class PlanService(
             FunOutCents: totals.FunOutCents,
             OneOffOutCents: totals.OneOffOutCents,
             IncomeInCents: totals.IncomeInCents,
+            SweepOutCents: sweepOut,
             LeftAtEndCents: left,
             SavingsBills: Lines(PlanBucket.SavingsBill),
             Checklist: checklist,

@@ -131,7 +131,8 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   account with `role = 'bills'` counts: available = bank `availableCents` else `balanceCents − pendingOutCents` (never
   sum other checking accounts). Fun-money accounts (`role = 'fun'`, one owner each) never enter To review. Fun money is
   `kind = 'transfer'` items (from/to accounts) auto-paid by matching transfers; the savings sweep is frozen at payday
-  00:00 from last week's left-at-end and auto-done by a bills→savings transfer. The web has three tabs (This week ·
+  00:00 from last week's left-at-end and auto-done by a bills→savings transfer; until ticked it is subtracted from this
+  week's left-at-end (`sweepOutCents`, "− Move to savings"). The web has three tabs (This week ·
   Transactions · Bills) + Settings; removed screens redirect to `/week` — don't re-add them without a plan change.
 - **Week view**: a *planned item* is any occurrence due in the week (incl. `frequency: once` one-offs);
   `varianceCents = paid.amountCents − amountCents`; left-at-end = spendable (checking+cash) + unpaid income

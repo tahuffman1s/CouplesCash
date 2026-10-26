@@ -248,6 +248,12 @@ public static class PlanEngine
     /// <summary>What to move: last week's left-at-end, or nothing when it was negative.</summary>
     public static long SweepPlanned(long leftCents) => Math.Max(0, leftCents);
 
+    /// <summary>
+    /// The sweep still to move, taken out of this week's left-at-end: last week's leftover sits in the bills account until it moves, so it
+    /// is not this week's money. Zero once the sweep is ticked (by the bank or a person — the money has left the bills account).
+    /// </summary>
+    public static long SweepOut(long plannedCents, bool done) => done ? 0 : Math.Max(0, plannedCents);
+
     /// <summary>max(5 % of the planned amount, $5.00).</summary>
     public static long SweepTolerance(long plannedCents) =>
         Math.Max(SweepMinToleranceCents, (long)Math.Round(plannedCents * SweepTolerancePercent, MidpointRounding.AwayFromZero));

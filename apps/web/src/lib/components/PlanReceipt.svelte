@@ -20,6 +20,8 @@
 	const amount = (key: string, cents: number) =>
 		key === 'available' ? formatMoney(cents) : signedMoney(cents);
 	const emptyText: Record<string, string> = {
+		sweep:
+			"Last week's leftover is still in this account until you move it. This line goes away when the bank shows the transfer, or when you tap Done on the payday list.",
 		bills: 'Nothing else due before payday.',
 		fun: 'No fun money this week.',
 		oneoffs: 'No one-offs planned.',

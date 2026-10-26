@@ -34,12 +34,15 @@ Reads top-to-bottom like her note, every line tappable to expand:
 ```
 US Bank, available now             $2,345.67   ← bank available balance (already after pending)
    3 pending                         −$62.40   ← list; informational when the bank gives "available"
+− Move to savings                  −$845.67   ← payday only, until ticked: last week's leftover is still in the account
 − Bills before next Friday        −$1,992.50   ← each bill; ticks to Paid when the bank transaction matches
 − Fun money                           −$40.00   ← $20 Travis · $20 <wife>; +$300 on the first one of the month
 − One-offs                            −$60.00   ← planned with + ("oil change 60 friday")
 ─────────────────────────────────────────────
 = Left on Thursday                    $253.17   ← the number she writes down
 ```
+- **Move to savings** = this week's frozen sweep while it is not ticked. Last week's leftover sits in US Bank until she moves it,
+  so it is not this week's money; once the transfer shows up (or she taps Done) the line goes away and `available` already reflects it.
 - **Available now** = the bills account's bank `availableCents`; when the bank doesn't report it,
   `balanceCents − pendingOutCents` (so pending is never ignored and never double-counted).
 - Bills/one-offs count only when due in the pay week **and** assigned to the bills account or unassigned. Savings

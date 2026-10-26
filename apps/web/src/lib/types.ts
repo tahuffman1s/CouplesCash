@@ -780,7 +780,9 @@ export type Plan = {
 	funOutCents: number;
 	oneOffOutCents: number;
 	incomeInCents: number;
-	/** available − bills − fun − one-offs (+ unpaid income only when it lands before the end) */
+	/** this week's savings sweep while not yet ticked (last week's money still in the account), else 0 */
+	sweepOutCents: number;
+	/** available − sweep − bills − fun − one-offs (+ unpaid income only when it lands before the end) */
 	leftAtEndCents: number;
 	/** e.g. student loans from savings: shown, not in the math */
 	savingsBills: PlanLine[];

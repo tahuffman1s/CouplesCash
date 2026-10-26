@@ -832,7 +832,8 @@ type Plan = {
   accounts: { id: string; name: string; role: AccountRole; ownerName: string | null; balanceCents: number; availableCents: number | null }[];
   bills: PlanLine[]; funMoney: PlanLine[]; oneOffs: PlanLine[]; income: PlanLine[];
   billsOutCents: number; funOutCents: number; oneOffOutCents: number; incomeInCents: number;  // unpaid remainders
-  leftAtEndCents: number;        // availableCents − bills − fun − one-offs (+ unpaid income only when it lands before end)
+  sweepOutCents: number;         // this week's savings sweep while not yet ticked (last week's money still in the account), else 0
+  leftAtEndCents: number;        // availableCents − sweep − bills − fun − one-offs (+ unpaid income only when it lands before end)
   savingsBills: PlanLine[];      // e.g. student loans from savings — shown, not in the math
   checklist: ChecklistItem[];    // payday only (empty otherwise); sweep amount = previous week's left-at-end, frozen
   sweep: Sweep | null; toReviewCount: number; setup: { banksLinked: boolean; rolesSet: boolean; paycheckKnown: boolean; billsAdded: boolean; partnerJoined: boolean } };
@@ -928,7 +929,7 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   account to a `fun` account → `funMoney`; from the bills account elsewhere → `bills` (line kind `transfer`); into the bills account →
   `income`; between two other accounts → not listed. Before setup (no bills account) every account that is not savings / fun counts as the
   bills side. Paid lines are listed (ticked) and never counted. `billsOutCents` / `funOutCents` / `oneOffOutCents` / `incomeInCents` are
-  the unpaid planned amounts; **`leftAtEndCents = available − billsOut − funOut − oneOffOut + incomeIn`** where unpaid income counts only
+  the unpaid planned amounts; **`leftAtEndCents = available − sweepOut − billsOut − funOut − oneOffOut + incomeIn`** where unpaid income counts only
   when due inside the pay week (≤ end = the day before the next payday): the next payday's paycheck belongs to the new week, and this
   week's paycheck, once it posts, is paid and already in available — it is never added twice. For a past week `leftAtEndCents` is the
   number frozen for the following payday's sweep (`left_cents`) when there is one; a future week uses today's available (a rough
@@ -938,6 +939,9 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   account ordered bills, savings, fun, other, then name. `setup`: `banksLinked` (a bank link exists), `rolesSet` (a bills account exists),
   `paycheckKnown` (an active income item), `billsAdded` (an active bill / subscription), `partnerJoined` (two members). `toReviewCount` =
   household rows to review. `sweep` = this week's sweep row (`Sweep` gains `leftCents`, `transactionId`).
+  `sweepOutCents` (current week only) = the frozen sweep's `planned_cents` while it is not ticked: last week's leftover is still in the
+  bills account until it moves to savings, so it is not this week's money. Once ticked — by the bank or by a person — it is 0 (the
+  money has left `available`). Past and future weeks: 0. The sweep freeze itself (`PreviousWeekLeft`) never subtracts a sweep.
 - **Payday checklist** (only for the current pay week; shown on payday and, while an item is open, through payday + 3): `paycheck` =
   income lines due on payday ("Paycheck arrived · $1,500.00", amount = paid amount when paid, `done` = paid, `auto` = the payment is
   automatic, `transactionId` = the paying row); `fun` = fun-money lines due payday … payday + 3 (weekly ones on payday, a monthly one when

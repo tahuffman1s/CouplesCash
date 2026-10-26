@@ -32,6 +32,10 @@ test('payday: Done by hand, then the bank ticks paycheck, fun money and the swee
 	const sweepText = await item('sweep').getByTestId('sweep-text').innerText();
 	expect(sweepText).toMatch(/^Move \$[\d,]+\.\d{2} to savings$/);
 	const amount = sweepText.replace(/^Move \$|,| to savings$/g, '');
+	// until it moves, last week's leftover is taken out of this week's plan
+	await expect(page.getByTestId('plan-amount-sweep')).toHaveText(
+		`−${usd(Math.round(Number(amount) * 100))}`
+	);
 
 	// Copy the amount for the bank app
 	await hydrated(page);
@@ -59,6 +63,8 @@ test('payday: Done by hand, then the bank ticks paycheck, fun money and the swee
 		await expect(row).toHaveAttribute('data-done', 'true');
 	await expect(done.getByTestId('checklist-auto').first()).toBeVisible();
 	await expect(done.locator('[data-key="sweep"]').getByTestId('checklist-auto')).toBeVisible();
+	// moved: it is out of the account's available balance, so the plan line goes away
+	await expect(page.getByTestId('plan-row-sweep')).toHaveCount(0);
 
 	// the fun money in the plan is paid, and the transfers left To review
 	const funRow = page.getByTestId('plan-row-fun');

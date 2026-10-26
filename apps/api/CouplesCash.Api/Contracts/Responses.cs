@@ -562,6 +562,7 @@ public sealed record PlanDto(
     long FunOutCents,
     long OneOffOutCents,
     long IncomeInCents,
+    long SweepOutCents,
     long LeftAtEndCents,
     IReadOnlyList<PlanLineDto> SavingsBills,
     IReadOnlyList<ChecklistItemDto> Checklist,

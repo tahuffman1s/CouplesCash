@@ -77,6 +77,7 @@ function plan(over: Partial<Plan> = {}): Plan {
 		funOutCents: 0,
 		oneOffOutCents: 0,
 		incomeInCents: 0,
+		sweepOutCents: 0,
 		leftAtEndCents: 35317,
 		savingsBills: [],
 		checklist: [],
@@ -240,6 +241,11 @@ describe('receiptLines', () => {
 		expect(lines[2]).toMatchObject({ op: '−', label: 'Fun money', cents: -4000 });
 		expect(lines[3]).toMatchObject({ op: '−', label: 'One-offs', cents: -6000 });
 		expect(lines[4]).toMatchObject({ op: '+', label: 'Paycheck', cents: 245000 });
+	});
+	it("last week's leftover still to move comes right after available", () => {
+		const lines = receiptLines(plan({ sweepOutCents: 84567 }));
+		expect(lines.map((l) => l.key)).toEqual(['available', 'sweep', 'bills']);
+		expect(lines[1]).toMatchObject({ op: '−', label: 'Move to savings', cents: -84567 });
 	});
 	it('no paycheck line once it has arrived; nothing without a bills account', () => {
 		const lines = receiptLines(

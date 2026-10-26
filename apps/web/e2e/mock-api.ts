@@ -3224,7 +3224,7 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 	const oneOffOutCents = unpaid(lines.oneOffs);
 	// unpaid income due inside the pay week counts (the next payday's belongs to the next week)
 	const incomeInCents = unpaid(lines.income);
-	const leftAtEndCents = available - billsOutCents - funOutCents - oneOffOutCents + incomeInCents;
+	let leftAtEndCents = available - billsOutCents - funOutCents - oneOffOutCents + incomeInCents;
 
 	let sweep: SweepRec | null = null;
 	if (opts.withSweep && bills && start <= today) {
@@ -3248,6 +3248,9 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 			matchPlannedTransfers(hh);
 		}
 	}
+	// the sweep still to move is last week's money, not this week's (PLAN-V7 "Move to savings")
+	const sweepOutCents = isCurrent && sweep && !sweep.doneAt ? Math.max(0, sweep.plannedCents) : 0;
+	leftAtEndCents -= sweepOutCents;
 	const checklist: {
 		key: string;
 		label: string;
@@ -3330,6 +3333,7 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 		funOutCents,
 		oneOffOutCents,
 		incomeInCents,
+		sweepOutCents,
 		leftAtEndCents,
 		checklist,
 		sweep: sweep ? sweepView(sweep) : null,
