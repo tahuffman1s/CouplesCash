@@ -38,5 +38,6 @@ export const actions: Actions = {
 	general: (event) => save(event, 'general'),
 	payperiod: (event) => save(event, 'payperiod'),
 	timezone: (event) => save(event, 'timezone'),
-	weekly: (event) => save(event, 'weekly')
+	weekly: (event) => save(event, 'weekly'),
+	transfers: (event) => save(event, 'transfers')
 };

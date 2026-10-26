@@ -1,25 +1,16 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
-	import type {
-		BulkResult,
-		CalendarResponse,
-		InboxItem,
-		InboxPage,
-		InboxStatus,
-		Occurrence
-	} from '#lib/types.ts';
+	import type { BulkResult, InboxItem, InboxPage, InboxStatus } from '#lib/types.ts';
 	import type { InboxConfirmBody } from '#lib/server/api.ts';
 	import type { PageProps } from './$types';
 	import AppBar from '#lib/components/AppBar.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import EmptyState from '#lib/components/EmptyState.svelte';
 	import NoHousehold from '#lib/components/NoHousehold.svelte';
-	import BottomSheet from '#lib/components/BottomSheet.svelte';
+	import TransactionSheet, { type SheetSection } from '#lib/components/TransactionSheet.svelte';
 	import InboxRow from '#lib/components/InboxRow.svelte';
 	import { apiFetch, ClientApiError } from '#lib/utils/client.ts';
-	import { addDays, dayHeading, formatDate } from '#lib/utils/dates.ts';
-	import { formatMoney } from '#lib/utils/money.ts';
-	import { KIND_ICON, signedAmount } from '#lib/utils/labels.ts';
+	import { dayHeading } from '#lib/utils/dates.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 
 	let { data }: PageProps = $props();
@@ -108,7 +99,9 @@
 	}
 	function onConfirm(item: InboxItem) {
 		const s = item.suggestion;
-		if (!s || s.kind === 'transfer') return void onPick(item);
+		if (!s) return void onPick(item);
+		// a transfer needs its other side (or "Other account"): the sheet lists the candidates
+		if (s.kind === 'transfer') return void onPick(item, 'transfer');
 		if (s.kind === 'category')
 			return void confirmWith(
 				item,
@@ -124,7 +117,7 @@
 	function onIgnore(item: InboxItem) {
 		void run(
 			item,
-			{ status: 'ignored' },
+			{ status: 'ignored', ignoreReason: 'manual' },
 			() => apiFetch<InboxItem>(`/inbox/${item.id}/ignore`, { method: 'POST' }),
 			() => 'Ignored',
 			-1
@@ -133,57 +126,30 @@
 	function onRestore(item: InboxItem) {
 		void run(
 			item,
-			{ status: 'pending', confirmed: null },
+			{ status: 'pending', confirmed: null, ignoreReason: null, transfer: null },
 			() => apiFetch<InboxItem>(`/inbox/${item.id}/restore`, { method: 'POST' }),
 			() => 'Back in the inbox',
 			+1
 		);
 	}
 
-	// --- change-suggestion sheet
+	// --- v5: the shared transaction sheet (tapping a row or its chip)
 	let sheet = $state(false);
-	let picking = $state<InboxItem | null>(null);
-	let occs = $state<Occurrence[]>([]);
-	let occsLoading = $state(false);
-	let mode = $state<'category' | 'occurrence'>('category');
-	const outflow = $derived((picking?.amountCents ?? 0) < 0);
-	const matchable = $derived(
-		occs.filter((o) => !o.paid && (outflow ? o.kind !== 'income' : o.kind === 'income'))
-	);
-
-	async function onPick(item: InboxItem) {
-		picking = item;
-		mode = item.amountCents < 0 ? 'category' : 'occurrence';
+	let selectedId = $state<string | null>(null);
+	let initial = $state<SheetSection | undefined>(undefined);
+	const selected = $derived(items.find((i) => i.id === selectedId) ?? null);
+	function onPick(item: InboxItem, section?: SheetSection) {
+		initial = section;
+		selectedId = item.id;
 		sheet = true;
-		occs = [];
-		occsLoading = true;
-		try {
-			const res = await apiFetch<CalendarResponse>(
-				`/calendar?from=${addDays(item.postedOn, -10)}&to=${addDays(item.postedOn, 10)}`
-			);
-			occs = res.occurrences;
-		} catch {
-			occs = [];
-		} finally {
-			occsLoading = false;
-		}
 	}
-	function pickCategory(categoryId: string | null, name: string) {
-		const item = picking;
-		sheet = false;
-		if (!item) return;
-		void confirmWith(item, { as: 'expense', categoryId }, `Expense added in ${name}`);
+	function onSheetChange(next: InboxItem) {
+		const prev = items.find((i) => i.id === next.id);
+		if (prev) pending = Math.max(0, pending + pendingDelta(prev, next));
+		replace(next);
 	}
-	function pickOccurrence(o: Occurrence) {
-		const item = picking;
-		sheet = false;
-		if (!item) return;
-		void confirmWith(
-			item,
-			{ as: 'occurrence', itemId: o.itemId, dueDate: o.dueDate },
-			`${o.name} marked paid`
-		);
-	}
+	const pendingDelta = (a: InboxItem, b: InboxItem) =>
+		(b.status === 'pending' ? 1 : 0) - (a.status === 'pending' ? 1 : 0);
 
 	// --- bulk
 	async function bulk(action: 'confirm-suggested' | 'ignore') {
@@ -213,7 +179,7 @@
 		loading = true;
 		try {
 			const page = await apiFetch<InboxPage>(
-				`/inbox?status=${data.status}&before=${encodeURIComponent(nextBefore)}&limit=50`
+				`/inbox?status=${data.status}&before=${encodeURIComponent(nextBefore)}&limit=50${data.status === 'ignored' ? '&includeHidden=1' : ''}`
 			);
 			const seen = new Set(items.map((i) => i.id));
 			items = [...items, ...page.items.filter((i) => !seen.has(i.id))];
@@ -353,6 +319,7 @@
 								{onIgnore}
 								{onRestore}
 								{onPick}
+								onOpen={(i) => onPick(i)}
 							/>
 						{/each}
 					</ul>
@@ -373,112 +340,10 @@
 	{/if}
 </main>
 
-<BottomSheet
+<TransactionSheet
 	bind:open={sheet}
-	title={picking
-		? `${picking.payee || picking.description} · ${signedAmount(picking.amountCents, formatMoney)}`
-		: 'Change suggestion'}
->
-	{#if picking}
-		{#if outflow}
-			<div class="mb-3 flex gap-2" role="tablist" aria-label="Confirm as">
-				<button
-					type="button"
-					role="tab"
-					aria-selected={mode === 'category'}
-					class="btn min-h-10 flex-1 rounded-full btn-sm {mode === 'category'
-						? 'btn-neutral'
-						: 'border border-base-300 btn-ghost'}"
-					onclick={() => (mode = 'category')}
-				>
-					<Icon name="tag" size={14} /> Expense
-				</button>
-				<button
-					type="button"
-					role="tab"
-					aria-selected={mode === 'occurrence'}
-					class="btn min-h-10 flex-1 rounded-full btn-sm {mode === 'occurrence'
-						? 'btn-neutral'
-						: 'border border-base-300 btn-ghost'}"
-					onclick={() => (mode = 'occurrence')}
-				>
-					<Icon name="receipt" size={14} /> Match to a bill
-				</button>
-			</div>
-		{:else}
-			<p class="mb-3 text-sm text-base-content/70">
-				Money in: match it to an expected income, or ignore it.
-			</p>
-		{/if}
-
-		{#if mode === 'category' && outflow}
-			<p class="mb-2 text-xs font-medium text-base-content/60">Pick a category</p>
-			<div class="grid grid-cols-3 gap-2" role="group" aria-label="Categories">
-				{#each data.categories as c (c.id)}
-					<button
-						type="button"
-						class="flex min-h-16 flex-col items-center justify-center gap-1 rounded-2xl border border-base-300/60 bg-base-100 p-2 text-xs font-medium hover:bg-base-200"
-						onclick={() => pickCategory(c.id, c.name)}
-					>
-						<span
-							class="flex h-8 w-8 items-center justify-center rounded-xl text-white"
-							style:background={c.color}
-						>
-							<Icon name={c.icon} size={16} />
-						</span>
-						<span class="truncate">{c.name}</span>
-					</button>
-				{/each}
-				<button
-					type="button"
-					class="flex min-h-16 flex-col items-center justify-center gap-1 rounded-2xl border border-dashed border-base-300 p-2 text-xs font-medium text-base-content/70 hover:bg-base-200"
-					onclick={() => pickCategory(null, 'no category')}
-				>
-					<span class="flex h-8 w-8 items-center justify-center rounded-xl bg-base-200">
-						<Icon name="tag" size={16} />
-					</span>
-					No category
-				</button>
-			</div>
-		{:else}
-			<p class="mb-2 text-xs font-medium text-base-content/60">
-				{outflow ? 'Bills and subscriptions' : 'Income'} due within 10 days of {formatDate(
-					picking.postedOn
-				)}
-			</p>
-			{#if occsLoading}
-				<div class="h-14 w-full skeleton rounded-xl"></div>
-			{:else if matchable.length === 0}
-				<p class="py-4 text-center text-sm text-base-content/60">
-					Nothing unpaid is due around then.
-					<a href="/bills/new" class="link link-primary">Add a bill</a>
-				</p>
-			{:else}
-				<ul class="divide-y divide-base-300/60" aria-label="Matching occurrences">
-					{#each matchable as o (`${o.itemId}:${o.dueDate}`)}
-						<li>
-							<button
-								type="button"
-								class="flex min-h-14 w-full items-center gap-3 py-2 text-left"
-								onclick={() => pickOccurrence(o)}
-							>
-								<span
-									class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white"
-									style:background={o.categoryColor ?? 'var(--color-neutral)'}
-								>
-									<Icon name={KIND_ICON[o.kind]} size={16} />
-								</span>
-								<span class="min-w-0 flex-1">
-									<span class="block truncate font-medium">{o.name}</span>
-									<span class="block text-xs text-base-content/60">Due {formatDate(o.dueDate)}</span
-									>
-								</span>
-								<span class="font-semibold tabular">{formatMoney(o.amountCents)}</span>
-							</button>
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		{/if}
-	{/if}
-</BottomSheet>
+	item={selected}
+	{initial}
+	categories={data.categories}
+	onchange={onSheetChange}
+/>

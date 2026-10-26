@@ -10,7 +10,8 @@
 		onToggle,
 		showDate = true,
 		showStatus = false,
-		busy = false
+		busy = false,
+		onBank
 	}: {
 		occ: Occurrence;
 		onToggle?: (occ: Occurrence) => void;
@@ -18,6 +19,8 @@
 		/** v4: render the Planned / Cleared / Overdue chip from `occ.status` (week view) */
 		showStatus?: boolean;
 		busy?: boolean;
+		/** v5: open the bank transaction that paid this occurrence (the shared transaction sheet) */
+		onBank?: (occ: Occurrence) => void;
 	} = $props();
 
 	const overdue = $derived(!occ.paid && occ.kind !== 'income' && occ.dueDate < today());
@@ -57,7 +60,7 @@
 					<Icon name="zap" size={10} strokeWidth={2.5} /> Autopay
 				</span>
 			{/if}
-			{#if fromBank}
+			{#if fromBank && !onBank}
 				<span
 					class="badge shrink-0 gap-0.5 border-0 bg-info/15 px-1.5 badge-xs text-[0.65rem] font-medium text-info"
 					data-testid="from-bank"
@@ -92,6 +95,17 @@
 			{/if}
 		</p>
 	</a>
+	{#if fromBank && onBank}
+		<button
+			type="button"
+			class="btn min-h-11 shrink-0 gap-1 rounded-full border-0 bg-info/15 px-2.5 text-[0.7rem] font-medium text-info btn-sm"
+			aria-label="Open the bank transaction that paid {occ.name}"
+			data-testid="from-bank"
+			onclick={() => onBank(occ)}
+		>
+			<Icon name="landmark" size={12} strokeWidth={2.5} /> Bank
+		</button>
+	{/if}
 	<span class="flex shrink-0 flex-col items-end">
 		<span
 			class="text-sm font-semibold tabular {occ.kind === 'income'

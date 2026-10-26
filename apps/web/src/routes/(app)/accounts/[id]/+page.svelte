@@ -1,8 +1,20 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
-	import type { Account, BalanceSnapshot } from '#lib/types.ts';
-	import { LIABILITY_TYPES } from '#lib/types.ts';
+	import type {
+		Account,
+		AccountTransaction,
+		AccountTransactionsPage,
+		BalanceSnapshot,
+		InboxItem,
+		TxFilter
+	} from '#lib/types.ts';
+	import { LIABILITY_TYPES, TX_FILTERS } from '#lib/types.ts';
+	import AccountTxRow from '#lib/components/AccountTxRow.svelte';
+	import TransactionSheet from '#lib/components/TransactionSheet.svelte';
+	import { accountTxQuery, groupByDay } from '#lib/utils/transactions.ts';
+	import { signedAmount } from '#lib/utils/labels.ts';
+	import { addMonths, dayHeading, formatMonth, today } from '#lib/utils/dates.ts';
 	import type { PageProps } from './$types';
 	import AppBar from '#lib/components/AppBar.svelte';
 	import Icon from '#lib/components/Icon.svelte';
@@ -12,6 +24,7 @@
 	import { centsToInput, formatMoney, parseMoney } from '#lib/utils/money.ts';
 	import { formatTimestamp } from '#lib/utils/dates.ts';
 	import { apiFetch } from '#lib/utils/client.ts';
+	import { onDestroy, untrack } from 'svelte';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 
 	let { data, form }: PageProps = $props();
@@ -73,6 +86,97 @@
 	$effect(() => {
 		if (data.created) toasts.show('Account added', 'success');
 	});
+
+	// --- v5: Transactions tab
+	const EMPTY: AccountTransactionsPage = {
+		items: [],
+		nextBefore: null,
+		totals: { inCents: 0, outCents: 0, pendingOutCents: 0, count: 0 }
+	};
+	let txPage = $derived<AccountTransactionsPage>(data.transactions ?? EMPTY);
+	let txItems = $derived<AccountTransaction[]>(data.transactions?.items ?? []);
+	let filter = $state<TxFilter>('all');
+	let q = $state('');
+	let txLoading = $state(false);
+	let moreLoading = $state(false);
+	let seq = 0;
+	let debounce: ReturnType<typeof setTimeout> | undefined;
+	onDestroy(() => clearTimeout(debounce));
+
+	const groups = $derived(groupByDay(txItems));
+	const available = $derived(account.availableCents ?? null);
+	const pendingOut = $derived(account.pendingOutCents ?? 0);
+	const availableLine = $derived(
+		[
+			available !== null ? `Available ${formatMoney(available)}` : null,
+			pendingOut > 0 ? `${formatMoney(pendingOut)} pending` : null
+		]
+			.filter(Boolean)
+			.join(' · ')
+	);
+	const isCurrentMonth = $derived(data.month === today().slice(0, 7));
+
+	async function fetchTx(opts: { append?: boolean } = {}) {
+		const mine = ++seq;
+		if (opts.append) moreLoading = true;
+		else txLoading = true;
+		try {
+			const page = await apiFetch<AccountTransactionsPage>(
+				`/accounts/${account.id}/transactions${accountTxQuery({
+					filter,
+					q: q.trim() || null,
+					month: data.month,
+					before: opts.append ? txPage.nextBefore : null,
+					limit: 50
+				})}`
+			);
+			if (mine !== seq) return;
+			if (opts.append) {
+				const seen = new Set(txItems.map((t) => t.id));
+				txItems = [...txItems, ...page.items.filter((t) => !seen.has(t.id))];
+				txPage = { ...page, items: txItems };
+			} else {
+				txItems = page.items;
+				txPage = page;
+			}
+		} catch {
+			if (mine === seq) toasts.show('Could not load transactions.', 'error');
+		} finally {
+			if (mine === seq) {
+				txLoading = false;
+				moreLoading = false;
+			}
+		}
+	}
+	// a month change reloads page 1 server-side (filter all); re-apply the current filter/search
+	$effect(() => {
+		void data.transactions;
+		untrack(() => {
+			if (filter !== 'all' || q.trim()) void fetchTx();
+		});
+	});
+	function setFilter(next: TxFilter) {
+		if (filter === next) return;
+		filter = next;
+		void fetchTx();
+	}
+	function onSearch() {
+		clearTimeout(debounce);
+		debounce = setTimeout(() => void fetchTx(), 300);
+	}
+
+	let sheet = $state(false);
+	let selectedId = $state<string | null>(null);
+	const selected = $derived(txItems.find((t) => t.id === selectedId) ?? null);
+	function openTx(tx: AccountTransaction | InboxItem) {
+		selectedId = tx.id;
+		sheet = true;
+	}
+	function onTxChange(next: InboxItem) {
+		txItems = txItems.map((t) => (t.id === next.id ? { ...t, ...next } : t));
+	}
+	const monthHref = (n: number) =>
+		`?tab=transactions&month=${addMonths(`${data.month}-01`, n).slice(0, 7)}`;
 </script>
 
 <svelte:head><title>{account.name} · CouplesCash</title></svelte:head>
@@ -97,6 +201,156 @@
 
 <main class="flex flex-col gap-4 px-4 pt-2">
 	{#if !editing}
+		<div class="join w-full" role="tablist" aria-label="Account view">
+			<a
+				href="/accounts/{account.id}"
+				role="tab"
+				aria-selected={data.tab === 'overview'}
+				class="btn join-item min-h-11 flex-1 {data.tab === 'overview'
+					? 'btn-neutral'
+					: 'border border-base-300 btn-ghost'}"
+				data-sveltekit-noscroll>Overview</a
+			>
+			<a
+				href="/accounts/{account.id}?tab=transactions"
+				role="tab"
+				aria-selected={data.tab === 'transactions'}
+				class="btn join-item min-h-11 flex-1 {data.tab === 'transactions'
+					? 'btn-neutral'
+					: 'border border-base-300 btn-ghost'}"
+				data-sveltekit-noscroll>Transactions</a
+			>
+		</div>
+	{/if}
+	{#if !editing && data.tab === 'transactions'}
+		<section class="card border border-base-300/60 bg-base-100 shadow-sm" aria-label="Summary">
+			<div class="card-body gap-3 p-5">
+				<div>
+					<p class="text-xs text-base-content/60">{liability ? 'Amount owed' : 'Balance'}</p>
+					<p
+						class="text-3xl font-bold tracking-tight tabular {liability ? 'text-error' : ''}"
+						data-testid="tx-balance"
+					>
+						{formatMoney(account.balanceCents)}
+					</p>
+					{#if available !== null || pendingOut > 0}
+						<p class="text-sm text-base-content/70" data-testid="tx-available">
+							{availableLine}
+						</p>
+					{/if}
+				</div>
+				<div class="flex items-center justify-between">
+					<a
+						href={monthHref(-1)}
+						class="btn btn-circle min-h-11 min-w-11 btn-ghost"
+						aria-label="Previous month"
+						data-sveltekit-noscroll
+					>
+						<Icon name="chevron-left" size={20} />
+					</a>
+					<h2 class="text-sm font-semibold" data-testid="tx-month">{formatMonth(data.month)}</h2>
+					<a
+						href={monthHref(1)}
+						class="btn btn-circle min-h-11 min-w-11 btn-ghost {isCurrentMonth
+							? 'btn-disabled'
+							: ''}"
+						aria-label="Next month"
+						aria-disabled={isCurrentMonth}
+						data-sveltekit-noscroll
+					>
+						<Icon name="chevron-right" size={20} />
+					</a>
+				</div>
+				<div class="grid grid-cols-2 gap-2 text-sm">
+					<div class="rounded-xl bg-base-200/70 px-3 py-2">
+						<p class="text-xs text-base-content/60">Money in</p>
+						<p class="font-semibold text-success tabular" data-testid="tx-in">
+							{formatMoney(txPage.totals.inCents)}
+						</p>
+					</div>
+					<div class="rounded-xl bg-base-200/70 px-3 py-2">
+						<p class="text-xs text-base-content/60">Money out</p>
+						<p class="font-semibold tabular" data-testid="tx-out">
+							{formatMoney(Math.abs(txPage.totals.outCents))}
+						</p>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<div class="flex flex-col gap-2">
+			<div class="flex gap-2 overflow-x-auto pb-1" role="radiogroup" aria-label="Filter">
+				{#each TX_FILTERS as f (f.value)}
+					<button
+						type="button"
+						role="radio"
+						aria-checked={filter === f.value}
+						class="btn min-h-10 shrink-0 rounded-full px-4 btn-sm {filter === f.value
+							? 'btn-neutral'
+							: 'border border-base-300 btn-ghost'}"
+						onclick={() => setFilter(f.value)}
+					>
+						{f.label}
+					</button>
+				{/each}
+			</div>
+			<label class="input-bordered input flex min-h-11 w-full items-center gap-2">
+				<Icon name="search" size={16} class="text-base-content/50" />
+				<input
+					type="search"
+					class="grow"
+					placeholder="Search description, payee or memo"
+					aria-label="Search transactions"
+					bind:value={q}
+					oninput={onSearch}
+				/>
+			</label>
+		</div>
+
+		<div class="flex flex-col gap-3 {txLoading ? 'opacity-60' : ''}" aria-busy={txLoading}>
+			{#if txItems.length === 0}
+				<p class="py-8 text-center text-sm text-base-content/60" data-testid="tx-empty">
+					{q.trim() || filter !== 'all'
+						? 'Nothing matches.'
+						: `No transactions in ${formatMonth(data.month)}.`}
+				</p>
+			{:else}
+				{#each groups as g (g.day)}
+					<section aria-labelledby="tx-{g.day}" data-testid="tx-day" data-date={g.day}>
+						<div class="mb-1 flex items-baseline justify-between px-1">
+							<h3
+								id="tx-{g.day}"
+								class="text-sm font-semibold tracking-wide text-base-content/70 uppercase"
+							>
+								{dayHeading(g.day)}
+							</h3>
+							<span class="text-xs text-base-content/60 tabular" data-testid="tx-day-net"
+								>{signedAmount(g.netCents, formatMoney)}</span
+							>
+						</div>
+						<ul
+							class="card divide-y divide-base-300/60 border border-base-300/60 bg-base-100 px-4 shadow-sm"
+						>
+							{#each g.items as tx (tx.id)}
+								<AccountTxRow {tx} onopen={openTx} />
+							{/each}
+						</ul>
+					</section>
+				{/each}
+				{#if txPage.nextBefore}
+					<button
+						type="button"
+						class="btn min-h-12 rounded-full border border-base-300 btn-ghost"
+						disabled={moreLoading}
+						onclick={() => fetchTx({ append: true })}
+					>
+						{#if moreLoading}<span class="loading loading-sm loading-spinner"></span>{/if}
+						Load more
+					</button>
+				{/if}
+			{/if}
+		</div>
+	{:else if !editing}
 		<section class="card border border-base-300/60 bg-base-100 shadow-sm">
 			<div class="card-body gap-4 p-5">
 				<div class="flex items-center gap-3">
@@ -212,3 +466,10 @@
 		</form>
 	{/if}
 </main>
+
+<TransactionSheet
+	bind:open={sheet}
+	item={selected}
+	categories={data.categories}
+	onchange={onTxChange}
+/>

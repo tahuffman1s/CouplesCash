@@ -20,6 +20,13 @@
  * v4: `/v1/week`, `/v1/budgets/week`, weekly budget rows (`?period=weekly`), `weeklySpendCents`,
  * `payeeHint` (seeds an item payee rule), `weekSummaryEnabled`, occurrence `varianceCents` + `status`,
  * and the wider matcher window for one-offs (±7 days, max(15 %, $10)).
+ *
+ * v5: the setup token `demo-v5` (see `demoBridgeV5`), the pending lifecycle (`reconcileAccount`),
+ * transfers (auto-ignored pairs, keyword / learned one-sided transfers, `autoIgnoreTransfers`),
+ * `/accounts/{id}/transactions`, candidates / match / transfer / unmatch, `/recurring/from-transaction`,
+ * bill payments, occurrence candidates / link, `/transfers`, `availableCents` / `pendingOutCents`.
+ *   POST /__mock/bank-sync?phase=post|drop|pair|brokerage[&email=]  edit the v5 Bridge, then sync
+ *                                 (only that user's household when `email` is given)
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -47,6 +54,7 @@ type Household = {
 	payPeriod: 'weekly' | 'biweekly' | 'bimonthly' | 'monthly';
 	payAnchorDate: string | null;
 	weeklySpendCents: number | null;
+	autoIgnoreTransfers: boolean;
 };
 type Account = {
 	id: string;
@@ -225,9 +233,11 @@ type Confirmed = {
 	by: string | null;
 	at: string | null;
 	auto: boolean;
+	categoryId: string | null;
 	categoryName: string | null;
 	itemName: string | null;
 };
+type IgnoreReason = 'manual' | 'transfer' | 'dropped' | 'superseded';
 type Tx = {
 	id: string;
 	householdId: string;
@@ -247,6 +257,12 @@ type Tx = {
 	confidence: number;
 	confirmed: Confirmed | null;
 	createdAt: string;
+	// v5
+	ignoreReason: IgnoreReason | null;
+	transferPeerId: string | null;
+	transferAuto: boolean;
+	/** the other side the matcher found while auto-ignore was off (a suggestion, not a pairing) */
+	suggestedPeerId: string | null;
 };
 type PayeeRule = {
 	householdId: string;
@@ -254,6 +270,8 @@ type PayeeRule = {
 	categoryId: string | null;
 	itemId: string | null;
 	hits: number;
+	/** v5: marked as a one-sided transfer */
+	isTransfer?: boolean;
 };
 type CsvImportRec = {
 	id: string;
@@ -355,7 +373,8 @@ function householdView(h: Household | null) {
 		defaultAccountId: h.defaultAccountId,
 		payPeriod: h.payPeriod,
 		payAnchorDate: h.payAnchorDate,
-		weeklySpendCents: h.weeklySpendCents
+		weeklySpendCents: h.weeklySpendCents,
+		autoIgnoreTransfers: h.autoIgnoreTransfers
 	};
 }
 
@@ -404,7 +423,8 @@ function createHousehold(name: string, owner: User): Household {
 		defaultAccountId: null,
 		payPeriod: 'monthly',
 		payAnchorDate: null,
-		weeklySpendCents: null
+		weeklySpendCents: null,
+		autoIgnoreTransfers: true
 	};
 	households.set(h.id, h);
 	owner.householdId = h.id;
@@ -616,7 +636,28 @@ function calendar(hh: string, from: string, to: string): Occ[] {
 }
 function accountView(a: Account) {
 	const { householdId: _h, archived: _a, ...rest } = a;
-	return rest;
+	// v5: the bank's available balance, pending outflows and whether bank/CSV rows land here
+	const ext = [...extAccounts.values()].find((x) => x.accountId === a.id);
+	const owed = a.type === 'credit' || a.type === 'loan';
+	const pendingOutCents = [...txs.values()]
+		.filter(
+			(t) =>
+				t.accountId === a.id &&
+				t.pending &&
+				t.amountCents < 0 &&
+				(t.status === 'pending' || t.status === 'confirmed')
+		)
+		.reduce((s, t) => s - t.amountCents, 0);
+	return {
+		...rest,
+		availableCents: ext && !owed && ext.availableCents !== null ? ext.availableCents : null,
+		pendingOutCents,
+		linked: !!ext || [...txs.values()].some((t) => t.accountId === a.id)
+	};
+}
+/** v5: spendable uses the bank's available balance when there is one. */
+function spendableOf(a: Account): number {
+	return accountView(a).availableCents ?? a.balanceCents;
 }
 function categoryView(c: Category) {
 	const { householdId: _h, ...rest } = c;
@@ -917,7 +958,7 @@ const isLiquid = (a: Account) => a.type === 'checking' || a.type === 'cash';
 function liquidNow(hh: string): number {
 	return [...accounts.values()]
 		.filter((a) => a.householdId === hh && !a.archived && isLiquid(a))
-		.reduce((s, a) => s + a.balanceCents, 0);
+		.reduce((s, a) => s + spendableOf(a), 0);
 }
 /** Latest checking + cash snapshots at or before local midnight of `iso`; null when there are none. */
 function liquidAt(hh: string, iso: string): number | null {
@@ -1176,6 +1217,119 @@ function demoBridge(): BridgeAccount[] {
 	];
 }
 
+/** A date `n` days ago, but never before the first of this month (keeps e2e rows in one month). */
+function recent(n: number): string {
+	const first = `${todayIso().slice(0, 7)}-01`;
+	const d = daysAgo(n);
+	return d < first ? first : d;
+}
+/**
+ * v5 (`demo-v5`): checking + savings with a pending diner bill (−40.00, posts at −48.00 with a new id in
+ * `?phase=post`), a fuel hold older than 5 days (removed in `?phase=drop`), a transfer pair between the
+ * two accounts, a one-sided brokerage transfer and a gym charge for "Create a bill from this".
+ */
+function demoBridgeV5(): BridgeAccount[] {
+	const first = `${todayIso().slice(0, 7)}-01`;
+	return [
+		{
+			id: 'v5-checking',
+			org: 'Demo Bank',
+			name: 'Everyday Checking',
+			currency: 'USD',
+			balance: 250000,
+			available: 245900,
+			transactions: [
+				{ id: 'v5-rent', posted: first, amount: -185000, description: 'RENT PAYMENT' },
+				{ id: 'v5-kroger', posted: recent(2), amount: -6723, description: 'KROGER #456' },
+				{ id: 'v5-gym', posted: recent(2), amount: -2499, description: 'PLANET FITNESS' },
+				{
+					id: 'v5-diner-auth',
+					posted: recent(1),
+					amount: -4000,
+					description: 'THE DINER',
+					pending: true
+				},
+				{
+					id: 'v5-shell-hold',
+					posted: daysAgo(6),
+					amount: -100,
+					description: 'SHELL OIL 57442',
+					pending: true
+				},
+				{
+					id: 'v5-xfer-out',
+					posted: recent(1),
+					amount: -50000,
+					description: 'ONLINE TRANSFER TO SAV REF 123'
+				},
+				{
+					id: 'v5-brokerage',
+					posted: recent(4),
+					amount: -100000,
+					description: 'TRANSFER TO BROKERAGE'
+				}
+			]
+		},
+		{
+			id: 'v5-savings',
+			org: 'Demo Bank',
+			name: 'Way2Save Savings',
+			currency: 'USD',
+			balance: 1200000,
+			available: 1200000,
+			transactions: [
+				{
+					id: 'v5-xfer-in',
+					posted: recent(1),
+					amount: 50000,
+					description: 'ONLINE TRANSFER FROM CHK REF 123'
+				}
+			]
+		}
+	];
+}
+/** `?phase=` for POST /__mock/bank-sync: edits a v5 Bridge before the sync runs. */
+function applyPhase(data: BridgeAccount[], phase: string) {
+	const checking = data.find((a) => a.id === 'v5-checking');
+	const savings = data.find((a) => a.id === 'v5-savings');
+	if (!checking) return;
+	const add = (acc: BridgeAccount, tx: BridgeTx) => {
+		if (!acc.transactions.some((t) => t.id === tx.id)) acc.transactions.push(tx);
+	};
+	if (phase === 'post') {
+		// the authorization disappears and the posted charge (with the tip) arrives under a new id
+		checking.transactions = checking.transactions.filter((t) => t.id !== 'v5-diner-auth');
+		add(checking, {
+			id: 'v5-diner-posted',
+			posted: todayIso(),
+			amount: -4800,
+			description: 'THE DINER'
+		});
+	} else if (phase === 'drop') {
+		checking.transactions = checking.transactions.filter((t) => t.id !== 'v5-shell-hold');
+	} else if (phase === 'pair' && savings) {
+		add(checking, {
+			id: 'v5-xfer-out-2',
+			posted: todayIso(),
+			amount: -25000,
+			description: 'ONLINE TRANSFER TO SAV REF 456'
+		});
+		add(savings, {
+			id: 'v5-xfer-in-2',
+			posted: todayIso(),
+			amount: 25000,
+			description: 'ONLINE TRANSFER FROM CHK REF 456'
+		});
+	} else if (phase === 'brokerage') {
+		add(checking, {
+			id: 'v5-brokerage-2',
+			posted: todayIso(),
+			amount: -20000,
+			description: 'TRANSFER TO BROKERAGE'
+		});
+	}
+}
+
 /** payee_norm: lower-cased, digits/punctuation/noise removed. */
 function normPayee(desc: string): string {
 	return desc
@@ -1288,23 +1442,107 @@ function suggest(
 	return { suggestion: null, confidence: 0 };
 }
 
-/** Both sides of a transfer between two mapped accounts are suggested as ignore ("transfer"). */
+const isHidden = (t: Tx) =>
+	t.status === 'ignored' && (t.ignoreReason === 'dropped' || t.ignoreReason === 'superseded');
+/** Which account a row belongs to for transfer detection: the mapped account, else the bank's account. */
+const accountKey = (t: Tx) => t.accountId ?? t.externalAccountId;
+const dayDistance = (a: string, b: string) =>
+	Math.round(Math.abs(parse(a).getTime() - parse(b).getTime()) / 86400_000);
+/** v5 one-sided transfer keywords (Zelle/Venmo/Cash App are payments to people, not transfers). */
+const TRANSFER_KEYWORDS = /\b(transfer|xfer)\b|payment thank you|autopay payment|online pmt/i;
+
+function markTransfer(t: Tx, peer: Tx | null, auto: boolean, by: string | null) {
+	t.status = 'ignored';
+	t.ignoreReason = 'transfer';
+	t.transferPeerId = peer?.id ?? null;
+	t.transferAuto = auto;
+	t.suggestedPeerId = null;
+	t.confirmed = {
+		expenseId: null,
+		itemId: null,
+		dueDate: null,
+		by,
+		at: nowIso(),
+		auto,
+		categoryId: null,
+		categoryName: null,
+		itemName: null
+	};
+}
+
+/**
+ * v5 transfers: a pair (other account, opposite sign, same |amount|, ≤ 3 days) is auto-ignored on both
+ * sides when the household has `autoIgnoreTransfers`, else suggested (80). Unpaired rows with a learned
+ * transfer payee are auto-ignored (85) or suggested; transfer keywords are a suggestion at 60.
+ */
 function detectTransfers(hh: string, fresh: Tx[]) {
-	const all = [...txs.values()].filter((t) => t.householdId === hh && t.status === 'pending');
+	const auto = households.get(hh)?.autoIgnoreTransfers !== false;
+	const open = () =>
+		[...txs.values()].filter(
+			(t) => t.householdId === hh && t.status === 'pending' && !t.suggestedPeerId
+		);
+	let autoPairs = 0;
 	for (const a of fresh) {
-		if (!a.accountId) continue;
-		const b = all.find(
+		if (a.status !== 'pending' || a.suggestedPeerId || !accountKey(a)) continue;
+		const b = open().find(
 			(o) =>
 				o.id !== a.id &&
-				o.accountId &&
-				o.accountId !== a.accountId &&
+				accountKey(o) &&
+				accountKey(o) !== accountKey(a) &&
 				o.amountCents === -a.amountCents &&
-				Math.abs(parse(o.postedOn).getTime() - parse(a.postedOn).getTime()) <= 3 * 86400_000
+				dayDistance(o.postedOn, a.postedOn) <= 3
 		);
 		if (!b) continue;
-		for (const t of [a, b]) {
-			t.suggestion = { kind: 'transfer', confidence: 80 };
-			t.confidence = 80;
+		if (auto) {
+			markTransfer(a, b, true, null);
+			markTransfer(b, a, true, null);
+			autoPairs++;
+		} else {
+			for (const [t, peer] of [
+				[a, b],
+				[b, a]
+			] as const) {
+				t.suggestion = { kind: 'transfer', confidence: 80 };
+				t.confidence = 80;
+				t.suggestedPeerId = peer.id;
+			}
+		}
+	}
+	if (autoPairs)
+		record(
+			hh,
+			null,
+			'transfer.auto',
+			'transfer',
+			null,
+			`ignored ${autoPairs * 2} transfers (auto)`,
+			{ pairs: autoPairs }
+		);
+	for (const t of fresh) {
+		if (t.status !== 'pending' || t.suggestedPeerId) continue;
+		if (t.suggestion?.kind === 'occurrence') continue;
+		const rule = payeeRules.get(`${hh}:${normPayee(t.payee ?? t.description)}`);
+		if (rule?.isTransfer) {
+			if (auto) {
+				markTransfer(t, null, true, null);
+				record(
+					hh,
+					null,
+					'transfer.auto',
+					'transfer',
+					t.id,
+					`ignored ${t.payee ?? t.description} as a transfer (auto)`
+				);
+			} else {
+				t.suggestion = { kind: 'transfer', confidence: 85 };
+				t.confidence = 85;
+			}
+		} else if (
+			TRANSFER_KEYWORDS.test(t.description) ||
+			(t.payee && TRANSFER_KEYWORDS.test(t.payee))
+		) {
+			t.suggestion = { kind: 'transfer', confidence: 60 };
+			t.confidence = 60;
 		}
 	}
 }
@@ -1321,6 +1559,10 @@ function insertTx(
 		| 'confidence'
 		| 'confirmed'
 		| 'createdAt'
+		| 'ignoreReason'
+		| 'transferPeerId'
+		| 'transferAuto'
+		| 'suggestedPeerId'
 	>
 ): Tx | null {
 	const fingerprint = fingerprintFor(
@@ -1343,7 +1585,11 @@ function insertTx(
 		suggestion,
 		confidence,
 		confirmed: null,
-		createdAt: nowIso()
+		createdAt: nowIso(),
+		ignoreReason: null,
+		transferPeerId: null,
+		transferAuto: false,
+		suggestedPeerId: null
 	};
 	txs.set(tx.id, tx);
 	return tx;
@@ -1353,12 +1599,149 @@ function insertTx(
 function applyMapping(ext: ExtAccount, account: Account | null, by: string) {
 	ext.accountId = account?.id ?? null;
 	ext.updatedAt = nowIso();
-	for (const t of txs.values())
-		if (t.externalAccountId === ext.id && t.status === 'pending') t.accountId = ext.accountId;
+	// every row from this bank account follows the mapping (v5: the account Transactions tab lists them)
+	for (const t of txs.values()) if (t.externalAccountId === ext.id) t.accountId = ext.accountId;
 	if (!account) return;
 	const owed = account.type === 'credit' || account.type === 'loan';
 	const cents = owed ? Math.abs(ext.balanceCents) : ext.balanceCents;
 	if (cents !== account.balanceCents) setBalance(account, cents, by);
+}
+
+/** Normalised token overlap ≥ 0.5, or the same first significant token (PLAN-V5 §1). */
+function similarDescriptions(a: string, b: string): boolean {
+	const ta = normPayee(a)
+		.split(' ')
+		.filter((w) => w.length > 1 && w !== 'the');
+	const tb = normPayee(b)
+		.split(' ')
+		.filter((w) => w.length > 1 && w !== 'the');
+	if (!ta.length || !tb.length) return false;
+	if (ta[0] === tb[0]) return true;
+	const shared = ta.filter((w) => tb.includes(w)).length;
+	return shared / Math.min(ta.length, tb.length) >= 0.5;
+}
+/** A confirmed row's amount changed: the expense / the occurrence payment follows it. */
+function followAmount(t: Tx) {
+	const c = t.confirmed;
+	if (!c || t.status !== 'confirmed') return;
+	if (c.expenseId) {
+		const e = expenses.get(c.expenseId);
+		if (e) {
+			e.amountCents = Math.abs(t.amountCents);
+			e.spentOn = t.postedOn;
+			e.updatedAt = nowIso();
+		}
+	}
+	if (c.itemId && c.dueDate) {
+		const pay = payments.get(`${c.itemId}:${c.dueDate}`);
+		if (pay && pay.source === 'bank') pay.amountCents = Math.abs(t.amountCents);
+	}
+}
+/**
+ * v5 pending lifecycle for one bank account (PendingReconciler): same id refreshes in place; a new
+ * posted id replaces an absent pending row in place (keeps id, status and confirmation); pending rows
+ * absent for more than 5 days are dropped (confirmation reversed). Returns the newly inserted rows.
+ */
+function reconcileAccount(hh: string, ext: ExtAccount, ba: BridgeAccount): Tx[] {
+	const fresh: Tx[] = [];
+	const seen = new Set(
+		ba.transactions.map((bt) => fingerprintFor('simplefin', bt.id, null, '', 0, ''))
+	);
+	const mine = () =>
+		[...txs.values()].filter(
+			(t) => t.householdId === hh && t.externalAccountId === ext.id && !isHidden(t)
+		);
+	const usedPending = new Set<string>();
+	for (const bt of ba.transactions) {
+		const fp = fingerprintFor('simplefin', bt.id, null, '', 0, '');
+		const existing = [...txs.values()].find((t) => t.householdId === hh && t.fingerprint === fp);
+		if (existing) {
+			// same id: refresh in place (pending → posted, amount changes)
+			const amountChanged = existing.amountCents !== bt.amount;
+			existing.pending = !!bt.pending;
+			existing.amountCents = bt.amount;
+			existing.postedOn = bt.posted;
+			if (amountChanged) followAmount(existing);
+			continue;
+		}
+		if (!bt.pending) {
+			const abs = Math.abs(bt.amount);
+			const match = mine()
+				.filter(
+					(t) =>
+						t.pending &&
+						!seen.has(t.fingerprint) &&
+						!usedPending.has(t.id) &&
+						Math.sign(t.amountCents) === Math.sign(bt.amount) &&
+						bt.posted >= addDaysIso(t.postedOn, -1) &&
+						bt.posted <= addDaysIso(t.postedOn, 7) &&
+						Math.abs(Math.abs(t.amountCents) - abs) <=
+							Math.max(Math.round(Math.abs(t.amountCents) * 0.25), 500) &&
+						similarDescriptions(t.payee ?? t.description, bt.payee ?? bt.description)
+				)
+				.sort(
+					(a, b) =>
+						Math.abs(Math.abs(a.amountCents) - abs) - Math.abs(Math.abs(b.amountCents) - abs) ||
+						dayDistance(a.postedOn, bt.posted) - dayDistance(b.postedOn, bt.posted)
+				)[0];
+			if (match) {
+				usedPending.add(match.id);
+				const before = match.amountCents;
+				match.externalId = bt.id;
+				match.fingerprint = fp;
+				match.amountCents = bt.amount;
+				match.postedOn = bt.posted;
+				match.description = bt.description;
+				match.payee = bt.payee ?? null;
+				match.memo = bt.memo ?? null;
+				match.pending = false;
+				if (before !== bt.amount) {
+					followAmount(match);
+					record(
+						hh,
+						null,
+						'transaction.posted',
+						'transaction',
+						match.id,
+						`${match.payee ?? match.description} posted at ${money(hh, Math.abs(bt.amount))} (was ${money(hh, Math.abs(before))})`,
+						{ fromCents: before, toCents: bt.amount }
+					);
+				}
+				continue;
+			}
+		}
+		const tx = insertTx(hh, {
+			source: 'simplefin',
+			externalAccountId: ext.id,
+			accountId: ext.accountId,
+			externalId: bt.id,
+			postedOn: bt.posted,
+			amountCents: bt.amount,
+			description: bt.description,
+			payee: bt.payee ?? null,
+			memo: bt.memo ?? null,
+			pending: !!bt.pending
+		});
+		if (tx) fresh.push(tx);
+	}
+	// authorizations that fell off: absent, still pending, older than 5 days → dropped
+	const cutoff = addDaysIso(todayIso(), -5);
+	for (const t of mine()) {
+		if (!t.pending || seen.has(t.fingerprint) || usedPending.has(t.id) || t.postedOn >= cutoff)
+			continue;
+		reverseTx(t);
+		t.status = 'ignored';
+		t.ignoreReason = 'dropped';
+		record(
+			hh,
+			null,
+			'transaction.dropped',
+			'transaction',
+			t.id,
+			`${t.payee ?? t.description} · ${money(hh, Math.abs(t.amountCents))} never posted (dropped)`
+		);
+	}
+	return fresh;
 }
 
 type SyncResult = {
@@ -1405,25 +1788,12 @@ function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
 		updatedAccounts++;
 		const account = ext.accountId ? accounts.get(ext.accountId) : undefined;
 		if (account) applyMapping(ext, account, actor?.id ?? 'scheduler');
-		for (const bt of ba.transactions) {
-			const tx = insertTx(hh, {
-				source: 'simplefin',
-				externalAccountId: ext.id,
-				accountId: ext.accountId,
-				externalId: bt.id,
-				postedOn: bt.posted,
-				amountCents: bt.amount,
-				description: bt.description,
-				payee: bt.payee ?? null,
-				memo: bt.memo ?? null,
-				pending: !!bt.pending
-			});
-			if (tx) fresh.push(tx);
-		}
+		fresh.push(...reconcileAccount(hh, ext, ba));
 	}
 	detectTransfers(hh, fresh);
 	// auto-mark: recurring match ≥ 90 whose item already has a learned payee rule
 	for (const tx of fresh) {
+		if (tx.status !== 'pending') continue;
 		const s = tx.suggestion;
 		if (!s || s.kind !== 'occurrence' || s.confidence < 90) continue;
 		const norm = normPayee(tx.payee ?? tx.description);
@@ -1446,6 +1816,7 @@ function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
 			by: null,
 			at: nowIso(),
 			auto: true,
+			categoryId: null,
 			categoryName: null,
 			itemName: item.name
 		};
@@ -1529,8 +1900,43 @@ function txView(t: Tx) {
 		pending: t.pending,
 		status: t.status,
 		suggestion: t.suggestion,
-		confirmed: t.confirmed ? { ...t.confirmed, byName: by?.displayName ?? null } : null,
-		createdAt: t.createdAt
+		confirmed:
+			t.status === 'pending' || !t.confirmed
+				? null
+				: { ...t.confirmed, byName: by?.displayName ?? null },
+		createdAt: t.createdAt,
+		// v5
+		ignoreReason: t.status === 'ignored' ? (t.ignoreReason ?? 'manual') : null,
+		transfer:
+			t.status === 'ignored' && t.ignoreReason === 'transfer'
+				? (() => {
+						const peer = t.transferPeerId ? txs.get(t.transferPeerId) : undefined;
+						const peerAccount = peer?.accountId ? accounts.get(peer.accountId) : undefined;
+						return {
+							peerId: peer?.id ?? null,
+							peerAccountId: peerAccount?.id ?? null,
+							peerAccountName: peerAccount?.name ?? null,
+							auto: t.transferAuto
+						};
+					})()
+				: null,
+		match:
+			t.status === 'confirmed' && t.confirmed?.itemId && t.confirmed.dueDate
+				? {
+						itemId: t.confirmed.itemId,
+						itemName: t.confirmed.itemName ?? items.get(t.confirmed.itemId)?.name ?? '',
+						itemKind: items.get(t.confirmed.itemId)?.kind ?? 'bill',
+						dueDate: t.confirmed.dueDate
+					}
+				: null,
+		expense:
+			t.status === 'confirmed' && t.confirmed?.expenseId
+				? {
+						expenseId: t.confirmed.expenseId,
+						categoryId: t.confirmed.categoryId,
+						categoryName: t.confirmed.categoryName
+					}
+				: null
 	};
 }
 function learnRule(
@@ -1551,10 +1957,12 @@ function learnRule(
 	if ('categoryId' in patch) {
 		rule.categoryId = patch.categoryId ?? null;
 		rule.itemId = null;
+		rule.isTransfer = false;
 	}
 	if ('itemId' in patch) {
 		rule.itemId = patch.itemId ?? null;
 		rule.categoryId = null;
+		rule.isTransfer = false;
 	}
 	rule.hits++;
 	payeeRules.set(key, rule);
@@ -1597,6 +2005,7 @@ function confirmTx(
 			by: user.id,
 			at: nowIso(),
 			auto: false,
+			categoryId: cat?.id ?? null,
 			categoryName: cat?.name ?? null,
 			itemName: null
 		};
@@ -1638,6 +2047,7 @@ function confirmTx(
 			by: user.id,
 			at: nowIso(),
 			auto: false,
+			categoryId: null,
 			categoryName: null,
 			itemName: item.name
 		};
@@ -1654,12 +2064,36 @@ function confirmTx(
 	}
 	return { status: 400, detail: 'Unknown confirm mode' };
 }
+/**
+ * v5: undoes whatever a row was confirmed as (expense deleted — deducted = false, so no balance to put
+ * back —, bank payment removed, transfer peer back to pending) and leaves it pending.
+ */
+function reverseTx(t: Tx) {
+	const c = t.status === 'confirmed' ? t.confirmed : null;
+	if (c?.expenseId) expenses.delete(c.expenseId);
+	if (c?.itemId && c.dueDate) {
+		const key = `${c.itemId}:${c.dueDate}`;
+		if (payments.get(key)?.source === 'bank') payments.delete(key);
+	}
+	if (t.transferPeerId) {
+		const peer = txs.get(t.transferPeerId);
+		if (peer && peer.transferPeerId === t.id) {
+			peer.status = 'pending';
+			peer.ignoreReason = null;
+			peer.transferPeerId = null;
+			peer.transferAuto = false;
+			peer.confirmed = null;
+		}
+	}
+	t.status = 'pending';
+	t.ignoreReason = null;
+	t.transferPeerId = null;
+	t.transferAuto = false;
+	t.suggestedPeerId = null;
+	t.confirmed = null;
+}
 function restoreTx(hh: string, user: User | null, tx: Tx) {
-	const c = tx.confirmed;
-	if (c?.expenseId) expenses.delete(c.expenseId); // deducted = false, so no balance to put back
-	if (c?.itemId && c.dueDate) payments.delete(`${c.itemId}:${c.dueDate}`);
-	tx.status = 'pending';
-	tx.confirmed = null;
+	reverseTx(tx);
 	record(
 		hh,
 		user,
@@ -1675,6 +2109,7 @@ function restoreTxForOccurrence(hh: string, itemId: string, date: string) {
 		if (t.confirmed?.itemId === itemId && t.confirmed.dueDate === date) {
 			t.status = 'pending';
 			t.confirmed = null;
+			t.ignoreReason = null;
 		}
 	}
 }
@@ -1692,6 +2127,372 @@ function inboxSummary(hh: string) {
 		),
 		linkCount: links.length
 	};
+}
+
+// ---- v5: candidates, account transactions, transfer report, bill payments --------------------
+/** Ranked occurrences ±days around a row: amount closeness (55) + date distance (35) + payee rule (10). */
+function occurrenceCandidates(hh: string, t: Tx, days: number) {
+	const outflow = t.amountCents < 0;
+	const abs = Math.abs(t.amountCents);
+	const rule = payeeRules.get(`${hh}:${normPayee(t.payee ?? t.description)}`);
+	const from = addDaysIso(t.postedOn, -days);
+	const to = addDaysIso(t.postedOn, days);
+	const out: {
+		itemId: string;
+		itemName: string;
+		kind: string;
+		dueDate: string;
+		amountCents: number;
+		paid: Payment | null;
+		paidByThis: boolean;
+		score: number;
+		distance: number;
+	}[] = [];
+	for (const i of items.values()) {
+		if (i.householdId !== hh || i.archived) continue;
+		if ((i.kind === 'income') === outflow) continue;
+		for (const d of expand(i, from, to)) {
+			const paid = payments.get(`${i.id}:${d}`) ?? null;
+			const paidByThis =
+				t.status === 'confirmed' && t.confirmed?.itemId === i.id && t.confirmed.dueDate === d;
+			const diff = Math.abs(i.amountCents - abs) / Math.max(i.amountCents, abs, 1);
+			const distance = dayDistance(d, t.postedOn);
+			const score = Math.round(
+				Math.max(0, 1 - diff * 2) * 55 +
+					Math.max(0, 1 - distance / Math.max(days, 1)) * 35 +
+					(rule?.itemId === i.id ? 10 : 0)
+			);
+			out.push({
+				itemId: i.id,
+				itemName: i.name,
+				kind: i.kind,
+				dueDate: d,
+				amountCents: i.amountCents,
+				paid,
+				paidByThis,
+				score: Math.min(100, score),
+				distance
+			});
+		}
+	}
+	return out
+		.sort((a, b) => b.score - a.score || a.distance - b.distance)
+		.slice(0, 20)
+		.map(({ distance: _d, ...c }) => c);
+}
+/** The other side of a transfer: another account, opposite sign, |amount| within 1 %, ±5 days, unpaired. */
+function isTransferPeer(t: Tx, o: Tx): boolean {
+	const abs = Math.abs(t.amountCents);
+	return (
+		o.id !== t.id &&
+		o.householdId === t.householdId &&
+		!isHidden(o) &&
+		!!accountKey(o) &&
+		accountKey(o) !== accountKey(t) &&
+		Math.sign(o.amountCents) === -Math.sign(t.amountCents) &&
+		Math.abs(Math.abs(o.amountCents) - abs) <= Math.round(abs * 0.01) &&
+		dayDistance(o.postedOn, t.postedOn) <= 5 &&
+		(!o.transferPeerId || o.transferPeerId === t.id)
+	);
+}
+function transferPeers(t: Tx): Tx[] {
+	return [...txs.values()]
+		.filter((o) => isTransferPeer(t, o))
+		.sort(
+			(a, b) =>
+				Number(b.id === t.suggestedPeerId || b.id === t.transferPeerId) -
+					Number(a.id === t.suggestedPeerId || a.id === t.transferPeerId) ||
+				dayDistance(a.postedOn, t.postedOn) - dayDistance(b.postedOn, t.postedOn)
+		);
+}
+/** POST /inbox/{id}/transfer: pair with a peer, or one-sided (learns the payee). */
+function transferTx(hh: string, user: User, t: Tx, peer: Tx | null) {
+	reverseTx(t);
+	if (peer) {
+		reverseTx(peer);
+		markTransfer(peer, t, false, user.id);
+	}
+	markTransfer(t, peer, false, user.id);
+	if (!peer) {
+		const norm = normPayee(t.payee ?? t.description);
+		if (norm) {
+			const key = `${hh}:${norm}`;
+			const rule = payeeRules.get(key) ?? {
+				householdId: hh,
+				payeeNorm: norm,
+				categoryId: null,
+				itemId: null,
+				hits: 0
+			};
+			rule.isTransfer = true;
+			rule.categoryId = null;
+			rule.itemId = null;
+			rule.hits++;
+			payeeRules.set(key, rule);
+		}
+	}
+	const from = t.amountCents < 0 ? t : peer;
+	const to = t.amountCents < 0 ? peer : t;
+	const name = (x: Tx | null) =>
+		(x?.accountId ? accounts.get(x.accountId)?.name : null) ?? 'another account';
+	record(
+		hh,
+		user,
+		'transfer.paired',
+		'transfer',
+		t.id,
+		peer
+			? `marked a transfer ${name(from)} → ${name(to)} · ${money(hh, Math.abs(t.amountCents))}`
+			: `marked ${t.payee ?? t.description} as a transfer · ${money(hh, Math.abs(t.amountCents))}`,
+		{ peerId: peer?.id ?? null }
+	);
+}
+/** A typed expense on an account, shaped like a bank row (`kind: 'manual'`, id = expense id). */
+function manualRow(e: Expense) {
+	const a = e.accountId ? accounts.get(e.accountId) : undefined;
+	const c = e.categoryId ? categories.get(e.categoryId) : undefined;
+	return {
+		id: e.id,
+		source: 'manual' as const,
+		accountId: a?.id ?? null,
+		accountName: a?.name ?? null,
+		postedOn: e.spentOn,
+		amountCents: -e.amountCents,
+		description: e.name,
+		payee: null,
+		memo: e.note,
+		pending: false,
+		status: 'confirmed' as const,
+		suggestion: null,
+		confirmed: {
+			expenseId: e.id,
+			itemId: null,
+			dueDate: null,
+			by: e.createdBy,
+			byName: users.get(e.createdBy)?.displayName ?? null,
+			at: e.createdAt,
+			auto: false,
+			categoryId: c?.id ?? null,
+			categoryName: c?.name ?? null,
+			itemName: null
+		},
+		createdAt: e.createdAt,
+		ignoreReason: null,
+		transfer: null,
+		match: null,
+		expense: { expenseId: e.id, categoryId: c?.id ?? null, categoryName: c?.name ?? null },
+		kind: 'manual' as const
+	};
+}
+/** GET /accounts/{id}/transactions: bank rows ∪ manual expenses, newest first, keyset by (date, id). */
+function accountTransactions(hh: string, accountId: string, q: URLSearchParams) {
+	const filter = q.get('filter') ?? 'all';
+	const search = (q.get('q') ?? '').trim().toLowerCase();
+	const month = q.get('month');
+	const [from, to] =
+		month && /^\d{4}-\d{2}$/.test(month) ? monthRange(month) : ['0000-01-01', '9999-12-31'];
+	const before = q.get('before');
+	const limit = Math.min(100, Math.max(1, Number(q.get('limit') ?? 50)));
+	const fromBank = new Set(
+		[...txs.values()].map((t) => t.confirmed?.expenseId).filter((x): x is string => !!x)
+	);
+	const bank = [...txs.values()]
+		.filter((t) => t.householdId === hh && t.accountId === accountId && !isHidden(t))
+		.filter((t) => t.postedOn >= from && t.postedOn <= to)
+		.filter((t) => {
+			switch (filter) {
+				case 'pending':
+					return t.pending;
+				case 'review':
+					return t.status === 'pending';
+				case 'matched':
+					return t.status === 'confirmed';
+				case 'transfers':
+					return t.status === 'ignored' && t.ignoreReason === 'transfer';
+				default:
+					return true;
+			}
+		})
+		.map((t) => ({ ...txView(t), kind: 'bank' as const }));
+	const manual =
+		filter === 'all' || filter === 'matched'
+			? [...expenses.values()]
+					.filter(
+						(e) =>
+							e.householdId === hh &&
+							e.accountId === accountId &&
+							!fromBank.has(e.id) &&
+							e.spentOn >= from &&
+							e.spentOn <= to
+					)
+					.map(manualRow)
+			: [];
+	const matches = (r: { description: string; payee: string | null; memo: string | null }) =>
+		!search || [r.description, r.payee, r.memo].some((v) => v && v.toLowerCase().includes(search));
+	const cursor = (r: { postedOn: string; id: string }) => `${r.postedOn}|${r.id}`;
+	const all = [...bank, ...manual]
+		.filter(matches)
+		.sort((a, b) => cursor(b).localeCompare(cursor(a)));
+	const pageRows = all.filter((r) => !before || cursor(r) < before).slice(0, limit + 1);
+	const more = pageRows.length > limit;
+	const items = pageRows.slice(0, limit);
+	return {
+		items,
+		nextBefore: more ? cursor(items[items.length - 1]) : null,
+		totals: {
+			inCents: all.filter((r) => r.amountCents > 0).reduce((s, r) => s + r.amountCents, 0),
+			outCents: all.filter((r) => r.amountCents < 0).reduce((s, r) => s - r.amountCents, 0),
+			pendingOutCents: all
+				.filter(
+					(r) =>
+						r.pending && r.amountCents < 0 && (r.status === 'pending' || r.status === 'confirmed')
+				)
+				.reduce((s, r) => s - r.amountCents, 0),
+			count: all.length
+		}
+	};
+}
+/** GET /transfers?month=: pairs (dated by the outflow leg), one-sided legs, flows and net per account. */
+function transferReport(hh: string, month: string) {
+	const [from, to] = monthRange(month);
+	const legs = [...txs.values()].filter(
+		(t) => t.householdId === hh && t.status === 'ignored' && t.ignoreReason === 'transfer'
+	);
+	const OTHER = 'Other account';
+	const nameOf = (t: Tx) => (t.accountId ? (accounts.get(t.accountId)?.name ?? OTHER) : OTHER);
+	const used = new Set<string>();
+	const pairs: {
+		id: string;
+		date: string;
+		amountCents: number;
+		from: { accountId: string; name: string; transactionId: string };
+		to: { accountId: string; name: string; transactionId: string };
+		auto: boolean;
+	}[] = [];
+	const pairLegs: [Tx, Tx][] = [];
+	const oneSided: Tx[] = [];
+	for (const leg of legs.sort(
+		(a, b) => b.postedOn.localeCompare(a.postedOn) || b.id.localeCompare(a.id)
+	)) {
+		if (used.has(leg.id)) continue;
+		const peer = leg.transferPeerId ? txs.get(leg.transferPeerId) : undefined;
+		if (peer && peer.transferPeerId === leg.id && !used.has(peer.id)) {
+			used.add(leg.id);
+			used.add(peer.id);
+			const [o, i] = leg.amountCents < 0 ? [leg, peer] : [peer, leg];
+			if (o.postedOn >= from && o.postedOn <= to) {
+				pairLegs.push([o, i]);
+				pairs.push({
+					id: o.id,
+					date: o.postedOn,
+					amountCents: Math.abs(o.amountCents),
+					from: { accountId: o.accountId ?? '', name: nameOf(o), transactionId: o.id },
+					to: { accountId: i.accountId ?? '', name: nameOf(i), transactionId: i.id },
+					auto: o.transferAuto || i.transferAuto
+				});
+			}
+			continue;
+		}
+		used.add(leg.id);
+		if (leg.postedOn >= from && leg.postedOn <= to) oneSided.push(leg);
+	}
+	type Flow = {
+		fromAccountId: string | null;
+		fromName: string;
+		toAccountId: string | null;
+		toName: string;
+		totalCents: number;
+		count: number;
+	};
+	const flows = new Map<string, Flow>();
+	const addFlow = (
+		fromId: string | null,
+		fromName: string,
+		toId: string | null,
+		toName: string,
+		cents: number
+	) => {
+		const key = `${fromId}|${toId}`;
+		const f = flows.get(key) ?? {
+			fromAccountId: fromId,
+			fromName,
+			toAccountId: toId,
+			toName,
+			totalCents: 0,
+			count: 0
+		};
+		f.totalCents += cents;
+		f.count++;
+		flows.set(key, f);
+	};
+	for (const [o, i] of pairLegs)
+		addFlow(o.accountId, nameOf(o), i.accountId, nameOf(i), Math.abs(o.amountCents));
+	for (const l of oneSided)
+		if (l.amountCents < 0) addFlow(l.accountId, nameOf(l), null, OTHER, Math.abs(l.amountCents));
+		else addFlow(null, OTHER, l.accountId, nameOf(l), l.amountCents);
+	const net = new Map<
+		string,
+		{ accountId: string; name: string; inCents: number; outCents: number }
+	>();
+	for (const l of [...pairLegs.flat(), ...oneSided]) {
+		if (!l.accountId) continue;
+		const n = net.get(l.accountId) ?? {
+			accountId: l.accountId,
+			name: nameOf(l),
+			inCents: 0,
+			outCents: 0
+		};
+		if (l.amountCents >= 0) n.inCents += l.amountCents;
+		else n.outCents -= l.amountCents;
+		net.set(l.accountId, n);
+	}
+	const flowList = [...flows.values()].sort(
+		(a, b) => b.totalCents - a.totalCents || a.fromName.localeCompare(b.fromName)
+	);
+	return {
+		month,
+		totalCents: flowList.reduce((s, f) => s + f.totalCents, 0),
+		flows: flowList,
+		netByAccount: [...net.values()]
+			.map((n) => ({ ...n, netCents: n.inCents - n.outCents }))
+			.sort((a, b) => a.name.localeCompare(b.name)),
+		pairs,
+		oneSided: oneSided.map(txView)
+	};
+}
+/** Bill detail Payments: the next occurrence after today, then the last `limit` on or before today. */
+function billPayments(hh: string, i: Item, limit: number) {
+	const today = todayIso();
+	const past = expand(i, i.anchorDate, today).slice(-limit).reverse();
+	const next = expand(i, addDaysIso(today, 1), toIso(addMonthsClamp(new Date(), 24)))[0];
+	const dates = next ? [next, ...past] : past;
+	return dates.map((d) => {
+		const paid = payments.get(`${i.id}:${d}`) ?? null;
+		const t = [...txs.values()].find(
+			(x) =>
+				x.householdId === hh &&
+				x.status === 'confirmed' &&
+				x.confirmed?.itemId === i.id &&
+				x.confirmed.dueDate === d
+		);
+		const a = t?.accountId ? accounts.get(t.accountId) : undefined;
+		return {
+			dueDate: d,
+			plannedCents: i.amountCents,
+			paid,
+			varianceCents: paid ? paid.amountCents - i.amountCents : null,
+			transaction:
+				paid && t
+					? {
+							id: t.id,
+							postedOn: t.postedOn,
+							amountCents: t.amountCents,
+							description: t.payee ?? t.description,
+							accountName: a?.name ?? null
+						}
+					: null
+		};
+	});
 }
 
 // ---- http -------------------------------------------------------------------------------
@@ -1776,8 +2577,22 @@ const server = createServer(async (req, res) => {
 		}
 		if (p === '/__mock/bank-sync' && m === 'POST') {
 			let synced = 0;
+			// v5: `?phase=post|drop|pair|brokerage` edits the v5 Bridge first; `?email=` limits the run
+			// to that user's household (parallel e2e workers share this process)
+			const phase = url.searchParams.get('phase');
+			const email = url.searchParams.get('email')?.toLowerCase();
+			const only = email
+				? ([...users.values()].find((u) => u.email === email)?.householdId ?? '-')
+				: null;
 			for (const link of bankLinks.values()) {
 				if (!link.syncEnabled) continue;
+				if (only && link.householdId !== only) continue;
+				if (phase) {
+					applyPhase(bridge.get(link.id) ?? [], phase);
+					syncLink(link, null);
+					synced++;
+					continue;
+				}
 				// v4: a later statement line only the scheduler ever sees (lets an e2e plan first)
 				const checking = (bridge.get(link.id) ?? []).find((a) => a.id === 'demo-checking');
 				if (checking && !checking.transactions.some((t) => t.id === 'tx-jiffy'))
@@ -2028,6 +2843,16 @@ const server = createServer(async (req, res) => {
 				h.weeklySpendCents = v as number | null;
 				changed.push('weekly target');
 			}
+			if ('autoIgnoreTransfers' in b) {
+				if (typeof b.autoIgnoreTransfers !== 'boolean')
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { autoIgnoreTransfers: ['Must be true or false'] }
+					});
+				h.autoIgnoreTransfers = b.autoIgnoreTransfers;
+				changed.push('transfers');
+			}
 			if (changed.length)
 				record(
 					h.id,
@@ -2151,7 +2976,20 @@ const server = createServer(async (req, res) => {
 			);
 			return send(res, 201, accountView(a));
 		}
-		let mm = /^\/v1\/accounts\/([^/]+)(\/balance|\/history)?$/.exec(p);
+		let mm = /^\/v1\/accounts\/([^/]+)\/transactions$/.exec(p);
+		if (mm && m === 'GET') {
+			const a = accounts.get(mm[1]);
+			if (!a || a.householdId !== hh || a.archived) return problem(res, 404, 'Not found');
+			const filter = url.searchParams.get('filter') ?? 'all';
+			if (!['all', 'pending', 'review', 'matched', 'transfers'].includes(filter))
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { filter: ['Unknown filter'] }
+				});
+			return send(res, 200, accountTransactions(hh, a.id, url.searchParams));
+		}
+		mm = /^\/v1\/accounts\/([^/]+)(\/balance|\/history)?$/.exec(p);
 		if (mm) {
 			const a = accounts.get(mm[1]);
 			if (!a || a.householdId !== hh || a.archived) return problem(res, 404, 'Not found');
@@ -2294,6 +3132,113 @@ const server = createServer(async (req, res) => {
 				`added ${i.kind} ${i.name} · ${$(i.amountCents)}`
 			);
 			return send(res, 201, itemView(i));
+		}
+		// --- v5: create a bill from a transaction, payments, link a transaction
+		if (p === '/v1/recurring/from-transaction' && m === 'POST') {
+			const b = await readJson(req);
+			const t = txs.get(String(b.transactionId ?? ''));
+			if (!t || t.householdId !== hh) return problem(res, 404, 'Not found');
+			if (isHidden(t)) return problem(res, 400, 'Cannot create a bill', 'This row was dropped');
+			const outflow = t.amountCents < 0;
+			const kind = String(b.kind ?? (outflow ? 'bill' : 'income'));
+			if ((kind === 'income') === outflow)
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { kind: ['Money out becomes a bill or subscription, money in an income'] }
+				});
+			const name = (String(b.name ?? '').trim() || t.payee || t.description).slice(0, 80);
+			const i: Item = {
+				id: randomUUID(),
+				householdId: hh,
+				name,
+				kind,
+				amountCents: Math.abs(t.amountCents),
+				categoryId: null,
+				accountId: t.accountId,
+				frequency: String(b.frequency ?? 'monthly'),
+				anchorDate: t.postedOn,
+				endDate: null,
+				autoPay: false,
+				notes: null,
+				url: null,
+				payeeHint: null,
+				createdAt: nowIso(),
+				updatedAt: nowIso(),
+				archived: false
+			};
+			items.set(i.id, i);
+			applyPayeeHint(i, t.payee ?? t.description);
+			reverseTx(t);
+			confirmTx(hh, user, t, { as: 'occurrence', itemId: i.id, dueDate: i.anchorDate });
+			record(
+				hh,
+				user,
+				'recurring.from_transaction',
+				'recurring',
+				i.id,
+				`added ${i.kind} ${i.name} · ${$(i.amountCents)} from a transaction`,
+				{ transactionId: t.id }
+			);
+			return send(res, 201, { item: itemView(i), transaction: txView(t) });
+		}
+		mm = /^\/v1\/recurring\/([^/]+)\/payments$/.exec(p);
+		if (mm && m === 'GET') {
+			const i = items.get(mm[1]);
+			if (!i || i.householdId !== hh || i.archived) return problem(res, 404, 'Not found');
+			const limit = Math.min(60, Math.max(1, Number(url.searchParams.get('limit') ?? 12)));
+			return send(res, 200, billPayments(hh, i, limit));
+		}
+		mm = /^\/v1\/recurring\/([^/]+)\/occurrences\/(\d{4}-\d{2}-\d{2})\/(candidates|link)$/.exec(p);
+		if (mm) {
+			const i = items.get(mm[1]);
+			const date = mm[2];
+			if (!i || i.householdId !== hh || i.archived) return problem(res, 404, 'Not found');
+			if (!expand(i, date, date).includes(date)) return problem(res, 404, 'Not an occurrence');
+			if (mm[3] === 'candidates' && m === 'GET') {
+				const days = Math.min(60, Math.max(1, Number(url.searchParams.get('days') ?? 10)));
+				const income = i.kind === 'income';
+				const ranked = [...txs.values()]
+					.filter(
+						(t) =>
+							t.householdId === hh &&
+							// to review, or confirmed as an expense (not paying a bill, not a transfer)
+							(t.status === 'pending' || (t.status === 'confirmed' && !!t.confirmed?.expenseId)) &&
+							t.amountCents > 0 === income &&
+							dayDistance(t.postedOn, date) <= days
+					)
+					.map((t) => {
+						const abs = Math.abs(t.amountCents);
+						const diff = Math.abs(i.amountCents - abs) / Math.max(i.amountCents, abs, 1);
+						return {
+							t,
+							score:
+								Math.max(0, 1 - diff * 2) * 60 + (1 - dayDistance(t.postedOn, date) / days) * 40
+						};
+					})
+					.sort((a, b) => b.score - a.score)
+					.slice(0, 20)
+					.map((r) => txView(r.t));
+				return send(res, 200, ranked);
+			}
+			if (mm[3] === 'link' && m === 'POST') {
+				const b = await readJson(req);
+				const t = txs.get(String(b.transactionId ?? ''));
+				if (!t || t.householdId !== hh) return problem(res, 404, 'Not found');
+				if (payments.has(`${i.id}:${date}`))
+					return problem(res, 409, 'Already paid', 'That occurrence is already paid');
+				if ((i.kind === 'income') !== t.amountCents > 0)
+					return problem(
+						res,
+						400,
+						'Cannot link',
+						'That transaction does not match the direction of this bill'
+					);
+				reverseTx(t);
+				const err = confirmTx(hh, user, t, { as: 'occurrence', itemId: i.id, dueDate: date });
+				if (err) return problem(res, err.status, 'Cannot link', err.detail);
+				return send(res, 200, occurrence(i, date));
+			}
 		}
 		mm = /^\/v1\/recurring\/([^/]+)(?:\/occurrences\/(\d{4}-\d{2}-\d{2})\/paid)?$/.exec(p);
 		if (mm) {
@@ -2575,7 +3520,7 @@ const server = createServer(async (req, res) => {
 				.filter(
 					(a) => a.householdId === hh && !a.archived && (a.type === 'checking' || a.type === 'cash')
 				)
-				.reduce((s, a) => s + a.balanceCents, 0);
+				.reduce((s, a) => s + spendableOf(a), 0);
 			return send(res, 200, {
 				period: h.payPeriod,
 				start: bounds.start,
@@ -2789,7 +3734,7 @@ const server = createServer(async (req, res) => {
 					'Security__DataKey is not set',
 					'https://couplescash.app/problems/bank_sync_not_configured'
 				);
-			if (token !== 'demo-token')
+			if (token !== 'demo-token' && token !== 'demo-v5')
 				return send(res, 400, {
 					title: 'Validation failed',
 					status: 400,
@@ -2809,7 +3754,7 @@ const server = createServer(async (req, res) => {
 				bridgeErrors: []
 			};
 			bankLinks.set(link.id, link);
-			bridge.set(link.id, demoBridge());
+			bridge.set(link.id, token === 'demo-v5' ? demoBridgeV5() : demoBridge());
 			record(hh, user, 'bank.linked', 'bank_link', link.id, `linked bank ${link.name}`);
 			syncLink(link, user); // first sync inline
 			return send(res, 201, linkView(link));
@@ -2922,9 +3867,14 @@ const server = createServer(async (req, res) => {
 			const before = url.searchParams.get('before');
 			const limit = Math.min(100, Number(url.searchParams.get('limit') ?? 50));
 			const cursor = (t: Tx) => `${t.postedOn}|${t.createdAt}|${t.id}`;
+			const includeHidden = url.searchParams.get('includeHidden') === '1';
 			const all = [...txs.values()]
 				.filter(
-					(t) => t.householdId === hh && t.status === status && (!before || cursor(t) < before)
+					(t) =>
+						t.householdId === hh &&
+						t.status === status &&
+						(includeHidden || !isHidden(t)) &&
+						(!before || cursor(t) < before)
 				)
 				.sort((a, b) => cursor(b).localeCompare(cursor(a)));
 			const page = all.slice(0, limit);
@@ -2945,12 +3895,25 @@ const server = createServer(async (req, res) => {
 			for (const t of targets) {
 				if (b.action === 'ignore') {
 					t.status = 'ignored';
+					t.ignoreReason = 'manual';
 					ignored++;
 					continue;
 				}
 				const s = t.suggestion;
-				if (!s || s.kind === 'transfer' || t.confidence < 70) {
+				if (!s || t.confidence < 70) {
 					skipped++;
+					continue;
+				}
+				if (s.kind === 'transfer') {
+					// a detected pair (auto-ignore off) is ignored on both sides
+					const peer = t.suggestedPeerId ? txs.get(t.suggestedPeerId) : undefined;
+					if (t.status !== 'pending') continue;
+					markTransfer(t, peer && peer.status === 'pending' ? peer : null, false, user.id);
+					if (peer && peer.status === 'pending') {
+						markTransfer(peer, t, false, user.id);
+						if (!ids || ids.has(peer.id)) ignored++;
+					}
+					ignored++;
 					continue;
 				}
 				const err = confirmTx(
@@ -2985,6 +3948,8 @@ const server = createServer(async (req, res) => {
 			} else if (mm[2] === 'ignore') {
 				if (tx.status !== 'pending') return problem(res, 400, 'Not pending');
 				tx.status = 'ignored';
+				tx.ignoreReason = 'manual';
+				tx.suggestedPeerId = null;
 				record(
 					hh,
 					user,
@@ -2998,6 +3963,112 @@ const server = createServer(async (req, res) => {
 				restoreTx(hh, user, tx);
 			}
 			return send(res, 200, txView(tx));
+		}
+
+		// --- v5: matching from anywhere
+		mm = /^\/v1\/inbox\/([^/]+)\/candidates$/.exec(p);
+		if (mm && m === 'GET') {
+			const tx = txs.get(mm[1]);
+			if (!tx || tx.householdId !== hh) return problem(res, 404, 'Not found');
+			const days = Math.min(60, Math.max(1, Number(url.searchParams.get('days') ?? 30)));
+			return send(res, 200, {
+				occurrences: occurrenceCandidates(hh, tx, days),
+				transferPeers: transferPeers(tx).map(txView)
+			});
+		}
+		mm = /^\/v1\/inbox\/([^/]+)\/(match|transfer|unmatch)$/.exec(p);
+		if (mm && m === 'POST') {
+			const tx = txs.get(mm[1]);
+			if (!tx || tx.householdId !== hh) return problem(res, 404, 'Not found');
+			const b = await readJson(req);
+			if (mm[2] === 'match') {
+				const i = items.get(String(b.itemId ?? ''));
+				const date = String(b.dueDate ?? '');
+				if (!i || i.householdId !== hh || i.archived)
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { itemId: ['Unknown bill'] }
+					});
+				if ((i.kind === 'income') !== tx.amountCents > 0)
+					return problem(
+						res,
+						400,
+						'Cannot match',
+						'That bill does not match the direction of this transaction'
+					);
+				if (!expand(i, date, date).includes(date))
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { dueDate: ['Not an occurrence'] }
+					});
+				const byThis =
+					tx.status === 'confirmed' &&
+					tx.confirmed?.itemId === i.id &&
+					tx.confirmed.dueDate === date;
+				if (byThis) return send(res, 200, txView(tx));
+				if (payments.has(`${i.id}:${date}`))
+					return problem(res, 409, 'Already paid', 'That occurrence is already paid');
+				reverseTx(tx);
+				const err = confirmTx(hh, user, tx, { as: 'occurrence', itemId: i.id, dueDate: date });
+				if (err) return problem(res, err.status, 'Cannot match', err.detail);
+				return send(res, 200, txView(tx));
+			}
+			if (mm[2] === 'transfer') {
+				if (isHidden(tx))
+					return problem(res, 400, 'Cannot mark as transfer', 'This authorization was dropped');
+				const peerId = (b.peerId as string | null | undefined) || null;
+				let peer: Tx | null = null;
+				if (peerId) {
+					const found = txs.get(peerId);
+					if (!found || found.householdId !== hh)
+						return send(res, 400, {
+							title: 'Validation failed',
+							status: 400,
+							errors: { peerId: ['Unknown transaction'] }
+						});
+					if (!isTransferPeer(tx, found))
+						return send(res, 400, {
+							title: 'Validation failed',
+							status: 400,
+							errors: {
+								peerId: [
+									'The other side must be on another account, opposite in sign, within 1 % and 5 days'
+								]
+							}
+						});
+					peer = found;
+				}
+				transferTx(hh, user, tx, peer);
+				return send(res, 200, txView(tx));
+			}
+			// unmatch: back to To review from any status, reversing everything (peer too)
+			if (tx.status !== 'pending') {
+				const wasTransfer = tx.status === 'ignored' && tx.ignoreReason === 'transfer';
+				reverseTx(tx);
+				record(
+					hh,
+					user,
+					wasTransfer ? 'transfer.unpaired' : 'transaction.unmatched',
+					'transaction',
+					tx.id,
+					wasTransfer
+						? `${tx.payee ?? tx.description} is not a transfer`
+						: `put ${tx.payee ?? tx.description} back to review`
+				);
+			}
+			return send(res, 200, txView(tx));
+		}
+		if (p === '/v1/transfers' && m === 'GET') {
+			const month = url.searchParams.get('month') ?? todayIso().slice(0, 7);
+			if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month))
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { month: ['Use YYYY-MM'] }
+				});
+			return send(res, 200, transferReport(hh, month));
 		}
 
 		// --- v3: CSV import

@@ -19,6 +19,12 @@
 			body: "What's left at the end of the week, planned one-offs, weekly budgets"
 		},
 		{
+			href: '/transfers',
+			icon: 'arrow-left-right',
+			label: 'Transfers',
+			body: 'Money moved between your own accounts'
+		},
+		{
 			href: '/insights',
 			icon: 'chart-pie',
 			label: 'Insights',

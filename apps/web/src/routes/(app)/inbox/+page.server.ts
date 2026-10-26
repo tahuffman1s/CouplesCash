@@ -14,7 +14,13 @@ export const load: PageServerLoad = async (event) => {
 	const quiet = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
 	const [summary, page, categories] = await Promise.all([
 		quiet(v3.inbox.summary(), null as InboxSummary | null),
-		quiet(v3.inbox.list({ status, limit: 50 }), { items: [], nextBefore: null } as InboxPage),
+		quiet(
+			// v5: the Ignored filter also lists dropped authorizations (with their reason label)
+			v3.inbox
+				.list({ status, limit: 50, includeHidden: status === 'ignored' })
+				.then((p) => ({ ...p, items: p.items.filter((i) => i.ignoreReason !== 'superseded') })),
+			{ items: [], nextBefore: null } as InboxPage
+		),
 		quiet(api(event).get<Category[]>('/categories'), [] as Category[])
 	]);
 	return { status, summary, page, categories };

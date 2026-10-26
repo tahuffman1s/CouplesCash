@@ -1,7 +1,13 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
-	import type { Occurrence } from '#lib/types.ts';
+	import type { BillPayment, InboxItem, Occurrence } from '#lib/types.ts';
+	import BottomSheet from '#lib/components/BottomSheet.svelte';
+	import TransactionSheet from '#lib/components/TransactionSheet.svelte';
+	import { apiFetch, ClientApiError } from '#lib/utils/client.ts';
+	import { signedAmount } from '#lib/utils/labels.ts';
+	import { formatVariance, varianceTone } from '#lib/utils/week.ts';
+	import { itemFromPayment, paymentSource } from '#lib/utils/transactions.ts';
 	import type { PageProps } from './$types';
 	import AppBar from '#lib/components/AppBar.svelte';
 	import Icon from '#lib/components/Icon.svelte';
@@ -9,7 +15,7 @@
 	import OccurrenceRow from '#lib/components/OccurrenceRow.svelte';
 	import { FREQUENCY_LABEL, KIND_LABEL } from '#lib/utils/labels.ts';
 	import { formatMoney } from '#lib/utils/money.ts';
-	import { formatDate } from '#lib/utils/dates.ts';
+	import { formatDate, today } from '#lib/utils/dates.ts';
 	import { occurrenceKey, optimisticToggle, togglePaid } from '#lib/utils/occurrences.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 
@@ -52,6 +58,75 @@
 	$effect(() => {
 		if (data.created) toasts.show(`${data.item.name} added`, 'success');
 	});
+
+	// --- v5: Payments + "Link a transaction"
+	const payments = $derived<BillPayment[] | null>(data.payments);
+	let linkOpen = $state(false);
+	let linking = $state<BillPayment | null>(null);
+	let linkCandidates = $state<InboxItem[]>([]);
+	let linkLoading = $state(false);
+	let linkBusy = $state(false);
+
+	async function openLink(p: BillPayment) {
+		linking = p;
+		linkOpen = true;
+		linkCandidates = [];
+		linkLoading = true;
+		try {
+			linkCandidates = await apiFetch<InboxItem[]>(
+				`/recurring/${item.id}/occurrences/${p.dueDate}/candidates?days=10`
+			);
+		} catch {
+			linkCandidates = [];
+			toasts.show('Could not load transactions.', 'error');
+		} finally {
+			linkLoading = false;
+		}
+	}
+	async function link(tx: InboxItem) {
+		const p = linking;
+		if (!p || linkBusy) return;
+		linkBusy = true;
+		try {
+			await apiFetch<Occurrence>(`/recurring/${item.id}/occurrences/${p.dueDate}/link`, {
+				method: 'POST',
+				body: JSON.stringify({ transactionId: tx.id })
+			});
+			linkOpen = false;
+			toasts.show(`${item.name} · ${formatDate(p.dueDate)} paid from the bank`, 'success');
+			await invalidateAll();
+		} catch (e) {
+			toasts.show(
+				e instanceof ClientApiError && (e.status === 400 || e.status === 409)
+					? e.problem.detail || e.problem.title
+					: 'Could not link. Check your connection.',
+				'error'
+			);
+		} finally {
+			linkBusy = false;
+		}
+	}
+
+	// tapping a bank payment opens the shared transaction sheet (Unmatch, match elsewhere…)
+	let txOpen = $state(false);
+	let txItem = $state<InboxItem | null>(null);
+	let txDirty = $state(false);
+	function openPayment(p: BillPayment) {
+		const row = itemFromPayment(item, p);
+		if (!row) return;
+		txItem = row;
+		txOpen = true;
+	}
+	$effect(() => {
+		if (!txOpen && txDirty) {
+			txDirty = false;
+			void invalidateAll();
+		}
+	});
+	const varianceClass = (cents: number | null) =>
+		varianceTone(cents, item.kind) === 'success'
+			? 'bg-success/15 text-success'
+			: 'bg-error/15 text-error';
 </script>
 
 <svelte:head><title>{item.name} · CouplesCash</title></svelte:head>
@@ -134,6 +209,98 @@
 			</div>
 		</section>
 
+		{#if payments}
+			<section
+				class="card border border-base-300/60 bg-base-100 shadow-sm"
+				aria-labelledby="payments"
+				data-testid="payments"
+			>
+				<div class="card-body gap-1 p-5">
+					<h2 id="payments" class="font-semibold">Payments</h2>
+					{#if payments.length === 0}
+						<p class="py-3 text-sm text-base-content/60">No payments yet.</p>
+					{:else}
+						<ul class="divide-y divide-base-300/60">
+							{#each payments as p (p.dueDate)}
+								{@const variance = p.paid
+									? formatVariance(p.varianceCents, (c) => formatMoney(c))
+									: null}
+								<li
+									class="flex items-center gap-3 py-2.5"
+									data-testid="payment-row"
+									data-date={p.dueDate}
+									data-paid={p.paid ? 'true' : 'false'}
+								>
+									<div class="min-w-0 flex-1">
+										<p class="flex items-center gap-1.5 text-sm font-medium">
+											{formatDate(p.dueDate)}
+											{#if !p.paid}
+												<span
+													class="badge border-0 px-1.5 badge-xs text-[0.65rem] {p.dueDate < today()
+														? 'bg-error/15 text-error'
+														: 'bg-base-200 text-base-content/70'}"
+													>{p.dueDate < today() ? 'Unpaid' : 'Upcoming'}</span
+												>
+											{/if}
+										</p>
+										{#if p.paid}
+											{#if p.transaction}
+												<button
+													type="button"
+													class="flex max-w-full items-center gap-1 truncate text-left text-xs text-info"
+													data-testid="payment-source"
+													onclick={() => openPayment(p)}
+												>
+													<Icon name="landmark" size={12} />
+													<span class="truncate">{paymentSource(p)}</span>
+												</button>
+											{:else}
+												<p class="text-xs text-base-content/60" data-testid="payment-source">
+													{paymentSource(p)}
+												</p>
+											{/if}
+										{:else}
+											<p class="text-xs text-base-content/60">
+												Planned {formatMoney(p.plannedCents)}
+											</p>
+										{/if}
+									</div>
+									{#if p.paid}
+										<span class="flex shrink-0 flex-col items-end">
+											<span class="text-sm font-semibold tabular" data-testid="payment-amount"
+												>{formatMoney(p.paid.amountCents)}</span
+											>
+											{#if variance}
+												<span
+													class="rounded-full px-1.5 text-[0.65rem] leading-4 font-medium tabular {varianceClass(
+														p.varianceCents
+													)}"
+													data-testid="variance-pill">{variance}</span
+												>
+											{:else}
+												<span class="text-[0.65rem] text-base-content/50"
+													>of {formatMoney(p.plannedCents)}</span
+												>
+											{/if}
+										</span>
+									{:else}
+										<button
+											type="button"
+											class="btn min-h-11 rounded-full border border-base-300 btn-ghost px-3 btn-sm"
+											aria-label="Link a transaction to {formatDate(p.dueDate)}"
+											onclick={() => openLink(p)}
+										>
+											<Icon name="link" size={16} /> Link a transaction
+										</button>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
+			</section>
+		{/if}
+
 		<section class="card border border-base-300/60 bg-base-100 shadow-sm" aria-labelledby="occ">
 			<div class="card-body gap-1 p-5">
 				<h2 id="occ" class="font-semibold">Recent & upcoming</h2>
@@ -209,3 +376,58 @@
 		</form>
 	{/if}
 </main>
+
+<BottomSheet
+	bind:open={linkOpen}
+	title={linking ? `Link a transaction · ${formatDate(linking.dueDate)}` : 'Link a transaction'}
+>
+	{#if linking}
+		<p class="mb-2 text-xs text-base-content/60">
+			Unmatched bank rows within 10 days of {formatDate(linking.dueDate)}, best match first
+		</p>
+		{#if linkLoading}
+			<div class="h-14 w-full skeleton rounded-xl"></div>
+		{:else if linkCandidates.length === 0}
+			<p class="py-4 text-center text-sm text-base-content/60" data-testid="link-empty">
+				Nothing from the bank fits around then.
+			</p>
+		{:else}
+			<ul class="divide-y divide-base-300/60" aria-label="Transactions to link">
+				{#each linkCandidates as tx (tx.id)}
+					<li>
+						<button
+							type="button"
+							class="flex min-h-14 w-full items-center gap-3 py-2 text-left"
+							disabled={linkBusy}
+							data-testid="link-candidate"
+							onclick={() => link(tx)}
+						>
+							<span class="min-w-0 flex-1">
+								<span class="block truncate font-medium">{tx.payee || tx.description}</span>
+								<span class="block truncate text-xs text-base-content/60"
+									>{tx.accountName ?? 'No account'} · {formatDate(tx.postedOn)}{tx.pending
+										? ' · Pending'
+										: ''}</span
+								>
+							</span>
+							<span class="shrink-0 font-semibold tabular"
+								>{signedAmount(tx.amountCents, formatMoney)}</span
+							>
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	{/if}
+</BottomSheet>
+
+<TransactionSheet
+	bind:open={txOpen}
+	item={txItem}
+	initial={null}
+	categories={data.categories}
+	onchange={(next) => {
+		txItem = next;
+		txDirty = true;
+	}}
+/>

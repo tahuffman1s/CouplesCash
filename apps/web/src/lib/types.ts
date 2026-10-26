@@ -17,6 +17,8 @@ export type Household = {
 	payAnchorDate: string | null;
 	// v4
 	weeklySpendCents: number | null;
+	/** v5: auto-ignore both sides of a transfer between linked accounts (default on). */
+	autoIgnoreTransfers?: boolean;
 };
 export type AuthResult = {
 	user: User;
@@ -39,6 +41,12 @@ export type Account = {
 	note: string | null;
 	createdAt: string;
 	updatedAt: string;
+	/** v5: the bank's available balance (mapped accounts); null when unknown. Older builds omit it. */
+	availableCents?: number | null;
+	/** v5: Σ pending outflows (unreviewed + confirmed) on this account. */
+	pendingOutCents?: number;
+	/** v5: receives bank or CSV rows. */
+	linked?: boolean;
 };
 export type BalanceSnapshot = { balanceCents: number; recordedAt: string; recordedBy: string };
 
@@ -389,7 +397,8 @@ export type InboxConfirmed = {
 };
 export type InboxItem = {
 	id: string;
-	source: 'simplefin' | 'csv';
+	/** `manual` only appears on v5 account transactions (typed expenses). */
+	source: 'simplefin' | 'csv' | 'manual';
 	accountId: string | null;
 	accountName: string | null;
 	postedOn: string;
@@ -402,6 +411,11 @@ export type InboxItem = {
 	suggestion: Suggestion;
 	confirmed: InboxConfirmed | null;
 	createdAt: string;
+	// v5 (optional so v3/v4 API builds keep type-checking at the edges)
+	ignoreReason?: IgnoreReason | null;
+	transfer?: InboxTransfer | null;
+	match?: InboxMatch | null;
+	expense?: InboxExpense | null;
 };
 export type InboxPage = { items: InboxItem[]; nextBefore: string | null };
 export type InboxSummary = {
@@ -492,3 +506,92 @@ export type WeekView = {
 	overdue: Occurrence[] /* unpaid planned before `start` still open, shown once at the top */;
 	budget: WeekBudget;
 };
+
+// ---- v5 ----------------------------------------------------------------------------------
+
+export type IgnoreReason = 'manual' | 'transfer' | 'dropped' | 'superseded';
+export type InboxTransfer = {
+	peerId: string | null;
+	peerAccountId: string | null;
+	peerAccountName: string | null;
+	auto: boolean;
+};
+export type InboxMatch = { itemId: string; itemName: string; itemKind: Kind; dueDate: string };
+export type InboxExpense = {
+	expenseId: string;
+	categoryId: string | null;
+	categoryName: string | null;
+};
+/** A row on an account's Transactions tab: a bank/CSV row, or a typed expense (`kind: 'manual'`). */
+export type AccountTransaction = InboxItem & { kind: 'bank' | 'manual' };
+export type TxFilter = 'all' | 'pending' | 'review' | 'matched' | 'transfers';
+export type AccountTransactionsPage = {
+	items: AccountTransaction[];
+	nextBefore: string | null;
+	totals: { inCents: number; outCents: number; pendingOutCents: number; count: number };
+};
+export type MatchCandidate = {
+	itemId: string;
+	itemName: string;
+	kind: Kind;
+	dueDate: string;
+	amountCents: number;
+	paid: Paid | null;
+	paidByThis: boolean;
+	score: number /* 0–100 */;
+};
+export type InboxCandidates = { occurrences: MatchCandidate[]; transferPeers: InboxItem[] };
+/** `accountId` is null for an unmapped bank row (the name then reads "Other account"). */
+export type TransferSide = { accountId: string | null; name: string; transactionId: string };
+export type TransferPair = {
+	id: string;
+	date: string;
+	amountCents: number;
+	from: TransferSide;
+	to: TransferSide;
+	auto: boolean;
+};
+export type TransferFlow = {
+	fromAccountId: string | null;
+	fromName: string;
+	toAccountId: string | null;
+	toName: string;
+	totalCents: number;
+	count: number;
+};
+export type TransferNet = {
+	accountId: string;
+	name: string;
+	inCents: number;
+	outCents: number;
+	netCents: number;
+};
+export type TransferReport = {
+	month: string;
+	totalCents: number;
+	flows: TransferFlow[];
+	netByAccount: TransferNet[];
+	pairs: TransferPair[];
+	oneSided: InboxItem[];
+};
+export type BillPayment = {
+	dueDate: string;
+	plannedCents: number;
+	paid: Paid | null;
+	varianceCents: number | null;
+	transaction: {
+		id: string;
+		postedOn: string;
+		amountCents: number;
+		description: string;
+		accountName: string | null;
+	} | null;
+};
+export type FromTransactionResult = { item: RecurringItem; transaction: InboxItem };
+export const TX_FILTERS: readonly { value: TxFilter; label: string }[] = [
+	{ value: 'all', label: 'All' },
+	{ value: 'pending', label: 'Pending' },
+	{ value: 'review', label: 'To review' },
+	{ value: 'matched', label: 'Matched' },
+	{ value: 'transfers', label: 'Transfers' }
+];

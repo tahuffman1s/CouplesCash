@@ -8,13 +8,16 @@
 		suggestion,
 		categories,
 		onclick,
-		label = 'Change suggestion'
+		label = 'Change suggestion',
+		transferTo = null
 	}: {
 		suggestion: Suggestion;
 		categories: Category[];
 		/** when given, the chip is a button that opens the picker */
 		onclick?: () => void;
 		label?: string;
+		/** v5: the other side's account for a transfer suggestion */
+		transferTo?: string | null;
 	} = $props();
 
 	const colour = $derived(
@@ -36,7 +39,7 @@
 		<Icon name={KIND_ICON[suggestion.itemKind]} size={12} />
 		{suggestion.itemName} · due {formatDate(suggestion.dueDate)}
 	{:else}
-		<Icon name="arrow-left-right" size={12} /> Transfer
+		<Icon name="arrow-left-right" size={12} /> Transfer{transferTo ? ` → ${transferTo}` : ''}
 	{/if}
 {/snippet}
 

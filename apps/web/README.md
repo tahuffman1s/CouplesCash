@@ -5,18 +5,18 @@ this app; the SvelteKit server (BFF) holds the auth cookies and proxies to the .
 
 ## Scripts
 
-| Command          | What it does                                                                                    |
-| ---------------- | ----------------------------------------------------------------------------------------------- |
-| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                              |
-| `pnpm build`     | Production build with `adapter-node` into `build/`                                              |
-| `pnpm preview`   | Serve the production build on http://localhost:4173                                             |
-| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                                 |
-| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                            |
-| `pnpm lint`      | Prettier check + ESLint                                                                         |
-| `pnpm format`    | Prettier write                                                                                  |
-| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money/currency, dates, pay period, push key, codes, CSV) |
-| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                                  |
-| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                              |
+| Command          | What it does                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                                     |
+| `pnpm build`     | Production build with `adapter-node` into `build/`                                                     |
+| `pnpm preview`   | Serve the production build on http://localhost:4173                                                    |
+| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                                        |
+| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                                   |
+| `pnpm lint`      | Prettier check + ESLint                                                                                |
+| `pnpm format`    | Prettier write                                                                                         |
+| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money, dates, pay period, push, codes, CSV, week, transactions) |
+| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                                         |
+| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                                     |
 
 ## Environment variables
 
@@ -48,7 +48,8 @@ Declared in `src/env.ts` (`defineEnvVars`). Copy `.env.example` to `.env` for lo
   (precache app shell, network-first navigations with `/offline` fallback, never caches `/api/`).
 - **Charts**: hand-rolled SVG (`src/lib/charts`): `Donut.svelte`, `Sparkline.svelte`, `KindBars.svelte`,
   `ProgressRing.svelte` (goals), `BudgetBar.svelte` (budget meters), `GoalSpark.svelte` (history +
-  dashed target line). Meters use a lighter step of their own hue as the track; over-budget flips
+  dashed target line), `NetBars.svelte` (v5 transfers: diverging out ← | → in bars per account on one
+  shared scale, values at the outer edge, legend, hover focus, and a **Table** toggle with every number). Meters use a lighter step of their own hue as the track; over-budget flips
   to the error colour and says so in text.
 - **Money & household settings**: `formatMoney(cents, { currency? })` defaults to the household
   currency held in `src/lib/state/currency.svelte.ts`, which `(app)/+layout.svelte` sets from the
@@ -85,6 +86,33 @@ Declared in `src/env.ts` (`defineEnvVars`). Copy `.env.example` to `.env` for lo
 - **Graceful hiding (v3)**: `/settings/banks` shows a "not configured (DATA_KEY missing)" note
   when `GET /banks` or the claim answers 503 `bank_sync_not_configured`; the dashboard inbox card
   stays hidden until there is a link, a CSV import or something pending.
+- **v5 — one Transaction sheet** (`src/lib/components/TransactionSheet.svelte`) is the only place a
+  bank row is acted on: header (signed amount, account, date, Pending badge, Bank/CSV/Manual source,
+  payee/memo), the current state ("To review", "Expense in Fun", "Paid Rent · Nov 1", "Transfer →
+  Savings (auto)", "Dropped authorization") and actions: **Match to a bill or income** (ranked
+  `GET /inbox/{id}/candidates` with a score meter; already-paid occurrences disabled unless paid by
+  this row → `POST /inbox/{id}/match`), **Confirm as expense** (`CategoryGrid.svelte`), **Mark as
+  transfer** (peer candidates or "Other account (not linked)" → `POST /inbox/{id}/transfer`),
+  **Create a bill from this** (name / kind / frequency → `POST /recurring/from-transaction`, then
+  "Open Gym"), **Ignore**, **Unmatch / Not a transfer / Restore** (`POST /inbox/{id}/unmatch`). Manual
+  expenses only get **Edit expense**. Every action is optimistic with a toast and reports each version
+  through `onchange(item)` so lists update in place. Used by `/inbox` (row tap and suggestion chip;
+  inline Confirm / Ignore / Transfer stay), the account **Transactions** tab, `/transfers`, bill
+  **Payments** and bank-paid rows on `/week`. Pure helpers (state labels, chips, ignore-reason
+  labels, score bars, day groups, pair/payment → sheet rows, query strings) live in
+  `src/lib/utils/transactions.ts` and are unit-tested.
+- **v5 screens**: `/accounts/[id]?tab=transactions` (balance + "Available $X · $Y pending", month nav,
+  money in/out, filter chips All · Pending · To review · Matched · Transfers, 300 ms debounced search,
+  day groups with the day's net, keyset **Load more** — first page server-side, the rest via the
+  proxy); the Accounts list shows "$Y pending" per account; `/inbox` Ignored filter loads
+  `includeHidden=1` and labels the reason (Transfer · auto, Dropped authorization, Ignored), transfer
+  rows show "→ Savings"; `/transfers?month=` (More menu + Insights link: total moved, flow cards
+  "Everyday → Savings · $500.00", net by account, pairs by date, one-sided list with **Find the other
+  side** / **Not a transfer**, empty state); bill detail **Payments** (`GET /recurring/{id}/payments`:
+  variance pills, source, **Link a transaction** for unpaid dates via
+  `…/occurrences/{date}/candidates` → `…/link`); Settings → Household **Automatically ignore transfers**
+  toggle (`autoIgnoreTransfers`); `/week` labels spendable "Available now" when a checking account
+  reports `availableCents`.
 - **Service worker**: also handles `push` (`{ title, body, url, tag, icon }` → notification) and
   `notificationclick` (focus an open window and navigate to `url`, else open one).
 
@@ -105,7 +133,17 @@ PAYROLL, a pending COFFEE) and a credit card (NETFLIX.COM); any other token is a
 that path without a second server (`MOCK_BANKS_DISABLED=1` does it for every claim). It runs a
 simplified matcher (recurring ±5 days / 2 %, learned payee rules, keyword table, transfer
 detection), dedupes by fingerprint, maps balances into accounts, and the manual sync has the 15-min
-cooldown (`?force` skips it). If a Chromium is
+cooldown (`?force` skips it). **v5**: the token `demo-v5` links checking + savings with a pending
+THE DINER −40.00, a 6-day-old SHELL OIL −1.00 hold, an ONLINE TRANSFER TO SAV −500 / +500 pair
+(auto-ignored while `autoIgnoreTransfers` is on), a one-sided TRANSFER TO BROKERAGE −1000 (keyword
+suggestion 60; marking it learns the payee) and PLANET FITNESS. `POST /__mock/bank-sync?phase=…&email=…`
+edits that Bridge and syncs only that user's household: `post` (the diner posts at −48.00 under a new
+id and replaces the pending row in place, keeping its confirmation), `drop` (the hold disappears →
+`ignored / dropped`, hidden), `pair` (a second −250 / +250 pair) and `brokerage` (another brokerage
+transfer, auto-ignored by the learned rule). The mock implements every v5 route
+(`/accounts/{id}/transactions`, candidates / match / transfer / unmatch, `from-transaction`,
+payments, occurrence candidates / link, `/transfers`) plus `availableCents` / `pendingOutCents`.
+`e2e/transactions.e2e.ts` covers those flows and skips itself against a real API. If a Chromium is
 preinstalled under `PLAYWRIGHT_BROWSERS_PATH` (as in CI containers) the config uses it even when
 its revision differs from the one Playwright expects; set `CHROMIUM_PATH` to point at a specific
 binary, or run `pnpm exec playwright install chromium` locally.

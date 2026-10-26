@@ -263,6 +263,58 @@
 		</form>
 	</section>
 
+	<!-- Transfers (v5) -->
+	<section
+		id="transfers"
+		class="card scroll-mt-20 border border-base-300/60 bg-base-100 shadow-sm"
+		aria-labelledby="transfersh"
+	>
+		<form
+			method="POST"
+			action="?/transfers"
+			class="card-body gap-3 p-5"
+			use:enhance={() =>
+				async ({ update }) => {
+					await update({ reset: false });
+				}}
+		>
+			<div>
+				<h2 id="transfersh" class="font-semibold">Transfers</h2>
+				<p class="text-xs text-base-content/60">
+					When money moves between two linked accounts, both sides are spotted. Transfers never
+					count as spending, budgets or income.
+					<a href="/transfers" class="link link-primary">See transfers</a>
+				</p>
+			</div>
+			{#if errorFor('transfers')}
+				<div class="alert text-sm alert-error" role="alert">{errorFor('transfers')}</div>
+			{/if}
+			<input type="hidden" name="autoIgnoreTransfersForm" value="1" />
+			<label class="flex min-h-11 cursor-pointer items-center justify-between gap-3">
+				<span class="text-sm font-medium"
+					>Automatically ignore transfers between linked accounts</span
+				>
+				<input
+					type="checkbox"
+					name="autoIgnoreTransfers"
+					class="toggle toggle-primary"
+					defaultChecked={form?.section === 'transfers'
+						? form.values?.autoIgnoreTransfers === 'on'
+						: hh.autoIgnoreTransfers !== false}
+					onchange={(e) => e.currentTarget.form?.requestSubmit()}
+				/>
+			</label>
+			<p class="text-xs text-base-content/60">
+				Off: they wait in the inbox as Transfer suggestions for one of you to confirm.
+			</p>
+			<noscript>
+				<button class="btn min-h-11 rounded-full border border-base-300 btn-ghost"
+					>Save transfer setting</button
+				>
+			</noscript>
+		</form>
+	</section>
+
 	<!-- Time zone -->
 	<section class="card border border-base-300/60 bg-base-100 shadow-sm" aria-labelledby="tz">
 		<form method="POST" action="?/timezone" class="card-body gap-3 p-5" use:enhance>

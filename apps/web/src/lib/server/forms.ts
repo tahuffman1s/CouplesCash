@@ -243,6 +243,9 @@ export function parseHouseholdSettings(data: FormData): Parsed<HouseholdPatch> {
 			return { ok: false, error: 'Pick the date of a recent payday.' };
 		patch.payAnchorDate = anchor;
 	}
+	// v5: checkbox + marker (an unchecked box is absent from the form data)
+	if (data.has('autoIgnoreTransfersForm'))
+		patch.autoIgnoreTransfers = data.get('autoIgnoreTransfers') === 'on';
 	if (data.has('weeklySpend')) {
 		const raw = str(data, 'weeklySpend');
 		if (!raw) patch.weeklySpendCents = null;

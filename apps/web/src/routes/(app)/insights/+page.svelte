@@ -270,5 +270,20 @@
 				</section>
 			{/if}
 		{/if}
+		<a
+			href="/transfers?month={data.month}"
+			class="card border border-base-300/60 bg-base-100 text-sm shadow-sm"
+			data-testid="transfers-link"
+		>
+			<div class="card-body flex-row items-center gap-3 px-4 py-3">
+				<Icon name="arrow-left-right" size={20} class="text-info" />
+				<span class="flex-1"
+					>Transfers between your accounts <span class="text-base-content/60"
+						>(never counted as spending)</span
+					></span
+				>
+				<Icon name="chevron-right" size={18} class="text-base-content/40" />
+			</div>
+		</a>
 	{/if}
 </main>

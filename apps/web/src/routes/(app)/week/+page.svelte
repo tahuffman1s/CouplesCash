@@ -1,7 +1,10 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
-	import type { Expense, Occurrence, WeekView } from '#lib/types.ts';
+	import type { BillPayment, Expense, InboxItem, Occurrence, WeekView } from '#lib/types.ts';
+	import TransactionSheet from '#lib/components/TransactionSheet.svelte';
+	import { apiFetch } from '#lib/utils/client.ts';
+	import { itemFromPayment } from '#lib/utils/transactions.ts';
 	import type { PageProps } from './$types';
 	import AppBar from '#lib/components/AppBar.svelte';
 	import Icon from '#lib/components/Icon.svelte';
@@ -90,6 +93,36 @@
 		new Map((view?.budget.categories ?? []).map((r) => [r.categoryId, r.budgetCents]))
 	);
 	const dayLabel = (iso: string) => formatWeekdayDate(iso);
+	// v5: spendable is the bank's available balance when a linked checking account reports one
+	const hasAvailable = $derived(
+		data.accounts.some((a) => a.type === 'checking' && a.availableCents != null)
+	);
+
+	// v5: a bill paid from the bank opens the shared transaction sheet (unmatch, match elsewhere…)
+	let txOpen = $state(false);
+	let txItem = $state<InboxItem | null>(null);
+	let txDirty = $state(false);
+	async function openBank(occ: Occurrence) {
+		try {
+			const list = await apiFetch<BillPayment[]>(`/recurring/${occ.itemId}/payments?limit=12`);
+			const p = list.find((x) => x.dueDate === occ.dueDate);
+			const row = p ? itemFromPayment({ id: occ.itemId, name: occ.name, kind: occ.kind }, p) : null;
+			if (!row) {
+				toasts.show('Could not find the bank transaction.', 'error');
+				return;
+			}
+			txItem = row;
+			txOpen = true;
+		} catch {
+			toasts.show('Could not load the bank transaction.', 'error');
+		}
+	}
+	$effect(() => {
+		if (!txOpen && txDirty) {
+			txDirty = false;
+			void invalidateAll();
+		}
+	});
 	const expenseCategory = (e: Expense) =>
 		e.categoryId ? categoryById.get(e.categoryId) : undefined;
 </script>
@@ -176,7 +209,9 @@
 				{/if}
 				<div class="mt-1 grid grid-cols-2 gap-2 text-sm">
 					<div class="rounded-xl bg-primary-content/15 px-3 py-2">
-						<p class="text-xs text-primary-content/80">Spendable now</p>
+						<p class="text-xs text-primary-content/80" data-testid="spendable-label">
+							{hasAvailable ? 'Available now' : 'Spendable now'}
+						</p>
 						<p class="font-semibold tabular" data-testid="stat-spendable">
 							{formatMoney(view.spendableNowCents)}
 						</p>
@@ -217,7 +252,13 @@
 					</h2>
 					<ul class="divide-y divide-error/20">
 						{#each view.overdue as occ (occurrenceKey(occ))}
-							<OccurrenceRow {occ} {onToggle} showStatus busy={busy === occurrenceKey(occ)} />
+							<OccurrenceRow
+								{occ}
+								{onToggle}
+								onBank={openBank}
+								showStatus
+								busy={busy === occurrenceKey(occ)}
+							/>
 						{/each}
 					</ul>
 				</div>
@@ -278,6 +319,7 @@
 											{onToggle}
 											showDate={false}
 											showStatus
+											onBank={openBank}
 											busy={busy === occurrenceKey(occ)}
 										/>
 									{/each}
@@ -436,6 +478,17 @@
 		{/if}
 	</BottomSheet>
 {/if}
+
+<TransactionSheet
+	bind:open={txOpen}
+	item={txItem}
+	initial={null}
+	categories={data.categories}
+	onchange={(next) => {
+		txItem = next;
+		txDirty = true;
+	}}
+/>
 
 {#if view && !view.isCurrent}
 	<p class="sr-only">Viewing {formatDate(view.start)} to {formatDate(view.end)}</p>

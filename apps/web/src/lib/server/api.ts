@@ -1,7 +1,13 @@
 import { API_URL } from '$app/env/private';
 import { redirect, type RequestEvent } from '@sveltejs/kit';
 import type {
+	AccountTransactionsPage,
 	AccountType,
+	BillPayment,
+	FromTransactionResult,
+	InboxCandidates,
+	Occurrence,
+	TransferReport,
 	ActivityPage,
 	AuthResult,
 	BankLink,
@@ -35,6 +41,7 @@ import type {
 	WeekBudgetRow,
 	WeekView
 } from '#lib/types.ts';
+import { accountTxQuery, type AccountTxQuery } from '#lib/utils/transactions.ts';
 import { ACCESS_COOKIE, REFRESH_COOKIE, clearAuthCookies, setAuthCookies } from './cookies';
 
 export const API_BASE = `${API_URL}/v1`;
@@ -192,6 +199,7 @@ export type HouseholdPatch = Partial<{
 	payPeriod: PayPeriod;
 	payAnchorDate: string | null;
 	weeklySpendCents: number | null;
+	autoIgnoreTransfers: boolean;
 }>;
 export type RecurringBody = {
 	name: string;
@@ -277,7 +285,28 @@ export function endpoints(event: RequestEvent) {
 		},
 		recurring: {
 			create: (body: RecurringBody) => c.post<RecurringItem>('/recurring', body),
-			update: (id: string, body: RecurringBody) => c.put<RecurringItem>(`/recurring/${id}`, body)
+			update: (id: string, body: RecurringBody) => c.put<RecurringItem>(`/recurring/${id}`, body),
+			// v5
+			fromTransaction: (body: {
+				transactionId: string;
+				name?: string;
+				kind?: Kind;
+				frequency?: Frequency;
+			}) => c.post<FromTransactionResult>('/recurring/from-transaction', body),
+			payments: (id: string, limit = 12) =>
+				c.get<BillPayment[]>(`/recurring/${id}/payments?limit=${limit}`),
+			candidates: (id: string, date: string, days = 10) =>
+				c.get<InboxItem[]>(`/recurring/${id}/occurrences/${date}/candidates?days=${days}`),
+			link: (id: string, date: string, transactionId: string) =>
+				c.post<Occurrence>(`/recurring/${id}/occurrences/${date}/link`, { transactionId })
+		},
+		// ---- v5 (docs/API-CONTRACT.md § v5 additions)
+		accounts: {
+			transactions: (id: string, opts: AccountTxQuery = {}) =>
+				c.get<AccountTransactionsPage>(`/accounts/${id}/transactions${accountTxQuery(opts)}`)
+		},
+		transfers: {
+			report: (m?: string | null) => c.get<TransferReport>(`/transfers${month(m)}`)
 		},
 		// ---- v4 (docs/API-CONTRACT.md § v4 additions)
 		week: {
@@ -361,9 +390,17 @@ export function endpoints(event: RequestEvent) {
 		},
 		inbox: {
 			summary: () => c.get<InboxSummary>('/inbox/summary'),
-			list: (opts: { status?: InboxStatus; before?: string | null; limit?: number } = {}) => {
+			list: (
+				opts: {
+					status?: InboxStatus;
+					before?: string | null;
+					limit?: number;
+					includeHidden?: boolean;
+				} = {}
+			) => {
 				const q = new URLSearchParams();
 				if (opts.status) q.set('status', opts.status);
+				if (opts.includeHidden) q.set('includeHidden', '1');
 				if (opts.before) q.set('before', opts.before);
 				if (opts.limit) q.set('limit', String(opts.limit));
 				const qs = q.toString();
@@ -373,6 +410,14 @@ export function endpoints(event: RequestEvent) {
 				c.post<InboxItem>(`/inbox/${id}/confirm`, body),
 			ignore: (id: string) => c.post<InboxItem>(`/inbox/${id}/ignore`),
 			restore: (id: string) => c.post<InboxItem>(`/inbox/${id}/restore`),
+			// v5
+			candidates: (id: string, days = 30) =>
+				c.get<InboxCandidates>(`/inbox/${id}/candidates?days=${days}`),
+			match: (id: string, itemId: string, dueDate: string) =>
+				c.post<InboxItem>(`/inbox/${id}/match`, { itemId, dueDate }),
+			transfer: (id: string, peerId: string | null) =>
+				c.post<InboxItem>(`/inbox/${id}/transfer`, { peerId }),
+			unmatch: (id: string) => c.post<InboxItem>(`/inbox/${id}/unmatch`),
 			bulk: (action: 'confirm-suggested' | 'ignore', ids?: string[]) =>
 				c.post<BulkResult>('/inbox/bulk', ids ? { action, ids } : { action })
 		},

@@ -12,7 +12,12 @@ test('activity feed names the actor for each action just performed', async ({ pa
 	await page.getByRole('button', { name: 'Save', exact: true }).click();
 	await expect(page).toHaveURL(/\/bills\/[0-9a-f-]+/);
 	// the detail page lists several upcoming occurrences; pay the first (today's)
+	// the toggle is optimistic: wait for the API to confirm before navigating away
+	const saved = page.waitForResponse(
+		(r) => /\/occurrences\/[^/]+\/paid$/.test(r.url()) && r.request().method() === 'PUT' && r.ok()
+	);
 	await page.getByRole('button', { name: 'Mark Electric paid' }).first().click();
+	await saved;
 	await expect(page.getByRole('button', { name: 'Mark Electric unpaid' })).toBeVisible();
 
 	// dashboard: latest 5

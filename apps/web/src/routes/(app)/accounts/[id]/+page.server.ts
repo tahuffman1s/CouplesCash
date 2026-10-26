@@ -1,7 +1,8 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
-import type { Account, BalanceSnapshot } from '#lib/types.ts';
-import { api, isApiError } from '#lib/server/api.ts';
+import type { Account, AccountTransactionsPage, BalanceSnapshot, Category } from '#lib/types.ts';
+import { api, endpoints, isApiError } from '#lib/server/api.ts';
+import { today } from '#lib/utils/dates.ts';
 import { echo, parseAccountForm } from '#lib/server/forms.ts';
 
 export const load: PageServerLoad = async (event) => {
@@ -12,7 +13,29 @@ export const load: PageServerLoad = async (event) => {
 			client.get<Account>(`/accounts/${event.params.id}`),
 			client.get<BalanceSnapshot[]>(`/accounts/${event.params.id}/history?limit=30`)
 		]);
-		return { account, history, created: event.url.searchParams.has('created') };
+		// v5: Transactions tab (first page server-side; filters, search and pages go via /api)
+		const tab = event.url.searchParams.get('tab') === 'transactions' ? 'transactions' : 'overview';
+		const m = event.url.searchParams.get('month');
+		const month = m && /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : today().slice(0, 7);
+		let transactions: AccountTransactionsPage | null = null;
+		let categories: Category[] = [];
+		if (tab === 'transactions') {
+			[transactions, categories] = await Promise.all([
+				endpoints(event)
+					.accounts.transactions(event.params.id, { month, limit: 50 })
+					.catch(() => null),
+				client.get<Category[]>('/categories').catch(() => [] as Category[])
+			]);
+		}
+		return {
+			account,
+			history,
+			tab,
+			month,
+			transactions,
+			categories,
+			created: event.url.searchParams.has('created')
+		};
 	} catch (e) {
 		if (isApiError(e, 404)) error(404, 'Account not found');
 		throw e;

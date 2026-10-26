@@ -28,6 +28,11 @@
 				{liability ? '−' : ''}{formatMoney(account.balanceCents)}
 			</p>
 			{#if liability}<p class="text-[0.65rem] text-base-content/50 uppercase">owed</p>{/if}
+			{#if (account.pendingOutCents ?? 0) > 0}
+				<p class="text-xs text-base-content/60 tabular" data-testid="account-pending">
+					{formatMoney(account.pendingOutCents ?? 0)} pending
+				</p>
+			{/if}
 		</div>
 		<Icon name="chevron-right" size={18} class="text-base-content/40" />
 	</div>

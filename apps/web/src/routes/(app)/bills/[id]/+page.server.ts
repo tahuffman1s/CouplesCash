@@ -1,7 +1,13 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
-import type { Account, CalendarResponse, Category, RecurringItem } from '#lib/types.ts';
-import { api, isApiError } from '#lib/server/api.ts';
+import type {
+	Account,
+	BillPayment,
+	CalendarResponse,
+	Category,
+	RecurringItem
+} from '#lib/types.ts';
+import { api, endpoints, isApiError } from '#lib/server/api.ts';
 import { echo, parseRecurringForm } from '#lib/server/forms.ts';
 import { addDays, today } from '#lib/utils/dates.ts';
 
@@ -11,17 +17,22 @@ export const load: PageServerLoad = async (event) => {
 	try {
 		const from = addDays(today(), -31);
 		const to = addDays(today(), 61);
-		const [item, categories, accounts, calendar] = await Promise.all([
+		const [item, categories, accounts, calendar, payments] = await Promise.all([
 			client.get<RecurringItem>(`/recurring/${event.params.id}`),
 			client.get<Category[]>('/categories'),
 			client.get<Account[]>('/accounts'),
-			client.get<CalendarResponse>(`/calendar?from=${from}&to=${to}`)
+			client.get<CalendarResponse>(`/calendar?from=${from}&to=${to}`),
+			// v5: Payments (older API builds → null, section hidden)
+			endpoints(event)
+				.recurring.payments(event.params.id, 12)
+				.catch(() => null as BillPayment[] | null)
 		]);
 		return {
 			item,
 			categories,
 			accounts,
 			occurrences: calendar.occurrences.filter((o) => o.itemId === item.id),
+			payments,
 			created: event.url.searchParams.has('created')
 		};
 	} catch (e) {

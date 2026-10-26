@@ -105,6 +105,10 @@
 	import CheckCheck from '@lucide/svelte/icons/check-check';
 	import CalendarCheck from '@lucide/svelte/icons/calendar-check';
 	import CalendarRange from '@lucide/svelte/icons/calendar-range';
+	import Search from '@lucide/svelte/icons/search';
+	import ArrowRight from '@lucide/svelte/icons/arrow-right';
+	import Clock from '@lucide/svelte/icons/clock';
+	import ListPlus from '@lucide/svelte/icons/list-plus';
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const ICONS: Record<string, Component<any>> = {
@@ -216,7 +220,11 @@
 		'file-spreadsheet': FileSpreadsheet,
 		'check-check': CheckCheck,
 		'calendar-check': CalendarCheck,
-		'calendar-range': CalendarRange
+		'calendar-range': CalendarRange,
+		search: Search,
+		'arrow-right': ArrowRight,
+		clock: Clock,
+		'list-plus': ListPlus
 	};
 
 	export const ICON_NAMES = Object.keys(ICONS);
