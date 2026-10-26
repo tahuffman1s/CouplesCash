@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { MOCK_API, registerWithHousehold, todayIso } from './helpers';
 
-test('autopay: scheduler marks the bill, the week and calendar show it with Undo', async ({
+test('autopay: the scheduler marks the bill, the bill shows Auto-paid with Undo', async ({
 	page
 }) => {
 	await registerWithHousehold(page);
@@ -14,45 +14,25 @@ test('autopay: scheduler marks the bill, the week and calendar show it with Undo
 	await page.getByLabel('Paid automatically (auto-pay)').check();
 	await page.getByRole('button', { name: 'Save', exact: true }).click();
 	await expect(page).toHaveURL(/\/bills\/[0-9a-f-]+/);
+	const billUrl = page.url().split('?')[0];
 
-	// unpaid autopay rows carry an Autopay badge and read Planned
-	await page.goto('/week');
-	const row = page.getByTestId('occurrence-row').filter({ hasText: 'Rent' });
-	await expect(row.getByText('Autopay', { exact: true })).toBeVisible();
-	await expect(row.getByTestId('status-chip')).toHaveText('Planned');
+	// the Bills list says Autopay; the occurrence reads Planned until the job runs
+	await page.goto('/bills');
+	await expect(page.getByTestId('bill-row').filter({ hasText: 'Rent' })).toContainText('Autopay');
 
-	// simulate the background job
-	// (when the web is pointed at the real API the mock knows nothing about this
-	// household and marks nothing — the scheduler itself is covered by the API smoke test)
+	// simulate the background job (against a real API the mock marks nothing → skip)
 	const res = await page.request.post(`${MOCK_API}/__mock/autopay?date=${today}`);
 	expect(res.ok()).toBeTruthy();
 	const { marked } = (await res.json()) as { marked: number };
 	test.skip(marked === 0, 'scheduler fixture only exists in the mock API');
 
-	await page.reload();
-	await expect(row.getByTestId('status-chip')).toHaveText('Paid');
+	await page.goto(billUrl);
+	const row = page.getByTestId('occurrence-row').filter({ hasText: 'Rent' }).first();
 	await expect(row).toContainText('Auto-paid');
-
-	// Bills › Calendar: Auto-paid + Undo → unpaid again
-	await page.goto('/bills?view=calendar');
-	await expect(page.getByTestId('autopay-note')).toBeVisible();
-	await page.locator(`[data-date="${today}"]`).click();
-	const dialog = page.getByRole('dialog');
-	await expect(dialog.getByText('Auto-paid')).toBeVisible();
-	await dialog.getByRole('button', { name: 'Undo auto-pay for Rent' }).click();
-	await expect(dialog.getByRole('button', { name: 'Mark Rent paid' })).toHaveAttribute(
-		'aria-pressed',
-		'false'
-	);
+	await row.getByRole('button', { name: 'Undo auto-pay for Rent' }).click();
+	await expect(row.getByRole('button', { name: 'Mark Rent paid' })).toBeVisible();
 	await page.reload();
-	await page.locator(`[data-date="${today}"]`).click();
 	await expect(
-		page.getByRole('dialog').getByRole('button', { name: 'Mark Rent paid' })
+		page.getByTestId('occurrence-row').first().getByRole('button', { name: 'Mark Rent paid' })
 	).toBeVisible();
-
-	// the system event shows up in the feed as "Autopay"
-	await page.goto('/activity');
-	await expect(page.locator('main li').filter({ hasText: 'auto-paid Rent' })).toContainText(
-		'Autopay'
-	);
 });

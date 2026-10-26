@@ -16,6 +16,7 @@
 	import { FREQUENCY_LABEL, KIND_LABEL } from '#lib/utils/labels.ts';
 	import { formatMoney, signedMoney } from '#lib/utils/money.ts';
 	import { formatDate, today } from '#lib/utils/dates.ts';
+	import { transferRoute } from '#lib/utils/bills.ts';
 	import { occurrenceKey, optimisticToggle, togglePaid } from '#lib/utils/occurrences.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 
@@ -161,7 +162,12 @@
 						style:background={category?.color ?? 'var(--color-neutral)'}
 					>
 						<Icon
-							name={category?.icon ?? (item.kind === 'income' ? 'banknote' : 'receipt')}
+							name={category?.icon ??
+								(item.kind === 'income'
+									? 'banknote'
+									: item.kind === 'transfer'
+										? 'arrow-left-right'
+										: 'receipt')}
 							size={24}
 						/>
 					</span>
@@ -186,10 +192,19 @@
 					<dd class="font-medium">{item.nextDueDate ? formatDate(item.nextDueDate) : 'Ended'}</dd>
 					<dt class="text-base-content/60">Category</dt>
 					<dd class="font-medium">{category?.name ?? 'None'}</dd>
-					<dt class="text-base-content/60">Account</dt>
-					<dd class="font-medium">{account?.name ?? 'Any'}</dd>
-					<dt class="text-base-content/60">Auto-pay</dt>
-					<dd class="font-medium">{item.autoPay ? 'Yes' : 'No'}</dd>
+					{#if item.kind === 'transfer'}
+						<dt class="text-base-content/60">Moves</dt>
+						<dd class="font-medium" data-testid="transfer-route">
+							{transferRoute(item, data.accounts)}
+						</dd>
+					{:else}
+						<dt class="text-base-content/60">Account</dt>
+						<dd class="font-medium">{account?.name ?? 'Any'}</dd>
+					{/if}
+					{#if item.kind !== 'transfer'}
+						<dt class="text-base-content/60">Auto-pay</dt>
+						<dd class="font-medium">{item.autoPay ? 'Yes' : 'No'}</dd>
+					{/if}
 					{#if item.amountVaries}
 						<dt class="text-base-content/60">Amount</dt>
 						<dd class="font-medium">Varies</dd>
@@ -379,7 +394,7 @@
 			<div class="card-body gap-2 p-5">
 				<h2 class="font-semibold">Remove</h2>
 				<p class="text-sm text-base-content/65">
-					Removes it from the calendar and totals for both of you.
+					Removes it from the plan and the bills list for both of you.
 				</p>
 				{#if confirmDelete}
 					<div class="flex gap-2">

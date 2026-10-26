@@ -24,6 +24,7 @@ test('link a bank: bad token, demo token, map + create accounts, sync cooldown, 
 }) => {
 	await registerWithHousehold(page);
 	await addAccount(page, 'Everyday', '1000');
+	const everyday = page.url().split('?')[0];
 	await skipUnlessMockBridge(page);
 
 	// an invalid setup token is a field error, not a crash
@@ -40,8 +41,8 @@ test('link a bank: bad token, demo token, map + create accounts, sync cooldown, 
 
 	// map the checking account → its balance becomes the external balance (+ snapshot)
 	await mapChecking(page, 'Everyday');
-	await page.goto('/accounts');
-	await expect(page.getByTestId('net-worth')).toHaveText('$2,345.67');
+	await page.goto(everyday);
+	await expect(page.getByTestId('balance')).toHaveText('$2,345.67');
 
 	// "Create account…" opens the prefilled mini-form (type guessed from the bank's name)
 	await page.goto('/settings/banks');
@@ -50,9 +51,8 @@ test('link a bank: bad token, demo token, map + create accounts, sync cooldown, 
 	await expect(page.getByLabel('New account type')).toHaveValue('credit');
 	await page.getByRole('button', { name: 'Create & map' }).click();
 	await expect(page.getByText('Freedom Visa now updates Freedom Visa')).toBeVisible();
-	await page.goto('/accounts');
-	await expect(page.getByRole('link', { name: /Freedom Visa/ })).toBeVisible();
-	await expect(page.getByTestId('net-worth')).toHaveText('$1,805.67');
+	await page.goto('/settings#accounts');
+	await expect(page.locator('[data-testid="role-row"][data-name="Freedom Visa"]')).toBeVisible();
 
 	// Sync now: a result toast, then the 15-minute cooldown
 	await page.goto('/settings/banks');
@@ -77,19 +77,20 @@ test('link a bank: bad token, demo token, map + create accounts, sync cooldown, 
 	await sheet.getByRole('button', { name: 'Unlink' }).click();
 	await expect(page.getByText('Bank unlinked')).toBeVisible();
 	await expect(page.getByTestId('bank-link')).toHaveCount(0);
-	await page.goto('/accounts');
-	await expect(page.getByTestId('net-worth')).toHaveText('$1,805.67');
+	await page.goto(everyday);
+	await expect(page.getByTestId('balance')).toHaveText('$2,345.67');
 });
 
 test('To review: suggestions in words, one tap, ignore + undo, do all', async ({ page }) => {
 	await registerWithHousehold(page);
 	await addAccount(page, 'Everyday', '1000');
+	const everyday = page.url().split('?')[0];
 	await skipUnlessMockBridge(page);
 	const today = todayIso();
 	const firstOfMonth = `${today.slice(0, 7)}-01`;
 
 	// the matcher needs the bills to exist before the first sync
-	await addBill(page, { name: 'Rent', amount: '1850', firstDue: firstOfMonth });
+	const rentUrl = await addBill(page, { name: 'Rent', amount: '1850', firstDue: firstOfMonth });
 	await addBill(page, {
 		kind: 'Income',
 		name: 'Paycheck',
@@ -100,11 +101,13 @@ test('To review: suggestions in words, one tap, ignore + undo, do all', async ({
 	await linkDemoBank(page);
 	await mapChecking(page, 'Everyday');
 
-	// the week sends you to Transactions; the tab badge counts what needs a person
-	await page.goto('/week');
-	await expect(page.getByTestId('review-banner')).toContainText('5 to review');
+	// the Transactions tab badge counts what needs a person
+	await page.goto('/bills');
 	await expect(page.getByTestId('review-badge')).toHaveText('5');
-	await page.getByTestId('review-banner').click();
+	await page
+		.getByRole('navigation', { name: 'Primary' })
+		.getByRole('link', { name: /Transactions/ })
+		.click();
 	await expect(page).toHaveURL(/\/transactions$/);
 
 	const row = (text: string) => reviewRow(page, text);
@@ -146,24 +149,17 @@ test('To review: suggestions in words, one tap, ignore + undo, do all', async ({
 	await expect(row('NETFLIX.COM')).toBeVisible();
 	await expect(txRow(page, 'ACME PAYROLL').getByTestId('tx-status')).toHaveText('Paycheck');
 
-	// Bills › Calendar: Rent is paid and carries the From bank badge
-	await page.goto(`/bills?view=calendar&m=${today.slice(0, 7)}`);
-	await page.locator(`[data-date="${firstOfMonth}"]`).click();
-	const dialog = page.getByRole('dialog');
-	await expect(dialog.getByRole('button', { name: 'Mark Rent unpaid' })).toHaveAttribute(
-		'aria-pressed',
-		'true'
-	);
-	await expect(dialog.getByTestId('from-bank')).toBeVisible();
+	// the bill's Payments name the bank row that paid it
+	await page.goto(rentUrl);
+	await expect(
+		page
+			.locator(`[data-testid="payment-row"][data-date="${firstOfMonth}"]`)
+			.getByTestId('payment-source')
+	).toContainText('RENT PAYMENT');
 
 	// no balance change from confirming an expense (deduct = false)
-	await page.goto('/accounts');
-	await expect(page.getByTestId('net-worth')).toHaveText('$2,345.67');
-
-	// the activity feed shows the new kinds
-	await page.goto('/activity');
-	await expect(page.locator('main li').filter({ hasText: 'linked bank Demo Bank' })).toBeVisible();
-	await expect(page.locator('main li').filter({ hasText: 'matched Rent' })).toBeVisible();
+	await page.goto(everyday);
+	await expect(page.getByTestId('balance')).toHaveText('$2,345.67');
 
 	// the old inbox URL lands on Transactions
 	await page.goto('/inbox');

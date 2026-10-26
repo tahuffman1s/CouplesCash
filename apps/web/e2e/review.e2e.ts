@@ -75,10 +75,9 @@ test('To review: "It\'s Rent", swipe to ignore + Undo, swipe to accept, do all, 
 	await expect(page.getByTestId('review-badge')).toHaveCount(0);
 	await expect(page.getByTestId('do-all')).toHaveCount(0);
 
-	// …and so does the week
+	// …and the plan has no "to review" line
 	await page.goto('/week');
-	await expect(page.getByTestId('all-caught-up')).toContainText('All caught up');
-	await expect(page.getByTestId('review-banner')).toHaveCount(0);
+	await expect(page.getByTestId('review-line')).toHaveCount(0);
 });
 
 test('account chips and search filter the feed; auto-matched rows say why', async ({ page }) => {

@@ -1,50 +1,41 @@
 import { API_URL } from '$app/env/private';
 import { redirect, type RequestEvent } from '@sveltejs/kit';
 import type {
+	Account,
+	AccountRole,
 	AccountTransactionsPage,
 	AccountType,
 	AutoMatchLevel,
-	BillSuggestion,
-	MatcherStatus,
-	PendingView,
-	TransactionFeed,
-	BillPayment,
-	FromTransactionResult,
-	InboxCandidates,
-	Occurrence,
-	TransferReport,
-	ActivityPage,
 	AuthResult,
 	BankLink,
-	BudgetRow,
-	BudgetsResponse,
+	BillPayment,
+	BillSuggestion,
 	BulkResult,
-	CsvImportResult,
+	Category,
 	CsvImportRecord,
+	CsvImportResult,
 	CsvImportRow,
-	Expense,
 	ExternalAccount,
 	Frequency,
-	Goal,
+	FromTransactionResult,
 	Household,
-	Kind,
+	InboxCandidates,
 	InboxItem,
 	InboxPage,
 	InboxStatus,
 	InboxSummary,
-	MonthReport,
+	Kind,
+	MatcherStatus,
+	Occurrence,
 	Passkey,
 	PasskeyConfig,
-	PayPeriod,
-	PayPeriodView,
+	Plan,
 	Problem,
 	PushPrefs,
 	RecurringItem,
+	Sweep,
 	SyncResult,
-	Todo,
-	WeekBudget,
-	WeekBudgetRow,
-	WeekView
+	TransactionFeed
 } from '#lib/types.ts';
 import {
 	accountTxQuery,
@@ -202,15 +193,12 @@ export type Api = ReturnType<typeof api>;
 
 export type HouseholdPatch = Partial<{
 	name: string;
-	currency: string;
-	weekStart: 0 | 1;
 	timezone: string;
 	defaultAccountId: string | null;
-	payPeriod: PayPeriod;
-	payAnchorDate: string | null;
-	weeklySpendCents: number | null;
 	autoIgnoreTransfers: boolean;
 	autoMatchLevel: AutoMatchLevel;
+	/** v7: 0 = Sunday … 6 = Saturday */
+	paydayWeekday: number;
 }>;
 export type RecurringBody = {
 	name: string;
@@ -227,24 +215,9 @@ export type RecurringBody = {
 	/** v6: "Bank shows it as" (replaces the v4 `payeeHint`, which is no longer written). */
 	bankNames: string[];
 	amountVaries: boolean;
-};
-export type ExpenseBody = {
-	name: string;
-	amountCents: number;
-	categoryId: string | null;
-	accountId: string | null;
-	spentOn: string;
-	note: string | null;
-	deduct: boolean;
-};
-export type TodoBody = { title: string; amountCents: number | null; dueDate: string | null };
-export type GoalBody = {
-	name: string;
-	targetCents: number;
-	targetDate: string | null;
-	accountId: string | null;
-	color: string;
-	icon: string;
+	/** v7: `kind: 'transfer'` requires both (different accounts in the household). */
+	fromAccountId?: string | null;
+	toAccountId?: string | null;
 };
 export type PushPrefsBody = Omit<PushPrefs, 'subscriptions'>;
 export type ExternalAccountMapping =
@@ -261,44 +234,16 @@ export type InboxConfirmBody =
  */
 export function endpoints(event: RequestEvent) {
 	const c = api(event);
-	const month = (m?: string | null) => (m ? `?month=${encodeURIComponent(m)}` : '');
 	return {
+		categories: () => c.get<Category[]>('/categories'),
 		household: {
 			get: () => c.get<Household | null>('/couple'),
 			update: (patch: HouseholdPatch) => c.patch<Household>('/couple', patch)
 		},
-		activity: {
-			list: (opts: { before?: string | null; limit?: number } = {}) => {
-				const q = new URLSearchParams();
-				if (opts.before) q.set('before', opts.before);
-				if (opts.limit) q.set('limit', String(opts.limit));
-				const qs = q.toString();
-				return c.get<ActivityPage>(`/activity${qs ? `?${qs}` : ''}`);
-			}
-		},
-		expenses: {
-			list: (m?: string | null) => c.get<Expense[]>(`/expenses${month(m)}`),
-			range: (from: string, to: string) => c.get<Expense[]>(`/expenses?from=${from}&to=${to}`),
-			get: (id: string) => c.get<Expense>(`/expenses/${id}`),
-			create: (body: ExpenseBody) => c.post<Expense>('/expenses', body),
-			update: (id: string, body: ExpenseBody) => c.put<Expense>(`/expenses/${id}`, body),
-			remove: (id: string) => c.del(`/expenses/${id}`)
-		},
-		budgets: {
-			list: (m?: string | null) => c.get<BudgetsResponse>(`/budgets${month(m)}`),
-			set: (categoryId: string, amountCents: number) =>
-				c.put<BudgetRow>(`/budgets/${categoryId}`, { amountCents }),
-			clear: (categoryId: string) => c.del(`/budgets/${categoryId}`),
-			// v4: weekly rows live beside the monthly ones (`?period=weekly`)
-			week: (start?: string | null) =>
-				c.get<WeekBudget>(`/budgets/week${start ? `?start=${encodeURIComponent(start)}` : ''}`),
-			setWeekly: (categoryId: string, amountCents: number) =>
-				c.put<WeekBudgetRow>(`/budgets/${categoryId}?period=weekly`, { amountCents }),
-			clearWeekly: (categoryId: string) => c.del(`/budgets/${categoryId}?period=weekly`)
-		},
 		recurring: {
 			create: (body: RecurringBody) => c.post<RecurringItem>('/recurring', body),
 			update: (id: string, body: RecurringBody) => c.put<RecurringItem>(`/recurring/${id}`, body),
+			remove: (id: string) => c.del(`/recurring/${id}`),
 			// v5
 			fromTransaction: (body: {
 				transactionId: string;
@@ -313,6 +258,16 @@ export function endpoints(event: RequestEvent) {
 			link: (id: string, date: string, transactionId: string) =>
 				c.post<Occurrence>(`/recurring/${id}/occurrences/${date}/link`, { transactionId }),
 			list: () => c.get<RecurringItem[]>('/recurring'),
+			// v7: all-or-nothing, ≤ 100 (per-index errors `items[3].amountCents`)
+			bulk: (items: RecurringBody[]) =>
+				c.post<{ items: RecurringItem[] }>('/recurring/bulk', { items }),
+			markPaid: (id: string, date: string, amountCents?: number) =>
+				c.put<Occurrence>(
+					`/recurring/${id}/occurrences/${date}/paid`,
+					amountCents === undefined ? {} : { amountCents }
+				),
+			markUnpaid: (id: string, date: string) =>
+				c.del<Occurrence>(`/recurring/${id}/occurrences/${date}/paid`),
 			// v6
 			forgetLearned: (id: string, index: number) =>
 				c.del<RecurringItem>(`/recurring/${id}/bank-names/learned/${index}`)
@@ -321,9 +276,6 @@ export function endpoints(event: RequestEvent) {
 		transactions: {
 			feed: (opts: TransactionFeedQuery = {}) =>
 				c.get<TransactionFeed>(`/transactions${transactionFeedQuery(opts)}`)
-		},
-		pending: {
-			view: () => c.get<PendingView>('/pending')
 		},
 		billSuggestions: {
 			list: () => c.get<BillSuggestion[]>('/bill-suggestions'),
@@ -345,47 +297,24 @@ export function endpoints(event: RequestEvent) {
 		},
 		// ---- v5 (docs/API-CONTRACT.md § v5 additions)
 		accounts: {
+			list: () => c.get<Account[]>('/accounts'),
 			transactions: (id: string, opts: AccountTxQuery = {}) =>
-				c.get<AccountTransactionsPage>(`/accounts/${id}/transactions${accountTxQuery(opts)}`)
+				c.get<AccountTransactionsPage>(`/accounts/${id}/transactions${accountTxQuery(opts)}`),
+			// v7: setting `bills` moves the role off the previous bills account
+			setRole: (id: string, role: AccountRole, ownerUserId: string | null = null) =>
+				c.put<Account>(`/accounts/${id}/role`, { role, ownerUserId })
 		},
-		transfers: {
-			report: (m?: string | null) => c.get<TransferReport>(`/transfers${month(m)}`)
-		},
-		// ---- v4 (docs/API-CONTRACT.md § v4 additions)
-		week: {
-			view: (start?: string | null) =>
-				c.get<WeekView>(`/week${start ? `?start=${encodeURIComponent(start)}` : ''}`)
-		},
-		payperiod: {
-			/** Resolves to null when the household has not configured a pay period (409). */
-			view: async (date?: string | null): Promise<PayPeriodView | null> => {
-				try {
-					return await c.get<PayPeriodView>(`/payperiod${date ? `?date=${date}` : ''}`);
-				} catch (e) {
-					if (isApiError(e, 409)) return null;
-					throw e;
-				}
-			}
-		},
-		todos: {
-			list: (includeDone = false) =>
-				c.get<Todo[]>(`/todos${includeDone ? '?includeDone=true' : ''}`),
-			create: (body: TodoBody) => c.post<Todo>('/todos', body),
-			update: (id: string, body: TodoBody & { sortOrder?: number }) =>
-				c.put<Todo>(`/todos/${id}`, body),
-			done: (id: string) => c.post<Todo>(`/todos/${id}/done`),
-			undone: (id: string) => c.del<Todo>(`/todos/${id}/done`),
-			remove: (id: string) => c.del(`/todos/${id}`),
-			order: (ids: string[]) => c.put<void>('/todos/order', { ids })
-		},
-		goals: {
-			list: () => c.get<Goal[]>('/goals'),
-			get: (id: string) => c.get<Goal>(`/goals/${id}`),
-			create: (body: GoalBody) => c.post<Goal>('/goals', body),
-			update: (id: string, body: GoalBody) => c.put<Goal>(`/goals/${id}`, body),
-			remove: (id: string) => c.del(`/goals/${id}`),
-			contribute: (id: string, amountCents: number) =>
-				c.post<Goal>(`/goals/${id}/contribute`, { amountCents })
+		// ---- v7 (docs/API-CONTRACT.md § v7 additions)
+		plan: {
+			get: (date?: string | null) =>
+				c.get<Plan>(`/plan${date ? `?date=${encodeURIComponent(date)}` : ''}`),
+			sweepDone: (weekStart: string, actualCents?: number) =>
+				c.post<Sweep>(
+					'/plan/sweep/done',
+					actualCents === undefined ? { weekStart } : { weekStart, actualCents }
+				),
+			sweepUndo: (weekStart: string) =>
+				authFetch(event, '/plan/sweep/done', jsonInit('DELETE', { weekStart })).then(parse<Sweep>)
 		},
 		push: {
 			/** Resolves to null when push is not configured on the server (503). */
@@ -407,9 +336,6 @@ export function endpoints(event: RequestEvent) {
 		passkeys: {
 			list: () => c.get<Passkey[]>('/auth/passkeys'),
 			remove: (id: string) => c.del(`/auth/passkeys/${id}`)
-		},
-		reports: {
-			month: (m?: string | null) => c.get<MonthReport>(`/reports/month${month(m)}`)
 		},
 		// ---- v3 (docs/API-CONTRACT.md § v3 additions)
 		banks: {

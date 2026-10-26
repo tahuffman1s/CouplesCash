@@ -1,6 +1,6 @@
-import type { AccountType, Frequency, Kind, PayPeriod } from '#lib/types.ts';
-import { ACCOUNT_TYPES, FREQUENCIES, KINDS, PAY_PERIODS } from '#lib/types.ts';
-import type { ExpenseBody, GoalBody, HouseholdPatch, TodoBody } from './api';
+import type { AccountType, Frequency, Kind } from '#lib/types.ts';
+import { ACCOUNT_TYPES, ALL_KINDS, FREQUENCIES } from '#lib/types.ts';
+import type { HouseholdPatch } from './api';
 import { parseMoney } from '#lib/utils/money.ts';
 import { isValidISODate } from '#lib/utils/dates.ts';
 
@@ -74,6 +74,8 @@ export function parseRecurringForm(data: FormData): Parsed<{
 	url: string | null;
 	bankNames: string[];
 	amountVaries: boolean;
+	fromAccountId?: string | null;
+	toAccountId?: string | null;
 }> {
 	const name = str(data, 'name');
 	const kind = str(data, 'kind') as Kind;
@@ -83,7 +85,14 @@ export function parseRecurringForm(data: FormData): Parsed<{
 	const endDate = optional(data, 'endDate');
 	const url = optional(data, 'url');
 	if (!name) return { ok: false, error: 'Give it a name.' };
-	if (!KINDS.includes(kind)) return { ok: false, error: 'Pick bill, subscription or income.' };
+	if (!ALL_KINDS.includes(kind))
+		return { ok: false, error: 'Pick bill, subscription, income or transfer.' };
+	const fromAccountId = kind === 'transfer' ? optional(data, 'fromAccountId') : null;
+	const toAccountId = kind === 'transfer' ? optional(data, 'toAccountId') : null;
+	if (kind === 'transfer' && (!fromAccountId || !toAccountId))
+		return { ok: false, error: 'Pick where the money comes from and where it goes.' };
+	if (kind === 'transfer' && fromAccountId === toAccountId)
+		return { ok: false, error: 'From and to must be different accounts.' };
 	if (amountCents === null || amountCents <= 0)
 		return { ok: false, error: 'Enter an amount greater than zero.' };
 	if (!FREQUENCIES.includes(frequency)) return { ok: false, error: 'Pick how often it repeats.' };
@@ -101,38 +110,18 @@ export function parseRecurringForm(data: FormData): Parsed<{
 			kind,
 			amountCents,
 			categoryId: optional(data, 'categoryId'),
-			accountId: optional(data, 'accountId'),
+			accountId: kind === 'transfer' ? fromAccountId : optional(data, 'accountId'),
 			frequency,
 			anchorDate,
 			endDate,
-			autoPay: data.get('autoPay') === 'on',
+			autoPay: kind !== 'transfer' && data.get('autoPay') === 'on',
 			notes: optional(data, 'notes'),
 			url,
 			bankNames: bankNames.value,
-			amountVaries: data.get('amountVaries') === 'on'
+			amountVaries: data.get('amountVaries') === 'on',
+			...(kind === 'transfer' ? { fromAccountId, toAccountId } : {})
 		}
 	};
-}
-
-/** The weekly-budgets sheet: overall target + one amount per category (blank = clear). */
-export function parseWeeklyBudgetsForm(data: FormData): Parsed<{
-	overallCents: number | null;
-	categories: { categoryId: string; amountCents: number | null; had: boolean }[];
-}> {
-	const overallRaw = str(data, 'overall');
-	const overallCents = overallRaw ? parseMoney(overallRaw) : null;
-	if (overallRaw && (overallCents === null || overallCents < 0))
-		return { ok: false, error: 'Enter the weekly target as a number, like 300.' };
-	const categories: { categoryId: string; amountCents: number | null; had: boolean }[] = [];
-	for (const id of data.getAll('categoryId').map(String)) {
-		if (!/^[0-9a-fA-F-]{8,}$/.test(id)) continue;
-		const raw = str(data, `cat_${id}`);
-		const cents = raw ? parseMoney(raw) : null;
-		if (raw && (cents === null || cents < 0))
-			return { ok: false, error: 'Budgets must be numbers, like 120.' };
-		categories.push({ categoryId: id, amountCents: cents, had: data.get(`had_${id}`) === '1' });
-	}
-	return { ok: true, value: { overallCents, categories } };
 }
 
 /** Echo submitted values back to the form on failure. */
@@ -144,58 +133,6 @@ export function echo(data: FormData): Record<string, string> {
 	return out;
 }
 
-export function parseExpenseForm(data: FormData): Parsed<ExpenseBody> {
-	const name = str(data, 'name');
-	const amountCents = parseMoney(str(data, 'amount'));
-	const spentOn = str(data, 'spentOn');
-	const accountId = optional(data, 'accountId');
-	if (!name) return { ok: false, error: 'What did you spend on?' };
-	if (amountCents === null || amountCents <= 0)
-		return { ok: false, error: 'Enter an amount greater than zero.' };
-	if (!isValidISODate(spentOn)) return { ok: false, error: 'Pick the date.' };
-	return {
-		ok: true,
-		value: {
-			name,
-			amountCents,
-			categoryId: optional(data, 'categoryId'),
-			accountId,
-			spentOn,
-			note: optional(data, 'note'),
-			deduct: accountId !== null && data.get('deduct') === 'on'
-		}
-	};
-}
-
-export function parseTodoForm(data: FormData): Parsed<TodoBody> {
-	const title = str(data, 'title');
-	const amountRaw = str(data, 'amount');
-	const dueDate = optional(data, 'dueDate');
-	if (!title || title.length > 120) return { ok: false, error: 'Give it a short title.' };
-	const amountCents = amountRaw ? parseMoney(amountRaw) : null;
-	if (amountRaw && amountCents === null)
-		return { ok: false, error: 'Enter the amount as a number, like 200.' };
-	if (dueDate && !isValidISODate(dueDate)) return { ok: false, error: 'Pick a valid date.' };
-	return { ok: true, value: { title, amountCents, dueDate } };
-}
-
-export function parseGoalForm(data: FormData): Parsed<GoalBody> {
-	const name = str(data, 'name');
-	const targetCents = parseMoney(str(data, 'target'));
-	const targetDate = optional(data, 'targetDate');
-	const color = str(data, 'color');
-	const icon = str(data, 'icon') || 'piggy-bank';
-	if (!name) return { ok: false, error: 'Name the goal.' };
-	if (targetCents === null || targetCents <= 0)
-		return { ok: false, error: 'Enter a target amount greater than zero.' };
-	if (targetDate && !isValidISODate(targetDate)) return { ok: false, error: 'Pick a valid date.' };
-	if (!/^#[0-9a-fA-F]{6}$/.test(color)) return { ok: false, error: 'Pick a colour.' };
-	return {
-		ok: true,
-		value: { name, targetCents, targetDate, accountId: optional(data, 'accountId'), color, icon }
-	};
-}
-
 export function parseHouseholdSettings(data: FormData): Parsed<HouseholdPatch> {
 	const patch: HouseholdPatch = {};
 	if (data.has('name')) {
@@ -203,52 +140,26 @@ export function parseHouseholdSettings(data: FormData): Parsed<HouseholdPatch> {
 		if (!name || name.length > 40) return { ok: false, error: 'Give your household a name.' };
 		patch.name = name;
 	}
-	if (data.has('currency')) {
-		const currency = (optional(data, 'currencyCustom') ?? str(data, 'currency')).toUpperCase();
-		if (!/^[A-Z]{3}$/.test(currency))
-			return { ok: false, error: 'Currency must be a 3-letter ISO code like USD or EUR.' };
-		patch.currency = currency;
-	}
-	if (data.has('weekStart')) {
-		const ws = str(data, 'weekStart');
-		if (ws !== '0' && ws !== '1') return { ok: false, error: 'Pick Sunday or Monday.' };
-		patch.weekStart = ws === '1' ? 1 : 0;
-	}
 	if (data.has('defaultAccountId')) patch.defaultAccountId = optional(data, 'defaultAccountId');
 	if (data.has('timezone')) {
 		const tz = str(data, 'timezone');
 		if (!tz) return { ok: false, error: 'Pick a time zone.' };
 		patch.timezone = tz;
 	}
-	if (data.has('payPeriod')) {
-		const pp = str(data, 'payPeriod') as PayPeriod;
-		if (!PAY_PERIODS.some((p) => p.value === pp))
-			return { ok: false, error: 'Pick how often you get paid.' };
-		patch.payPeriod = pp;
-		const anchor = optional(data, 'payAnchorDate');
-		if (anchor && !isValidISODate(anchor))
-			return { ok: false, error: 'Pick the date of a recent payday.' };
-		patch.payAnchorDate = anchor;
-	}
 	// v5: checkbox + marker (an unchecked box is absent from the form data)
 	if (data.has('autoIgnoreTransfersForm'))
 		patch.autoIgnoreTransfers = data.get('autoIgnoreTransfers') === 'on';
+	if (data.has('paydayWeekday')) {
+		const wd = Number(str(data, 'paydayWeekday'));
+		if (!Number.isInteger(wd) || wd < 0 || wd > 6) return { ok: false, error: 'Pick your payday.' };
+		patch.paydayWeekday = wd;
+	}
 	// v6: Off / Bills only / Everything
 	if (data.has('autoMatchLevel')) {
 		const level = str(data, 'autoMatchLevel');
 		if (level !== 'off' && level !== 'bills' && level !== 'all')
 			return { ok: false, error: 'Pick how much the app may match by itself.' };
 		patch.autoMatchLevel = level;
-	}
-	if (data.has('weeklySpend')) {
-		const raw = str(data, 'weeklySpend');
-		if (!raw) patch.weeklySpendCents = null;
-		else {
-			const cents = parseMoney(raw);
-			if (cents === null || cents < 0)
-				return { ok: false, error: 'Enter the weekly target as a number, like 300.' };
-			patch.weeklySpendCents = cents;
-		}
 	}
 	return { ok: true, value: patch };
 }

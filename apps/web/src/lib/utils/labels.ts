@@ -21,13 +21,15 @@ export const ACCOUNT_TYPE_ICON: Record<AccountType, string> = {
 export const KIND_LABEL: Record<Kind, string> = {
 	bill: 'Bill',
 	subscription: 'Subscription',
-	income: 'Income'
+	income: 'Income',
+	transfer: 'Transfer'
 };
 
 export const KIND_LABEL_PLURAL: Record<Kind, string> = {
 	bill: 'Bills',
 	subscription: 'Subscriptions',
-	income: 'Income'
+	income: 'Income',
+	transfer: 'Transfers'
 };
 
 export const FREQUENCY_LABEL: Record<Frequency, string> = {
@@ -95,74 +97,12 @@ export const ACCOUNT_ICONS = [
 	'car'
 ] as const;
 
-export const GOAL_ICONS = [
-	'piggy-bank',
-	'plane',
-	'house',
-	'car',
-	'gift',
-	'graduation-cap',
-	'heart',
-	'party-popper',
-	'shield',
-	'sparkles'
-] as const;
-
-/** Activity kinds that the scheduler (not a person) produces. */
-export function isSystemActivity(kind: string): boolean {
-	return (
-		kind === 'occurrence.autopaid' ||
-		kind === 'bank.synced' ||
-		kind === 'bank.error' ||
-		kind === 'transaction.automatched' ||
-		kind === 'transaction.autocategorized' ||
-		kind === 'transaction.posted' ||
-		kind === 'transaction.dropped' ||
-		kind === 'transfer.auto'
-	);
-}
-
-/** Who the "system" is for a scheduler event: the autopay job or the bank sync. */
-export function systemActorLabel(kind: string): string {
-	if (kind === 'transaction.automatched' || kind === 'transaction.autocategorized')
-		return 'Matching';
-	return kind.startsWith('bank.') || kind.startsWith('transaction.') || kind.startsWith('transfer.')
-		? 'Bank sync'
-		: 'Autopay';
-}
-
-/** Human label for an activity actor: the person's name, or the system job for scheduler events. */
-export function activityActor(actorName: string | null, kind: string): string {
-	if (actorName) return actorName;
-	return isSystemActivity(kind) ? systemActorLabel(kind) : 'Someone';
-}
-
-/** Icon for v3 activity kinds (bank sync, CSV import, inbox review); null keeps the actor avatar. */
-export function activityKindIcon(kind: string): string | null {
-	if (kind.startsWith('bank.')) return kind === 'bank.error' ? 'triangle-alert' : 'landmark';
-	if (kind === 'import.csv') return 'file-spreadsheet';
-	switch (kind) {
-		case 'transaction.confirmed':
-			return 'circle-check';
-		case 'transaction.ignored':
-			return 'circle-minus';
-		case 'transaction.restored':
-			return 'undo-2';
-		case 'transaction.automatched':
-		case 'transaction.autocategorized':
-			return 'sparkles';
-		case 'bill_suggestion.dismissed':
-			return 'circle-minus';
-		default:
-			return null;
-	}
-}
-
 /** Icon per recurring kind, for suggestion chips and compact rows. */
 export const KIND_ICON: Record<Kind, string> = {
 	bill: 'receipt',
 	subscription: 'repeat',
-	income: 'banknote'
+	income: 'banknote',
+	transfer: 'arrow-left-right'
 };
 
 /** Guesses an account type from a bank's own account name ("Freedom Visa" → credit). */

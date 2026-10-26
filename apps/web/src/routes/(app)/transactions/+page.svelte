@@ -8,7 +8,6 @@
 	import AccountTxRow from '#lib/components/AccountTxRow.svelte';
 	import AppBar from '#lib/components/AppBar.svelte';
 	import EmptyState from '#lib/components/EmptyState.svelte';
-	import HelperText from '#lib/components/HelperText.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import NoHousehold from '#lib/components/NoHousehold.svelte';
 	import QuickAddSheet, { quickAddForm } from '#lib/components/QuickAddSheet.svelte';
@@ -50,18 +49,33 @@
 		for (const r of extra) add(r);
 		return Object.values(seen);
 	});
+	// v7: fun-money accounts never get review buttons and stay out of the list unless shown
+	const funIds = $derived(new Set(data.accounts.filter((a) => a.role === 'fun').map((a) => a.id)));
+	const isFun = (r: InboxItem) => !!r.accountId && funIds.has(r.accountId);
+	const showFunRows = $derived(data.showFun || (!!data.accountId && funIds.has(data.accountId)));
+	const visible = $derived(rows.filter((r) => showFunRows || !isFun(r)));
 	const reviewRows = $derived(
 		rows.filter(
 			(r) =>
 				r.status === 'pending' &&
+				!isFun(r) &&
 				(!data.accountId || r.accountId === data.accountId) &&
 				(!data.q || matchesQuery(r, data.q))
 		)
 	);
-	const pendingRows = $derived(rows.filter((r) => r.pending && r.status !== 'pending'));
+	// v7: Pending lists EVERY in-flight row of the shown accounts (to review or not, transfer legs
+	// included), so its count is the bank's pending count; a row to review shows in both sections
+	const pendingRows = $derived(
+		visible.filter(
+			(r) =>
+				r.pending &&
+				(!data.accountId || r.accountId === data.accountId) &&
+				(!data.q || matchesQuery(r, data.q))
+		)
+	);
 	const postedRows = $derived(
-		rows
-			.filter((r) => !r.pending && r.status !== 'pending')
+		visible
+			.filter((r) => !r.pending && (r.status !== 'pending' || isFun(r)))
 			.toSorted((a, b) => b.postedOn.localeCompare(a.postedOn))
 	);
 	const days = $derived(groupByDay(postedRows));
@@ -220,10 +234,11 @@
 	let q = $state(untrack(() => data.q ?? ''));
 	let debounce: ReturnType<typeof setTimeout> | undefined;
 	onDestroy(() => clearTimeout(debounce));
-	const hrefFor = (accountId: string | null) => {
+	const hrefFor = (accountId: string | null, fun = data.showFun) => {
 		const s = new SvelteURLSearchParams();
 		if (accountId) s.set('account', accountId);
 		if (data.q) s.set('q', data.q);
+		if (fun) s.set('fun', '1');
 		const qs = s.toString();
 		return qs ? `?${qs}` : '/transactions';
 	};
@@ -261,7 +276,10 @@
 
 	let quickOpen = $state(false);
 	const quick = $derived(quickAddForm(form));
-	const linkedAccounts = $derived(data.accounts);
+	const linkedAccounts = $derived(
+		data.accounts.filter((a) => data.showFun || a.role !== 'fun' || a.id === data.accountId)
+	);
+	const hasFun = $derived(funIds.size > 0);
 </script>
 
 <svelte:head><title>Transactions · CouplesCash</title></svelte:head>
@@ -283,10 +301,6 @@
 </AppBar>
 
 <main class="flex flex-col gap-4 px-4 pt-2">
-	<HelperText
-		id="transactions"
-		text="Everything that hit your accounts. Tap the big button to accept a suggestion, or swipe."
-	/>
 	{#if !data.household}
 		<NoHousehold />
 	{:else}
@@ -317,6 +331,21 @@
 						>
 					{/each}
 				</div>
+			{/if}
+			{#if hasFun}
+				<a
+					href={hrefFor(
+						data.accountId && funIds.has(data.accountId) ? null : data.accountId,
+						!data.showFun
+					)}
+					class="flex min-h-11 items-center gap-2 self-start px-1 text-xs text-base-content/65"
+					data-sveltekit-noscroll
+					data-sveltekit-replacestate
+					data-testid="fun-toggle"
+				>
+					<Icon name={data.showFun ? 'eye-off' : 'eye'} size={14} />
+					{data.showFun ? 'Hide fun money' : 'Show fun money'}
+				</a>
 			{/if}
 			<label class="input-bordered input flex min-h-11 w-full items-center gap-2">
 				<Icon name="search" size={16} class="text-base-content/50" />
@@ -390,9 +419,12 @@
 						class="text-sm font-semibold tracking-wide text-base-content/70 uppercase"
 					>
 						Pending
+						<span class="ml-1 badge badge-sm tabular" data-testid="pending-count"
+							>{pendingRows.length}</span
+						>
 					</h2>
-					<a href="/accounts#pending" class="text-xs text-base-content/60 tabular"
-						>{signedMoney(-pendingOut)} · See by account</a
+					<span class="text-xs text-base-content/60 tabular" data-testid="pending-total"
+						>{signedMoney(-pendingOut)}</span
 					>
 				</div>
 				<ul
@@ -417,16 +449,11 @@
 				<EmptyState
 					icon="list"
 					title="No transactions yet"
-					body="Link a bank or import a CSV and every transaction lands here. Anything that needs one of you shows up under To review."
+					body="Link your banks and every transaction lands here. Anything that needs one of you shows up under To review."
 				>
 					<div class="mt-3 flex flex-wrap justify-center gap-2">
 						<a href="/settings/banks" class="btn min-h-11 rounded-full px-5 btn-primary"
 							><Icon name="landmark" size={16} /> Link a bank</a
-						>
-						<a
-							href="/imports/csv"
-							class="btn min-h-11 rounded-full border border-base-300 btn-ghost px-5"
-							><Icon name="file-spreadsheet" size={16} /> Import CSV</a
 						>
 					</div>
 				</EmptyState>
@@ -474,7 +501,8 @@
 		bind:open={quickOpen}
 		categories={data.categories}
 		accounts={data.accounts}
-		defaultAccountId={data.household.defaultAccountId}
+		defaultAccountId={data.accounts.find((a) => a.role === 'bills')?.id ??
+			data.household.defaultAccountId}
 		form={quick}
 	/>
 {/if}

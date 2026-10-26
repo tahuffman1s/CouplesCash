@@ -3,45 +3,25 @@
 	import { review } from '#lib/state/review.svelte.ts';
 	import Icon from './Icon.svelte';
 
-	/** v6: five tabs, each with one job (PLAN-V6 §4). */
+	/** v7: three tabs (PLAN-V7 "Navigation"); Settings is the gear in the app bar. */
 	const items = [
 		{
 			href: '/week',
-			label: 'Week',
+			label: 'This week',
 			icon: 'calendar-range',
-			match: (p: string) => p.startsWith('/week')
+			match: (p: string) => p.startsWith('/week') || p.startsWith('/setup')
 		},
 		{
 			href: '/transactions',
 			label: 'Transactions',
 			icon: 'list',
-			match: (p: string) => p.startsWith('/transactions') || p.startsWith('/expenses')
+			match: (p: string) => p.startsWith('/transactions') || p.startsWith('/accounts')
 		},
 		{
 			href: '/bills',
 			label: 'Bills',
 			icon: 'receipt',
 			match: (p: string) => p.startsWith('/bills')
-		},
-		{
-			href: '/accounts',
-			label: 'Money',
-			icon: 'wallet',
-			match: (p: string) =>
-				p.startsWith('/accounts') || p.startsWith('/goals') || p.startsWith('/transfers')
-		},
-		{
-			href: '/more',
-			label: 'More',
-			icon: 'ellipsis',
-			match: (p: string) =>
-				p.startsWith('/more') ||
-				p.startsWith('/settings') ||
-				p.startsWith('/insights') ||
-				p.startsWith('/couple') ||
-				p.startsWith('/activity') ||
-				p.startsWith('/todos') ||
-				p.startsWith('/imports')
 		}
 	];
 </script>

@@ -1,92 +1,71 @@
 import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
-import type {
-	Account,
-	BillSuggestion,
-	Category,
-	Household,
-	PendingView,
-	RecurringItem,
-	WeekView
-} from '#lib/types.ts';
-import { api, endpoints, isApiError } from '#lib/server/api.ts';
-import { echo, parseWeeklyBudgetsForm } from '#lib/server/forms.ts';
+import type { Account, Category, Plan, RecurringItem } from '#lib/types.ts';
+import { endpoints, isApiError } from '#lib/server/api.ts';
+import { str } from '#lib/server/forms.ts';
 import { quickAddAction } from '#lib/server/quickadd.ts';
-import { isValidISODate, today } from '#lib/utils/dates.ts';
-import { nextPayday } from '#lib/utils/payperiod.ts';
+import { isValidISODate } from '#lib/utils/dates.ts';
 
 /**
- * v6 home. Besides the week itself: whatever the first-run checklist, the found-bills card, the
- * pending markers and the "Next payday" line need. Everything but the week degrades to empty.
+ * v7 home: the Friday plan (`GET /plan?date=`), plus what the + sheet needs. When there is no bills
+ * account yet the page shows the guided setup instead (PLAN-V7 "First run").
  */
 export const load: PageServerLoad = async (event) => {
-	const s = event.url.searchParams.get('start');
-	const start = s && isValidISODate(s) ? s : null;
+	const d = event.url.searchParams.get('date');
+	const date = d && isValidISODate(d) ? d : null;
 	const empty = {
-		start,
-		view: null as WeekView | null,
+		date,
+		plan: null as Plan | null,
 		categories: [] as Category[],
 		accounts: [] as Account[],
-		itemCount: 0,
-		suggestions: [] as BillSuggestion[],
-		pending: null as PendingView | null,
-		payday: null as { date: string; amountCents: number } | null,
+		items: [] as RecurringItem[],
 		joined: event.url.searchParams.has('joined')
 	};
 	if (!event.locals.household) return empty;
-	const client = api(event);
 	const v = endpoints(event);
 	const quiet = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
-	const [view, categories, accounts, items, suggestions, pending, household] = await Promise.all([
-		v.week.view(start),
-		quiet(client.get<Category[]>('/categories'), [] as Category[]),
-		quiet(client.get<Account[]>('/accounts'), [] as Account[]),
-		quiet(v.recurring.list(), [] as RecurringItem[]),
-		quiet(v.billSuggestions.list(), [] as BillSuggestion[]),
-		quiet(v.pending.view(), null as PendingView | null),
-		quiet(v.household.get(), null as Household | null)
+	const [plan, categories, accounts, items] = await Promise.all([
+		quiet(v.plan.get(date), null as Plan | null),
+		quiet(v.categories(), [] as Category[]),
+		quiet(v.accounts.list(), [] as Account[]),
+		quiet(v.recurring.list(), [] as RecurringItem[])
 	]);
-	// "Next payday Fri Nov 6 · $3,200": the income expected in the period that payday starts
-	let payday: { date: string; amountCents: number } | null = null;
-	if (household?.payAnchorDate && view.isCurrent) {
-		const date = nextPayday(household.payPeriod, household.payAnchorDate, view.today ?? today());
-		const next = await quiet(v.payperiod.view(date), null);
-		payday = { date, amountCents: next?.expectedIncomeCents ?? 0 };
-	}
-	return {
-		...empty,
-		view,
-		categories,
-		accounts,
-		itemCount: items.length,
-		suggestions,
-		pending,
-		payday
-	};
+	return { ...empty, plan, categories, accounts, items };
 };
 
 export const actions: Actions = {
 	quickAdd: quickAddAction,
-	/** "Set weekly budgets": the overall target (PATCH /couple) + one PUT/DELETE per category. */
-	budgets: async (event) => {
+	/** Tick / untick a planned line (a bill, a fun-money transfer, the paycheck). */
+	paid: async (event) => {
 		const data = await event.request.formData();
-		const parsed = parseWeeklyBudgetsForm(data);
-		if (!parsed.ok) return fail(400, { sheet: 'budgets', error: parsed.error, values: echo(data) });
-		const v2 = endpoints(event);
+		const itemId = str(data, 'itemId');
+		const dueDate = str(data, 'dueDate');
+		if (!itemId || !isValidISODate(dueDate)) return fail(400, { planError: 'Pick a line.' });
+		const v = endpoints(event);
 		try {
-			await v2.household.update({ weeklySpendCents: parsed.value.overallCents });
-			for (const c of parsed.value.categories) {
-				if (c.amountCents !== null) await v2.budgets.setWeekly(c.categoryId, c.amountCents);
-				else if (c.had) await v2.budgets.clearWeekly(c.categoryId).catch(() => undefined);
-			}
-			return { budgetsSaved: true };
+			if (data.get('paid') === '1') await v.recurring.markPaid(itemId, dueDate);
+			else await v.recurring.markUnpaid(itemId, dueDate);
 		} catch (e) {
-			const message = isApiError(e) ? e.message : 'Could not save the budgets. Try again.';
 			return fail(isApiError(e) ? e.status : 500, {
-				sheet: 'budgets',
-				error: message,
-				values: echo(data)
+				planError: isApiError(e) ? e.message : 'Could not update. Try again.'
 			});
 		}
+		return { ticked: data.get('paid') === '1' ? 'paid' : 'unpaid' };
+	},
+	/** "Move to savings" → Done / Undo (`POST|DELETE /plan/sweep/done`). */
+	sweep: async (event) => {
+		const data = await event.request.formData();
+		const weekStart = str(data, 'weekStart');
+		if (!isValidISODate(weekStart)) return fail(400, { planError: 'Pick the week.' });
+		const v = endpoints(event);
+		try {
+			if (data.get('done') === '1') await v.plan.sweepDone(weekStart);
+			else await v.plan.sweepUndo(weekStart);
+		} catch (e) {
+			return fail(isApiError(e) ? e.status : 500, {
+				planError: isApiError(e) ? e.message : 'Could not update. Try again.'
+			});
+		}
+		return { swept: data.get('done') === '1' };
 	}
 };

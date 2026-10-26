@@ -15,8 +15,12 @@ test('CSV import: auto-detected debit/credit mapping and MM/DD/YYYY dates → To
 }) => {
 	await registerWithHousehold(page);
 	await addAccount(page, 'Everyday', '1000');
+	const accountUrl = page.url().split('?')[0];
 
-	await page.goto('/imports/csv');
+	// v7: the importer is reached from Settings → Banks → Import a statement
+	await page.goto('/settings#banks');
+	await page.getByRole('link', { name: /Import a statement/ }).click();
+	await expect(page).toHaveURL(/\/imports\/csv$/);
 	await expect(page.getByRole('heading', { name: '1 · Choose the file' })).toBeVisible();
 	await page.getByLabel('Account').selectOption({ label: 'Everyday · Bank' });
 	await page
@@ -70,6 +74,6 @@ test('CSV import: auto-detected debit/credit mapping and MM/DD/YYYY dates → To
 	await page.goto('/imports/csv');
 	await expect(page.getByText('statement.csv')).toBeVisible();
 	await expect(page.getByText('3 new')).toBeVisible();
-	await page.goto('/accounts');
-	await expect(page.getByTestId('net-worth')).toHaveText('$1,000.00');
+	await page.goto(accountUrl);
+	await expect(page.getByTestId('balance')).toHaveText('$1,000.00');
 });

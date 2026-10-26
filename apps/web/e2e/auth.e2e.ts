@@ -7,21 +7,22 @@ test('unauthenticated / redirects to /login', async ({ page }) => {
 	await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
 });
 
-test('register lands on the Week with the household prompt', async ({ page }) => {
+test('register lands on This week with the household prompt; three tabs and a gear', async ({
+	page
+}) => {
 	await register(page, 'Sam');
 	await expect(page.getByRole('heading', { name: 'This week' })).toBeVisible();
 	await expect(page.getByText('Start your shared household')).toBeVisible();
 	await expect(page.getByRole('link', { name: 'Set up our household' })).toBeVisible();
-	// five tabs, Week marked
 	const dock = page.getByRole('navigation', { name: 'Primary' });
-	await expect(dock.getByRole('link')).toHaveText([
-		/Week/,
-		/Transactions/,
-		/Bills/,
-		/Money/,
-		/More/
-	]);
-	await expect(dock.getByRole('link', { name: 'Week' })).toHaveAttribute('aria-current', 'page');
+	await expect(dock.getByRole('link')).toHaveText([/This week/, /Transactions/, /Bills/]);
+	await expect(dock.getByRole('link', { name: 'This week' })).toHaveAttribute(
+		'aria-current',
+		'page'
+	);
+	await page.getByTestId('settings-gear').click();
+	await expect(page).toHaveURL(/\/settings$/);
+	await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
 });
 
 test('signed-in visits to / and /login go to the Week', async ({ page }) => {

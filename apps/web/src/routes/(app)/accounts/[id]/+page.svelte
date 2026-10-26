@@ -184,7 +184,7 @@
 <AppBar
 	title={account.name}
 	subtitle="{account.institution} · {ACCOUNT_TYPE_LABEL[account.type]}"
-	back="/accounts"
+	back="/week"
 >
 	{#snippet action()}
 		<button
@@ -280,7 +280,7 @@
 
 		<div class="flex flex-col gap-2">
 			<div class="flex gap-2 overflow-x-auto pb-1" role="radiogroup" aria-label="Filter">
-				{#each TX_FILTERS as f (f.value)}
+				{#each account.role === 'fun' ? TX_FILTERS.filter((x) => x.value !== 'review' && x.value !== 'matched') : TX_FILTERS as f (f.value)}
 					<button
 						type="button"
 						role="radio"

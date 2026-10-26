@@ -47,7 +47,7 @@
 
 <svelte:head><title>Couple · CouplesCash</title></svelte:head>
 
-<AppBar title="Couple" back={mode === 'menu' ? '/settings#household' : undefined}>
+<AppBar title="Couple" back={mode === 'menu' ? '/settings#household' : undefined} gear={false}>
 	{#snippet action()}
 		{#if mode !== 'menu'}
 			<button type="button" class="btn min-h-11 btn-ghost btn-sm" onclick={() => (mode = 'menu')}

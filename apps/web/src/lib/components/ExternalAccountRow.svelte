@@ -5,6 +5,7 @@
 	import { apiFetch } from '#lib/utils/client.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 	import type { ExternalAccountMapping } from '#lib/server/api.ts';
+	import { feedSummary } from '#lib/utils/plan.ts';
 	import MoneyText from './MoneyText.svelte';
 	import Icon from './Icon.svelte';
 
@@ -96,6 +97,11 @@
 		</div>
 		<MoneyText cents={ext.balanceCents} class="text-sm font-semibold" tone="auto" />
 	</div>
+	{#if ext.lastFeed}
+		<p class="text-xs text-base-content/60" data-testid="feed-line">
+			Last sync: {feedSummary(ext.lastFeed)}
+		</p>
+	{/if}
 	<label class="form-control">
 		<span class="sr-only">Mapped account for {label}</span>
 		<select

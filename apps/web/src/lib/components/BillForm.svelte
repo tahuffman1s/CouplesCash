@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { Account, Category, Frequency, Kind, RecurringItem } from '#lib/types.ts';
-	import { FREQUENCIES, KINDS } from '#lib/types.ts';
+	import { ALL_KINDS, FREQUENCIES } from '#lib/types.ts';
 	import { FREQUENCY_LABEL, KIND_LABEL, monthlyEquivalent } from '#lib/utils/labels.ts';
 	import { centsToInput, currencySymbol, formatMoney, parseMoney } from '#lib/utils/money.ts';
 	import { today } from '#lib/utils/dates.ts';
@@ -47,10 +47,10 @@
 <fieldset class="fieldset gap-3">
 	<div class="form-control">
 		<span class="label-text mb-1 text-sm font-medium">What is it?</span>
-		<div class="join w-full" role="radiogroup" aria-label="Kind">
-			{#each KINDS as k (k)}
+		<div class="grid w-full grid-cols-4 gap-1" role="radiogroup" aria-label="Kind">
+			{#each ALL_KINDS as k (k)}
 				<label
-					class="btn join-item min-h-11 flex-1 {kind === k
+					class="btn min-h-11 rounded-xl px-1 text-xs sm:text-sm {kind === k
 						? 'btn-primary'
 						: 'border border-base-300 btn-ghost'}"
 				>
@@ -69,7 +69,13 @@
 			required
 			maxlength="80"
 			class="input-bordered input min-h-12 w-full"
-			placeholder={kind === 'income' ? 'Paycheck' : kind === 'subscription' ? 'Netflix' : 'Rent'}
+			placeholder={kind === 'income'
+				? 'Paycheck'
+				: kind === 'subscription'
+					? 'Netflix'
+					: kind === 'transfer'
+						? 'Fun money · Travis'
+						: 'Rent'}
 			defaultValue={values?.name ?? item?.name ?? ''}
 		/>
 	</label>
@@ -135,36 +141,76 @@
 		{/if}
 	</div>
 
-	<div class="grid grid-cols-2 gap-3">
-		<label class="form-control">
-			<span class="label-text mb-1 text-sm font-medium">Category</span>
-			<select
-				name="categoryId"
-				class="select-bordered select min-h-12 w-full"
-				defaultValue={defaultCategory}
-			>
-				<option value="">None</option>
-				{#each categories as c (c.id)}
-					<option value={c.id}>{c.name}</option>
-				{/each}
-			</select>
-		</label>
-		<label class="form-control">
-			<span class="label-text mb-1 text-sm font-medium"
-				>{kind === 'income' ? 'Paid into' : 'Paid from'}</span
-			>
-			<select
-				name="accountId"
-				class="select-bordered select min-h-12 w-full"
-				defaultValue={values?.accountId ?? item?.accountId ?? ''}
-			>
-				<option value="">Any account</option>
-				{#each accounts as a (a.id)}
-					<option value={a.id}>{a.name}</option>
-				{/each}
-			</select>
-		</label>
-	</div>
+	{#if kind === 'transfer'}
+		<div class="grid grid-cols-2 gap-3">
+			<label class="form-control">
+				<span class="label-text mb-1 text-sm font-medium">From</span>
+				<select
+					name="fromAccountId"
+					required
+					class="select-bordered select min-h-12 w-full"
+					defaultValue={values?.fromAccountId ??
+						item?.fromAccountId ??
+						accounts.find((a) => a.role === 'bills')?.id ??
+						''}
+				>
+					<option value="">Pick one</option>
+					{#each accounts as a (a.id)}
+						<option value={a.id}>{a.name}</option>
+					{/each}
+				</select>
+			</label>
+			<label class="form-control">
+				<span class="label-text mb-1 text-sm font-medium">To</span>
+				<select
+					name="toAccountId"
+					required
+					class="select-bordered select min-h-12 w-full"
+					defaultValue={values?.toAccountId ?? item?.toAccountId ?? ''}
+				>
+					<option value="">Pick one</option>
+					{#each accounts as a (a.id)}
+						<option value={a.id}>{a.name}</option>
+					{/each}
+				</select>
+			</label>
+		</div>
+		<p class="-mt-1 text-xs text-base-content/60">
+			Counts in the weekly math as money out of the bills account, never as spending. It ticks
+			itself when the transfer shows up in the bank.
+		</p>
+	{:else}
+		<div class="grid grid-cols-2 gap-3">
+			<label class="form-control">
+				<span class="label-text mb-1 text-sm font-medium">Category</span>
+				<select
+					name="categoryId"
+					class="select-bordered select min-h-12 w-full"
+					defaultValue={defaultCategory}
+				>
+					<option value="">None</option>
+					{#each categories as c (c.id)}
+						<option value={c.id}>{c.name}</option>
+					{/each}
+				</select>
+			</label>
+			<label class="form-control">
+				<span class="label-text mb-1 text-sm font-medium"
+					>{kind === 'income' ? 'Paid into' : 'Paid from'}</span
+				>
+				<select
+					name="accountId"
+					class="select-bordered select min-h-12 w-full"
+					defaultValue={values?.accountId ?? item?.accountId ?? ''}
+				>
+					<option value="">Any account</option>
+					{#each accounts as a (a.id)}
+						<option value={a.id}>{a.name}</option>
+					{/each}
+				</select>
+			</label>
+		</div>
+	{/if}
 
 	<BankNamesInput
 		names={values?.bankName !== undefined
@@ -187,7 +233,7 @@
 		>
 	</label>
 
-	{#if kind !== 'income'}
+	{#if kind !== 'income' && kind !== 'transfer'}
 		<label class="label cursor-pointer justify-start gap-3 px-0">
 			<input
 				type="checkbox"

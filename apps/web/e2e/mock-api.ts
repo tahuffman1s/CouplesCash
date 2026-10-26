@@ -34,10 +34,22 @@
  * bill payments, occurrence candidates / link, `/transfers`, `availableCents` / `pendingOutCents`.
  *   POST /__mock/bank-sync?phase=post|drop|pair|brokerage[&email=]  edit the v5 Bridge, then sync
  *                                 (only that user's household when `email` is given)
+ *
+ * v7 (the Friday plan): `/v1/plan` (PLAN-V7 math), `/v1/plan/sweep/done` (POST / DELETE), account roles
+ * (`PUT /v1/accounts/{id}/role`), `paydayWeekday`, `transfer` items (from → to) that are marked paid
+ * when the matching transfer shows up (amount ±$1, ±2 days), the frozen savings sweep (auto-done when
+ * a bills → savings transfer lands payday −1 … +3, within max(5 %, $5)), `POST /v1/recurring/bulk`,
+ * `lastFeed` per bank account, and fun-account rows that never enter To review.
+ *   setup token `demo-household`         their banks (see `demoBridgeHousehold`): US Bank checking with
+ *                                        3 pending + an available balance, Ally HYS with a student-loan
+ *                                        debit, two Ally fun checkings, last payday's paycheck, $20
+ *                                        transfers and sweep
+ *   POST /__mock/bank-sync?phase=household  swap a link's Bridge for that data set
+ *   POST /__mock/bank-sync?phase=payday     this payday arrives: the paycheck, the $20 (and, in a week
+ *                                        with a 1st, $150) fun transfers and the sweep of the frozen amount
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { periodFor } from '../src/lib/utils/payperiod.ts';
 
 type User = {
 	id: string;
@@ -64,7 +76,10 @@ type Household = {
 	autoIgnoreTransfers: boolean;
 	/** v6 */
 	autoMatchLevel: 'off' | 'bills' | 'all';
+	/** v7: 0 = Sunday … 6 = Saturday */
+	paydayWeekday: number;
 };
+type AccountRole = 'bills' | 'savings' | 'fun' | 'other';
 type Account = {
 	id: string;
 	householdId: string;
@@ -78,6 +93,9 @@ type Account = {
 	createdAt: string;
 	updatedAt: string;
 	archived: boolean;
+	/** v7 */
+	role: AccountRole;
+	ownerUserId: string | null;
 };
 type Snapshot = { balanceCents: number; recordedAt: string; recordedBy: string };
 type Category = {
@@ -110,6 +128,9 @@ type Item = {
 	createdAt: string;
 	updatedAt: string;
 	archived: boolean;
+	/** v7: `transfer` items */
+	fromAccountId: string | null;
+	toAccountId: string | null;
 };
 type Payment = {
 	paidAt: string;
@@ -117,7 +138,23 @@ type Payment = {
 	amountCents: number;
 	auto: boolean;
 	source: 'manual' | 'autopay' | 'bank';
+	/** v7 (mock-internal): the bank row a planned transfer was matched to */
+	txId?: string;
 };
+type SweepRec = {
+	householdId: string;
+	weekStart: string;
+	plannedCents: number;
+	actualCents: number | null;
+	doneAt: string | null;
+	doneBy: string | null;
+	transactionId: string | null;
+	/** the raw (possibly negative) left-at-end the plan was frozen from */
+	leftCents: number;
+	/** a person unticked it: the bank feed never re-ticks this week */
+	autoBlocked: boolean;
+};
+type FeedStats = { pending: number; posted: number; availableReported: boolean; at: string };
 type Code = {
 	bytesHash: string;
 	codeHash: string;
@@ -225,6 +262,8 @@ type ExtAccount = {
 	accountId: string | null;
 	createdAt: string;
 	updatedAt: string;
+	/** v7 */
+	lastFeed: FeedStats | null;
 };
 type Suggestion =
 	| { kind: 'category'; categoryId: string; categoryName: string; confidence: number }
@@ -370,6 +409,7 @@ const bridge = new Map<string, BridgeAccount[]>(); // by bank link id
 const billSuggestions = new Map<string, BillSuggestionRec>();
 const lastRematch = new Map<string, number>(); // by household (1/min)
 const matcherRuns = new Map<string, { at: string; autoMatched: number }>(); // by household
+const sweeps = new Map<string, SweepRec>(); // `${hh}:${weekStart}`
 
 const PORT = Number(process.env.MOCK_API_PORT ?? 8099);
 const ACCESS_TTL = Number(process.env.MOCK_ACCESS_TTL ?? 900);
@@ -411,7 +451,9 @@ function householdView(h: Household | null) {
 		createdAt: h.createdAt,
 		members,
 		currency: h.currency,
-		weekStart: h.weekStart,
+		// v7: the week is the pay week
+		weekStart: h.paydayWeekday,
+		paydayWeekday: h.paydayWeekday,
 		timezone: h.timezone,
 		defaultAccountId: h.defaultAccountId,
 		payPeriod: h.payPeriod,
@@ -469,7 +511,8 @@ function createHousehold(name: string, owner: User): Household {
 		payAnchorDate: null,
 		weeklySpendCents: null,
 		autoIgnoreTransfers: true,
-		autoMatchLevel: 'all'
+		autoMatchLevel: 'all',
+		paydayWeekday: 5
 	};
 	households.set(h.id, h);
 	owner.householdId = h.id;
@@ -626,7 +669,12 @@ function itemView(i: Item) {
 		payeeHint: i.bankNames[0] ?? null,
 		bankNames: i.bankNames,
 		bankNamesLearned: i.bankNamesLearned,
-		amountVaries: i.amountVaries
+		amountVaries: i.amountVaries,
+		// v7
+		fromAccountId: i.fromAccountId,
+		toAccountId: i.toAccountId,
+		fromAccountName: i.fromAccountId ? (accounts.get(i.fromAccountId)?.name ?? null) : null,
+		toAccountName: i.toAccountId ? (accounts.get(i.toAccountId)?.name ?? null) : null
 	};
 }
 /**
@@ -742,7 +790,7 @@ function calendar(hh: string, from: string, to: string): Occ[] {
 	return out.sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.name.localeCompare(b.name));
 }
 function accountView(a: Account) {
-	const { householdId: _h, archived: _a, ...rest } = a;
+	const { householdId: _h, archived: _a, ownerUserId, ...rest } = a;
 	// v5: the bank's available balance, pending outflows and whether bank/CSV rows land here
 	const ext = [...extAccounts.values()].find((x) => x.accountId === a.id);
 	const owed = a.type === 'credit' || a.type === 'loan';
@@ -752,14 +800,18 @@ function accountView(a: Account) {
 				t.accountId === a.id &&
 				t.pending &&
 				t.amountCents < 0 &&
-				(t.status === 'pending' || t.status === 'confirmed')
+				// v7: every bank-pending row that is not dropped / superseded, whatever its review status
+				!isHidden(t)
 		)
 		.reduce((s, t) => s - t.amountCents, 0);
 	return {
 		...rest,
 		availableCents: ext && !owed && ext.availableCents !== null ? ext.availableCents : null,
 		pendingOutCents,
-		linked: !!ext || [...txs.values()].some((t) => t.accountId === a.id)
+		linked: !!ext || [...txs.values()].some((t) => t.accountId === a.id),
+		// v7
+		ownerUserId,
+		ownerName: ownerUserId ? (users.get(ownerUserId)?.displayName ?? null) : null
 	};
 }
 /** v5: spendable uses the bank's available balance when there is one. */
@@ -1288,7 +1340,7 @@ function weekViewFor(hh: string, start: string) {
 					t.householdId === hh &&
 					t.pending &&
 					t.amountCents < 0 &&
-					(t.status === 'pending' || t.status === 'confirmed') &&
+					!isHidden(t) &&
 					!!a &&
 					!a.archived &&
 					isLiquid(a)
@@ -1553,6 +1605,8 @@ function suggest(
 	} | null = null;
 	for (const i of items.values()) {
 		if (i.householdId !== hh || i.archived) continue;
+		// v7: planned transfers are matched by `matchPlannedTransfers`, never suggested as a bill
+		if (i.kind === 'transfer') continue;
 		if ((i.kind === 'income') === outflow) continue;
 		const once = i.frequency === 'once';
 		const tolerance = once
@@ -2163,7 +2217,8 @@ function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
 				balanceAt: nowIso(),
 				accountId: null,
 				createdAt: nowIso(),
-				updatedAt: nowIso()
+				updatedAt: nowIso(),
+				lastFeed: null
 			};
 			extAccounts.set(ext.id, ext);
 		} else {
@@ -2173,13 +2228,24 @@ function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
 			ext.updatedAt = nowIso();
 		}
 		updatedAccounts++;
+		// v7: what the feed contained (pending diagnostics)
+		ext.lastFeed = {
+			pending: ba.transactions.filter((t) => t.pending).length,
+			posted: ba.transactions.filter((t) => !t.pending).length,
+			availableReported: ba.available !== null,
+			at: nowIso()
+		};
 		const account = ext.accountId ? accounts.get(ext.accountId) : undefined;
 		if (account) applyMapping(ext, account, actor?.id ?? 'scheduler');
 		fresh.push(...reconcileAccount(hh, ext, ba));
 	}
+	// v7: fun-money accounts are personal: never in To review
+	for (const t of fresh) quietFun(t);
 	detectTransfers(hh, fresh);
 	// auto-mark (v6: per the household's auto-match level, fuzzy bank names count as a rule)
 	autoMatched += autoApply(hh, fresh);
+	// v7: planned transfers (fun money) and the savings sweep tick themselves
+	matchPlannedTransfers(hh);
 	detectBills(hh);
 	link.lastSyncedAt = nowIso();
 	link.lastError = null;
@@ -2215,7 +2281,8 @@ function extView(x: ExtAccount) {
 		balanceAt: x.balanceAt,
 		accountId: a && !a.archived ? a.id : null,
 		accountName: a && !a.archived ? a.name : null,
-		updatedAt: x.updatedAt
+		updatedAt: x.updatedAt,
+		lastFeed: x.lastFeed
 	};
 }
 function linkView(l: BankLinkRec) {
@@ -2699,10 +2766,7 @@ function accountTransactions(hh: string, accountId: string, q: URLSearchParams) 
 			inCents: all.filter((r) => r.amountCents > 0).reduce((s, r) => s + r.amountCents, 0),
 			outCents: all.filter((r) => r.amountCents < 0).reduce((s, r) => s - r.amountCents, 0),
 			pendingOutCents: all
-				.filter(
-					(r) =>
-						r.pending && r.amountCents < 0 && (r.status === 'pending' || r.status === 'confirmed')
-				)
+				.filter((r) => r.pending && r.amountCents < 0)
 				.reduce((s, r) => s - r.amountCents, 0),
 			count: all.length
 		}
@@ -2851,6 +2915,607 @@ function billPayments(hh: string, i: Item, limit: number) {
 	});
 }
 
+// ---- v7: the Friday plan (PLAN-V7) --------------------------------------------------------
+const KINDS_V7 = ['bill', 'subscription', 'income', 'transfer'];
+const FREQS = ['weekly', 'biweekly', 'monthly', 'quarterly', 'yearly', 'once'];
+/** Validation for one RecurringRequest; keys get `prefix` (bulk: `items[3].`). null = fine. */
+function itemErrors(
+	hh: string,
+	b: Record<string, unknown>,
+	prefix: string
+): Record<string, string[]> | null {
+	const e: Record<string, string[]> = {};
+	const add = (k: string, msg: string) => (e[`${prefix}${k}`] = [msg]);
+	if (!String(b.name ?? '').trim()) add('name', 'Name is required');
+	if (!KINDS_V7.includes(String(b.kind))) add('kind', 'Unknown kind');
+	if (
+		typeof b.amountCents !== 'number' ||
+		!Number.isInteger(b.amountCents) ||
+		(b.amountCents as number) <= 0
+	)
+		add('amountCents', 'Must be a whole number of cents above 0');
+	if (!FREQS.includes(String(b.frequency))) add('frequency', 'Unknown frequency');
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.anchorDate ?? ''))) add('anchorDate', 'Use YYYY-MM-DD');
+	const names = bankNamesFrom(b, []);
+	if (typeof names === 'string') add('bankNames', names);
+	if (b.kind === 'transfer') {
+		const own = (id: unknown) => {
+			const a = typeof id === 'string' ? accounts.get(id) : undefined;
+			return !!a && a.householdId === hh && !a.archived;
+		};
+		if (!own(b.fromAccountId)) add('fromAccountId', 'Pick the account it comes from');
+		if (!own(b.toAccountId)) add('toAccountId', 'Pick the account it goes to');
+		if (b.fromAccountId && b.fromAccountId === b.toAccountId)
+			add('toAccountId', 'From and to must be different accounts');
+	}
+	return Object.keys(e).length ? e : null;
+}
+function buildItem(hh: string, b: Record<string, unknown>): Item {
+	const transfer = b.kind === 'transfer';
+	const i: Item = {
+		id: randomUUID(),
+		householdId: hh,
+		name: String(b.name).trim().slice(0, 80),
+		kind: String(b.kind),
+		amountCents: b.amountCents as number,
+		categoryId: (b.categoryId as string | null) || null,
+		accountId: transfer ? String(b.fromAccountId) : (b.accountId as string | null) || null,
+		frequency: String(b.frequency),
+		anchorDate: String(b.anchorDate),
+		endDate: (b.endDate as string | null) || null,
+		autoPay: Boolean(b.autoPay),
+		notes: (b.notes as string | null) ?? null,
+		url: (b.url as string | null) ?? null,
+		bankNames: [],
+		bankNamesLearned: [],
+		amountVaries: b.amountVaries === true,
+		createdAt: nowIso(),
+		updatedAt: nowIso(),
+		archived: false,
+		fromAccountId: transfer ? String(b.fromAccountId) : null,
+		toAccountId: transfer ? String(b.toAccountId) : null
+	};
+	items.set(i.id, i);
+	const names = bankNamesFrom(b, []);
+	applyBankNames(i, typeof names === 'string' ? [] : names);
+	return i;
+}
+const roleOf = (accountId: string | null) =>
+	accountId ? (accounts.get(accountId)?.role ?? null) : null;
+function billsAccountOf(hh: string): Account | undefined {
+	return [...accounts.values()].find(
+		(a) => a.householdId === hh && !a.archived && a.role === 'bills'
+	);
+}
+/** Fun-money rows are personal: confirmed straight away, never in To review, no suggestion. */
+function quietFun(t: Tx) {
+	if (roleOf(t.accountId) !== 'fun' || t.status !== 'pending') return;
+	t.status = 'confirmed';
+	t.suggestion = null;
+	t.confidence = 0;
+	t.ignoreReason = null;
+	t.suggestedPeerId = null;
+	t.matchScore = null;
+	t.matchDetail = null;
+	t.confirmed = {
+		expenseId: null,
+		itemId: null,
+		dueDate: null,
+		by: null,
+		at: nowIso(),
+		auto: true,
+		categoryId: null,
+		categoryName: null,
+		itemName: null
+	};
+}
+/** The incoming side of a transfer on `accountId` (±3 days, same amount ±$1), not yet claimed. */
+function inflowOn(accountId: string | null, out: Tx, claimed: Set<string>): Tx | undefined {
+	if (!accountId) return undefined;
+	return [...txs.values()].find(
+		(o) =>
+			o.householdId === out.householdId &&
+			o.accountId === accountId &&
+			o.amountCents > 0 &&
+			!claimed.has(o.id) &&
+			!isHidden(o) &&
+			Math.abs(o.amountCents + out.amountCents) <= 100 &&
+			dayDistance(o.postedOn, out.postedOn) <= 3
+	);
+}
+function claimTransfer(t: Tx, peer: Tx | undefined) {
+	if (t.status === 'pending' || (t.status === 'ignored' && t.ignoreReason === 'transfer')) {
+		t.status = 'ignored';
+		t.ignoreReason = 'transfer';
+		t.transferPeerId = peer?.id ?? t.transferPeerId;
+		t.transferAuto = true;
+		t.suggestedPeerId = null;
+		t.confirmed = t.confirmed ?? {
+			expenseId: null,
+			itemId: null,
+			dueDate: null,
+			by: null,
+			at: nowIso(),
+			auto: true,
+			categoryId: null,
+			categoryName: null,
+			itemName: null
+		};
+	}
+}
+/**
+ * v7: a planned transfer is paid when an outflow from its from-account matches (amount ±$1, ±2 days),
+ * preferring the one whose other side landed on its to-account; the sweep is done when a
+ * bills → savings transfer lands payday −1 … +3 within max(5 %, $5) of the frozen amount.
+ */
+function matchPlannedTransfers(hh: string) {
+	const claimed = new Set<string>();
+	for (const pay of payments.values()) if (pay.txId) claimed.add(pay.txId);
+	for (const sw of sweeps.values()) if (sw.transactionId) claimed.add(sw.transactionId);
+	const outflows = (accountId: string | null) =>
+		[...txs.values()].filter(
+			(t) =>
+				t.householdId === hh &&
+				t.accountId === accountId &&
+				t.amountCents < 0 &&
+				!isHidden(t) &&
+				!claimed.has(t.id) &&
+				(t.status === 'pending' || (t.status === 'ignored' && t.ignoreReason === 'transfer'))
+		);
+	const today = todayIso();
+	for (const i of items.values()) {
+		if (i.householdId !== hh || i.archived || i.kind !== 'transfer') continue;
+		for (const d of expand(i, addDaysIso(today, -35), addDaysIso(today, 7))) {
+			const key = `${i.id}:${d}`;
+			if (payments.has(key)) continue;
+			const fits = outflows(i.fromAccountId).filter(
+				(t) => Math.abs(-t.amountCents - i.amountCents) <= 100 && dayDistance(t.postedOn, d) <= 2
+			);
+			const pick =
+				fits.find((t) => !!inflowOn(i.toAccountId, t, claimed)) ??
+				fits.find((t) => !t.transferPeerId);
+			if (!pick) continue;
+			const peer = inflowOn(i.toAccountId, pick, claimed);
+			claimed.add(pick.id);
+			if (peer) claimed.add(peer.id);
+			claimTransfer(pick, peer);
+			payments.set(key, {
+				paidAt: nowIso(),
+				paidBy: null,
+				amountCents: -pick.amountCents,
+				auto: true,
+				source: 'bank',
+				txId: pick.id
+			});
+			record(
+				hh,
+				null,
+				'transfer.planned_paid',
+				'recurring',
+				i.id,
+				`${i.name} · ${money(hh, i.amountCents)} sent (auto)`,
+				{ itemId: i.id, dueDate: d, transactionId: pick.id }
+			);
+		}
+	}
+	const bills = billsAccountOf(hh);
+	if (!bills) return;
+	const savingsIds = new Set(
+		[...accounts.values()]
+			.filter((a) => a.householdId === hh && !a.archived && a.role === 'savings')
+			.map((a) => a.id)
+	);
+	const newestFirst = [...sweeps.values()].sort((a, b) => b.weekStart.localeCompare(a.weekStart));
+	for (const sw of newestFirst) {
+		if (sw.householdId !== hh || sw.doneAt || sw.plannedCents <= 0 || sw.autoBlocked) continue;
+		const tolerance = Math.max(Math.round(sw.plannedCents * 0.05), 500);
+		const hit = outflows(bills.id).find((t) => {
+			if (t.postedOn < addDaysIso(sw.weekStart, -1) || t.postedOn > addDaysIso(sw.weekStart, 3))
+				return false;
+			if (Math.abs(-t.amountCents - sw.plannedCents) > tolerance) return false;
+			const peer = t.transferPeerId ? txs.get(t.transferPeerId) : undefined;
+			return (peer && savingsIds.has(peer.accountId ?? '')) || /sav/i.test(t.description);
+		});
+		if (!hit) continue;
+		claimed.add(hit.id);
+		claimTransfer(hit, undefined);
+		sw.doneAt = nowIso();
+		sw.doneBy = null;
+		sw.transactionId = hit.id;
+		sw.actualCents = -hit.amountCents;
+		record(
+			hh,
+			null,
+			'sweep.auto',
+			'sweep',
+			null,
+			`moved ${money(hh, -hit.amountCents)} to savings (auto)`
+		);
+	}
+}
+function sweepView(sw: SweepRec) {
+	return {
+		weekStart: sw.weekStart,
+		plannedCents: sw.plannedCents,
+		actualCents: sw.actualCents,
+		doneAt: sw.doneAt,
+		auto: !!sw.doneAt && sw.doneBy === null,
+		leftCents: sw.leftCents,
+		transactionId: sw.transactionId
+	};
+}
+function payWeekStartOf(iso: string, wd: number): string {
+	return addDaysIso(iso, -((parse(iso).getDay() - wd + 7) % 7));
+}
+type PlanLine = { kind: string; occurrence: Occ };
+/** Left-at-end of a pay week without touching sweeps (the sweep of the week after freezes it). */
+function leftFor(hh: string, date: string): number {
+	return planFor(hh, date, { withSweep: false }).leftAtEndCents;
+}
+/** GET /plan: the pay week containing `date`, computed like her note. */
+function planFor(hh: string, date: string, opts: { withSweep: boolean } = { withSweep: true }) {
+	const h = households.get(hh)!;
+	const start = payWeekStartOf(date, h.paydayWeekday);
+	const end = addDaysIso(start, 6);
+	const nextPayday = addDaysIso(start, 7);
+	const today = todayIso();
+	const isCurrent = start <= today && today <= end;
+	const isPayday = today === start;
+	const mine = [...accounts.values()].filter((a) => a.householdId === hh && !a.archived);
+	const bills = mine.find((a) => a.role === 'bills');
+	const live = (t: Tx) =>
+		t.householdId === hh &&
+		t.pending &&
+		// v7: every pending row (transfer legs included), never only the reviewed ones
+		!isHidden(t);
+	let billsAccount = null;
+	let available = 0;
+	if (bills) {
+		const ext = [...extAccounts.values()].find((x) => x.accountId === bills.id);
+		const pending = [...txs.values()]
+			.filter((t) => live(t) && t.accountId === bills.id)
+			.sort((a, b) => b.postedOn.localeCompare(a.postedOn));
+		const pendingOutCents = pending
+			.filter((t) => t.amountCents < 0)
+			.reduce((s, t) => s - t.amountCents, 0);
+		const fromBank = !!ext && ext.availableCents !== null;
+		available = fromBank ? ext.availableCents! : bills.balanceCents - pendingOutCents;
+		billsAccount = {
+			id: bills.id,
+			name: bills.name,
+			availableCents: available,
+			balanceCents: bills.balanceCents,
+			availableFromBank: fromBank,
+			pending: pending.map(txView),
+			pendingOutCents,
+			feed: ext?.lastFeed ?? null
+		};
+	}
+	const savingsIds = new Set(mine.filter((a) => a.role === 'savings').map((a) => a.id));
+	const inMath = (o: Occ) => !o.accountId || o.accountId === bills?.id;
+	const lines = {
+		bills: [] as PlanLine[],
+		funMoney: [] as PlanLine[],
+		oneOffs: [] as PlanLine[],
+		income: [] as PlanLine[],
+		savingsBills: [] as PlanLine[]
+	};
+	for (const o of calendar(hh, start, end)) {
+		const item = items.get(o.itemId)!;
+		if (o.kind === 'transfer') {
+			const fromBills = !item.fromAccountId || item.fromAccountId === bills?.id;
+			if (fromBills && roleOf(item.toAccountId) === 'fun')
+				lines.funMoney.push({ kind: 'transfer', occurrence: o });
+			else if (fromBills) lines.bills.push({ kind: 'transfer', occurrence: o });
+			else if (item.toAccountId === bills?.id) lines.income.push({ kind: 'income', occurrence: o });
+		} else if (o.kind === 'income') {
+			if (inMath(o)) lines.income.push({ kind: 'income', occurrence: o });
+		} else if (o.accountId && savingsIds.has(o.accountId)) {
+			lines.savingsBills.push({ kind: o.kind, occurrence: o });
+		} else if (inMath(o)) {
+			if (item.frequency === 'once') lines.oneOffs.push({ kind: 'oneoff', occurrence: o });
+			else lines.bills.push({ kind: o.kind, occurrence: o });
+		}
+	}
+	const unpaid = (l: PlanLine[]) =>
+		l.filter((x) => !x.occurrence.paid).reduce((s, x) => s + x.occurrence.amountCents, 0);
+	const billsOutCents = unpaid(lines.bills);
+	const funOutCents = unpaid(lines.funMoney);
+	const oneOffOutCents = unpaid(lines.oneOffs);
+	// unpaid income due inside the pay week counts (the next payday's belongs to the next week)
+	const incomeInCents = unpaid(lines.income);
+	const leftAtEndCents = available - billsOutCents - funOutCents - oneOffOutCents + incomeInCents;
+
+	let sweep: SweepRec | null = null;
+	if (opts.withSweep && bills && start <= today) {
+		const key = `${hh}:${start}`;
+		sweep = sweeps.get(key) ?? null;
+		if (!sweep) {
+			// frozen at payday: the previous week's left-at-end (never a negative plan)
+			const leftCents = leftFor(hh, addDaysIso(start, -7));
+			sweep = {
+				householdId: hh,
+				weekStart: start,
+				plannedCents: Math.max(0, leftCents),
+				actualCents: null,
+				doneAt: null,
+				doneBy: null,
+				transactionId: null,
+				leftCents,
+				autoBlocked: false
+			};
+			sweeps.set(key, sweep);
+			matchPlannedTransfers(hh);
+		}
+	}
+	const checklist: {
+		key: string;
+		label: string;
+		amountCents: number;
+		done: boolean;
+		auto: boolean;
+		transactionId: string | null;
+		itemId: string | null;
+		dueDate: string | null;
+	}[] = [];
+	if (isCurrent && bills) {
+		const item = (o: Occ, key: string, label: string) => {
+			const pay = o.paid ? payments.get(`${o.itemId}:${o.dueDate}`) : undefined;
+			const t = [...txs.values()].find(
+				(x) => x.confirmed?.itemId === o.itemId && x.confirmed?.dueDate === o.dueDate
+			);
+			checklist.push({
+				key,
+				label,
+				amountCents: o.amountCents,
+				done: !!o.paid,
+				auto: !!o.paid?.auto,
+				transactionId: pay?.txId ?? t?.id ?? null,
+				itemId: o.itemId,
+				dueDate: o.dueDate
+			});
+		};
+		for (const l of lines.income.filter((x) => x.occurrence.dueDate === start))
+			item(l.occurrence, 'paycheck', `Paycheck arrived · ${money(hh, l.occurrence.amountCents)}`);
+		for (const l of lines.funMoney.filter((x) => x.occurrence.dueDate <= addDaysIso(start, 3))) {
+			const i = items.get(l.occurrence.itemId)!;
+			const to = accounts.get(i.toAccountId ?? '');
+			const owner = to?.ownerUserId ? users.get(to.ownerUserId)?.displayName.split(' ')[0] : null;
+			const name = to?.name ?? 'fun account';
+			const label = owner && !name.includes(owner) ? `${name} (${owner})` : name;
+			item(l.occurrence, 'fun', `${money(hh, i.amountCents)} → ${label}`);
+		}
+		if (sweep)
+			checklist.push({
+				key: 'sweep',
+				label:
+					sweep.plannedCents > 0
+						? `Move ${money(hh, sweep.plannedCents)} to savings`
+						: `Nothing to move this week (−${money(hh, Math.abs(sweep.leftCents))})`,
+				amountCents: sweep.plannedCents,
+				done: !!sweep.doneAt || sweep.plannedCents <= 0,
+				auto: !!sweep.doneAt && sweep.doneBy === null,
+				transactionId: sweep.transactionId,
+				itemId: null,
+				dueDate: start
+			});
+		// shown on payday and, while something is open, through payday + 3
+		if (!isPayday && (today > addDaysIso(start, 3) || checklist.every((c) => c.done)))
+			checklist.length = 0;
+	}
+	const active = [...items.values()].filter((i) => i.householdId === hh && !i.archived);
+	return {
+		start,
+		end,
+		nextPayday,
+		isCurrent,
+		isPayday,
+		today,
+		billsAccount,
+		accounts: mine
+			.filter((a) => a.role !== 'other')
+			.map((a) => {
+				const v = accountView(a);
+				return {
+					id: a.id,
+					name: a.name,
+					role: a.role,
+					ownerName: v.ownerName,
+					balanceCents: a.balanceCents,
+					availableCents: v.availableCents
+				};
+			}),
+		...lines,
+		billsOutCents,
+		funOutCents,
+		oneOffOutCents,
+		incomeInCents,
+		leftAtEndCents,
+		checklist,
+		sweep: sweep ? sweepView(sweep) : null,
+		toReviewCount: [...txs.values()].filter(
+			(t) => t.householdId === hh && t.status === 'pending' && !isHidden(t)
+		).length,
+		setup: {
+			banksLinked: [...bankLinks.values()].some((l) => l.householdId === hh),
+			rolesSet: !!bills,
+			paycheckKnown: active.some((i) => i.kind === 'income'),
+			billsAdded: active.some((i) => i.kind === 'bill' || i.kind === 'subscription'),
+			partnerJoined: h.memberIds.length >= 2
+		}
+	};
+}
+
+/**
+ * v7 `demo-household`: shaped like theirs, dated from the most recent payday P (household payday).
+ * US Bank checking: last payday's paycheck, two $20 fun transfers and the sweep, a power bill,
+ * 3 pending card holds (−$62.40) and an available balance (= balance − pending). Ally HYS: the
+ * sweep in and a student-loan debit on the 15th. Two Ally checkings (fun money): $20 in, a spend.
+ */
+function demoBridgeHousehold(wd: number): BridgeAccount[] {
+	const today = todayIso();
+	const p = payWeekStartOf(today, wd);
+	const p7 = addDaysIso(p, -7);
+	const fifteenth =
+		`${today.slice(0, 8)}15` <= today
+			? `${today.slice(0, 8)}15`
+			: toIso(addMonthsClamp(parse(`${today.slice(0, 8)}15`), -1));
+	return [
+		{
+			id: 'hh-us',
+			org: 'U.S. Bank',
+			name: 'Easy Checking',
+			currency: 'USD',
+			balance: 240807,
+			available: 234567,
+			transactions: [
+				{ id: 'hh-pay-0', posted: p7, amount: 245000, description: 'ACME CORP PAYROLL' },
+				{
+					id: 'hh-fun-out-a0',
+					posted: p7,
+					amount: -2000,
+					description: 'ONLINE TRANSFER TO ALLY ··4411'
+				},
+				{
+					id: 'hh-fun-out-b0',
+					posted: p7,
+					amount: -2000,
+					description: 'ONLINE TRANSFER TO ALLY ··4412'
+				},
+				{
+					id: 'hh-sweep-out-0',
+					posted: p7,
+					amount: -18000,
+					description: 'ONLINE TRANSFER TO ALLY SAVINGS'
+				},
+				{ id: 'hh-xcel', posted: addDaysIso(p7, 3), amount: -8412, description: 'XCEL ENERGY' },
+				{
+					id: 'hh-kwik',
+					posted: today,
+					amount: -2410,
+					description: 'KWIK TRIP 1234',
+					pending: true
+				},
+				{
+					id: 'hh-target',
+					posted: addDaysIso(today, -1),
+					amount: -3180,
+					description: 'TARGET T-2187',
+					pending: true
+				},
+				{ id: 'hh-sbux', posted: today, amount: -650, description: 'STARBUCKS 4471', pending: true }
+			]
+		},
+		{
+			id: 'hh-hys',
+			org: 'Ally Bank',
+			name: 'Online Savings',
+			currency: 'USD',
+			balance: 1200000,
+			available: 1200000,
+			transactions: [
+				{ id: 'hh-sweep-in-0', posted: p7, amount: 18000, description: 'TRANSFER FROM US BANK' },
+				{ id: 'hh-loan', posted: fifteenth, amount: -31200, description: 'NELNET STUDENT LOAN' }
+			]
+		},
+		{
+			id: 'hh-fun-a',
+			org: 'Ally Bank',
+			name: 'Spending Account ··4411',
+			currency: 'USD',
+			balance: 8320,
+			available: 8320,
+			transactions: [
+				{ id: 'hh-fun-in-a0', posted: p7, amount: 2000, description: 'TRANSFER FROM US BANK' },
+				{
+					id: 'hh-chipotle',
+					posted: addDaysIso(today, -2),
+					amount: -1270,
+					description: 'CHIPOTLE 2231'
+				}
+			]
+		},
+		{
+			id: 'hh-fun-b',
+			org: 'Ally Bank',
+			name: 'Spending Account ··4412',
+			currency: 'USD',
+			balance: 4175,
+			available: 4175,
+			transactions: [
+				{ id: 'hh-fun-in-b0', posted: p7, amount: 2000, description: 'TRANSFER FROM US BANK' },
+				{
+					id: 'hh-tj',
+					posted: addDaysIso(today, -3),
+					amount: -2210,
+					description: 'TRADER JOES 552'
+				}
+			]
+		}
+	];
+}
+/** `?phase=payday`: this payday's paycheck, the fun transfers due this pay week and the sweep. */
+function applyHouseholdPayday(hh: string, data: BridgeAccount[]) {
+	const h = households.get(hh)!;
+	const us = data.find((a) => a.id === 'hh-us');
+	if (!us) return;
+	const p = payWeekStartOf(todayIso(), h.paydayWeekday);
+	const add = (acc: BridgeAccount | undefined, tx: BridgeTx) => {
+		if (!acc || acc.transactions.some((t) => t.id === tx.id)) return;
+		acc.transactions.push(tx);
+		if (!tx.pending) acc.balance += tx.amount;
+		if (acc.available !== null) acc.available += tx.amount;
+	};
+	add(us, { id: `hh-pay-${p}`, posted: p, amount: 245000, description: 'ACME CORP PAYROLL' });
+	const funAccounts = [...accounts.values()].filter(
+		(a) => a.householdId === hh && a.role === 'fun'
+	);
+	const bridgeOf = (accountId: string) => {
+		const ext = [...extAccounts.values()].find((x) => x.accountId === accountId);
+		return data.find((d) => d.id === ext?.externalId);
+	};
+	for (const l of planFor(hh, p).funMoney) {
+		const i = items.get(l.occurrence.itemId)!;
+		if (!funAccounts.some((a) => a.id === i.toAccountId)) continue;
+		const d = l.occurrence.dueDate;
+		const tag = `${i.id.slice(0, 8)}-${d}`;
+		add(us, {
+			id: `hh-fun-out-${tag}`,
+			posted: d,
+			amount: -i.amountCents,
+			description: `ONLINE TRANSFER TO ALLY ${i.name.toUpperCase()}`,
+			// today's transfers are still pending at the bank (the "only one pending" report)
+			pending: true
+		});
+		add(bridgeOf(i.toAccountId!), {
+			id: `hh-fun-in-${tag}`,
+			posted: d,
+			amount: i.amountCents,
+			description: 'TRANSFER FROM US BANK',
+			pending: true
+		});
+	}
+	const sweep = planFor(hh, p).sweep;
+	if (sweep && sweep.plannedCents > 0) {
+		const savings = [...accounts.values()].find(
+			(a) => a.householdId === hh && a.role === 'savings'
+		);
+		add(us, {
+			id: `hh-sweep-out-${p}`,
+			posted: p,
+			amount: -sweep.plannedCents,
+			description: 'ONLINE TRANSFER TO ALLY SAVINGS'
+		});
+		if (savings)
+			add(bridgeOf(savings.id), {
+				id: `hh-sweep-in-${p}`,
+				posted: p,
+				amount: sweep.plannedCents,
+				description: 'TRANSFER FROM US BANK'
+			});
+	}
+}
+
 // ---- http -------------------------------------------------------------------------------
 function send(res: ServerResponse, status: number, body?: unknown) {
 	if (body === undefined) {
@@ -2927,7 +3592,8 @@ const server = createServer(async (req, res) => {
 				bridge,
 				billSuggestions,
 				lastRematch,
-				matcherRuns
+				matcherRuns,
+				sweeps
 			])
 				map.clear();
 			codes.length = 0;
@@ -2946,6 +3612,18 @@ const server = createServer(async (req, res) => {
 			for (const link of bankLinks.values()) {
 				if (!link.syncEnabled) continue;
 				if (only && link.householdId !== only) continue;
+				if (phase === 'household') {
+					bridge.set(link.id, demoBridgeHousehold(households.get(link.householdId)!.paydayWeekday));
+					syncLink(link, null);
+					synced++;
+					continue;
+				}
+				if (phase === 'payday') {
+					applyHouseholdPayday(link.householdId, bridge.get(link.id) ?? []);
+					syncLink(link, null);
+					synced++;
+					continue;
+				}
 				if (phase) {
 					applyPhase(bridge.get(link.id) ?? [], phase);
 					syncLink(link, null);
@@ -3212,6 +3890,21 @@ const server = createServer(async (req, res) => {
 				h.autoIgnoreTransfers = b.autoIgnoreTransfers;
 				changed.push('transfers');
 			}
+			if ('paydayWeekday' in b) {
+				const wd = b.paydayWeekday;
+				if (typeof wd !== 'number' || !Number.isInteger(wd) || wd < 0 || wd > 6)
+					return send(res, 400, {
+						title: 'Validation failed',
+						status: 400,
+						errors: { paydayWeekday: ['Use 0 (Sunday) to 6 (Saturday)'] }
+					});
+				if (wd !== h.paydayWeekday)
+					// sweeps not done yet were frozen for the old weeks
+					for (const [key, sw] of sweeps)
+						if (sw.householdId === h.id && !sw.doneAt) sweeps.delete(key);
+				h.paydayWeekday = wd;
+				changed.push('payday');
+			}
 			if ('autoMatchLevel' in b) {
 				if (
 					b.autoMatchLevel !== 'off' &&
@@ -3333,7 +4026,9 @@ const server = createServer(async (req, res) => {
 				note: (b.note as string | null) ?? null,
 				createdAt: nowIso(),
 				updatedAt: nowIso(),
-				archived: false
+				archived: false,
+				role: 'other',
+				ownerUserId: null
 			};
 			accounts.set(a.id, a);
 			snapshots.set(a.id, [
@@ -3361,6 +4056,38 @@ const server = createServer(async (req, res) => {
 					errors: { filter: ['Unknown filter'] }
 				});
 			return send(res, 200, accountTransactions(hh, a.id, url.searchParams));
+		}
+		// v7: account roles (setting `bills` moves the role off the previous bills account)
+		mm = /^\/v1\/accounts\/([^/]+)\/role$/.exec(p);
+		if (mm && m === 'PUT') {
+			const a = accounts.get(mm[1]);
+			if (!a || a.householdId !== hh || a.archived) return problem(res, 404, 'Not found');
+			const b = await readJson(req);
+			const role = String(b.role ?? '');
+			if (!['bills', 'savings', 'fun', 'other'].includes(role))
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { role: ['Use bills, savings, fun or other'] }
+				});
+			const owner = (b.ownerUserId as string | null | undefined) || null;
+			const h = households.get(hh)!;
+			if (owner && !h.memberIds.includes(owner))
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { ownerUserId: ['Not a member of this household'] }
+				});
+			if (role === 'bills')
+				for (const o of accounts.values())
+					if (o.householdId === hh && o.id !== a.id && o.role === 'bills') o.role = 'other';
+			a.role = role as AccountRole;
+			a.ownerUserId = role === 'fun' ? owner : null;
+			a.updatedAt = nowIso();
+			if (role === 'fun') for (const t of txs.values()) if (t.accountId === a.id) quietFun(t);
+			record(hh, user, 'account.updated', 'account', a.id, `set ${a.name} as ${role}`);
+			matchPlannedTransfers(hh);
+			return send(res, 200, accountView(a));
 		}
 		mm = /^\/v1\/accounts\/([^/]+)(\/balance|\/history)?$/.exec(p);
 		if (mm) {
@@ -3473,38 +4200,9 @@ const server = createServer(async (req, res) => {
 		}
 		if (p === '/v1/recurring' && m === 'POST') {
 			const b = await readJson(req);
-			if (!b.name || !b.kind || typeof b.amountCents !== 'number' || !b.frequency || !b.anchorDate)
-				return problem(res, 400, 'Validation failed');
-			const names = bankNamesFrom(b, []);
-			if (typeof names === 'string')
-				return send(res, 400, {
-					title: 'Validation failed',
-					status: 400,
-					errors: { bankNames: [names] }
-				});
-			const i: Item = {
-				id: randomUUID(),
-				householdId: hh,
-				name: String(b.name),
-				kind: String(b.kind),
-				amountCents: b.amountCents,
-				categoryId: (b.categoryId as string | null) || null,
-				accountId: (b.accountId as string | null) || null,
-				frequency: String(b.frequency),
-				anchorDate: String(b.anchorDate),
-				endDate: (b.endDate as string | null) || null,
-				autoPay: Boolean(b.autoPay),
-				notes: (b.notes as string | null) ?? null,
-				url: (b.url as string | null) ?? null,
-				bankNames: [],
-				bankNamesLearned: [],
-				amountVaries: b.amountVaries === true,
-				createdAt: nowIso(),
-				updatedAt: nowIso(),
-				archived: false
-			};
-			items.set(i.id, i);
-			applyBankNames(i, names);
+			const errors = itemErrors(hh, b, '');
+			if (errors) return send(res, 400, { title: 'Validation failed', status: 400, errors });
+			const i = buildItem(hh, b);
 			record(
 				hh,
 				user,
@@ -3514,7 +4212,35 @@ const server = createServer(async (req, res) => {
 				`added ${i.kind} ${i.name} · ${$(i.amountCents)}`
 			);
 			rematchHousehold(hh); // v6: a new bill is matched against To review right away
+			matchPlannedTransfers(hh);
 			return send(res, 201, itemView(i));
+		}
+		// v7: all-or-nothing bulk create (Paste your notes, fun money)
+		if (p === '/v1/recurring/bulk' && m === 'POST') {
+			const b = await readJson(req);
+			const list = Array.isArray(b.items) ? (b.items as Record<string, unknown>[]) : null;
+			if (!list || list.length === 0 || list.length > 100)
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { items: ['Send 1 to 100 items'] }
+				});
+			const errors: Record<string, string[]> = {};
+			list.forEach((it, idx) => Object.assign(errors, itemErrors(hh, it ?? {}, `items[${idx}].`)));
+			if (Object.keys(errors).length)
+				return send(res, 400, { title: 'Validation failed', status: 400, errors });
+			const created = list.map((it) => buildItem(hh, it));
+			record(
+				hh,
+				user,
+				'recurring.created',
+				'recurring',
+				null,
+				`added ${created.length} item${created.length === 1 ? '' : 's'}`
+			);
+			rematchHousehold(hh);
+			matchPlannedTransfers(hh);
+			return send(res, 201, { items: created.map(itemView) });
 		}
 		// --- v5: create a bill from a transaction, payments, link a transaction
 		if (p === '/v1/recurring/from-transaction' && m === 'POST') {
@@ -3550,7 +4276,9 @@ const server = createServer(async (req, res) => {
 				amountVaries: false,
 				createdAt: nowIso(),
 				updatedAt: nowIso(),
-				archived: false
+				archived: false,
+				fromAccountId: null,
+				toAccountId: null
 			};
 			items.set(i.id, i);
 			applyBankNames(i, [(t.payee ?? t.description).slice(0, 80)]);
@@ -3679,6 +4407,10 @@ const server = createServer(async (req, res) => {
 				if (m === 'GET') return send(res, 200, itemView(i));
 				if (m === 'PUT') {
 					const b = await readJson(req);
+					const errors = itemErrors(hh, b, '');
+					if (errors) return send(res, 400, { title: 'Validation failed', status: 400, errors });
+					i.fromAccountId = b.kind === 'transfer' ? String(b.fromAccountId) : null;
+					i.toAccountId = b.kind === 'transfer' ? String(b.toAccountId) : null;
 					const names = bankNamesFrom(b, i.bankNames);
 					if (typeof names === 'string')
 						return send(res, 400, {
@@ -3704,6 +4436,7 @@ const server = createServer(async (req, res) => {
 					applyBankNames(i, names);
 					record(hh, user, 'recurring.updated', 'recurring', i.id, `updated ${i.name}`);
 					rematchHousehold(hh);
+					matchPlannedTransfers(hh);
 					return send(res, 200, itemView(i));
 				}
 				if (m === 'DELETE') {
@@ -3900,51 +4633,51 @@ const server = createServer(async (req, res) => {
 			}
 		}
 
+		// --- v7: the Friday plan + sweep
+		if (p === '/v1/plan' && m === 'GET') {
+			const date = url.searchParams.get('date') ?? todayIso();
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { date: ['Use YYYY-MM-DD'] }
+				});
+			return send(res, 200, planFor(hh, date));
+		}
+		if (p === '/v1/plan/sweep/done' && (m === 'POST' || m === 'DELETE')) {
+			const b = await readJson(req);
+			const ws = String(b.weekStart ?? '');
+			const h = households.get(hh)!;
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(ws) || payWeekStartOf(ws, h.paydayWeekday) !== ws)
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: { weekStart: ['Use the payday that starts the week'] }
+				});
+			planFor(hh, ws); // freezes the sweep if it is not there yet
+			const sw = sweeps.get(`${hh}:${ws}`);
+			if (!sw) return problem(res, 404, 'Not found', 'No sweep for that week');
+			if (m === 'POST') {
+				sw.doneAt = nowIso();
+				sw.doneBy = user.id;
+				sw.actualCents = typeof b.actualCents === 'number' ? b.actualCents : sw.plannedCents;
+				record(hh, user, 'sweep.done', 'sweep', null, `moved ${$(sw.actualCents)} to savings`);
+			} else {
+				sw.doneAt = null;
+				sw.doneBy = null;
+				sw.actualCents = null;
+				sw.transactionId = null;
+				sw.autoBlocked = true;
+			}
+			return send(res, 200, sweepView(sw));
+		}
+
 		// --- v4: week view
 		if (p === '/v1/week' && m === 'GET') {
 			const h = households.get(hh)!;
 			const start = url.searchParams.get('start') ?? todayIso();
 			if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return problem(res, 400, 'Validation failed');
 			return send(res, 200, weekViewFor(hh, weekStartFor(start, h.weekStart)));
-		}
-
-		// --- pay period
-		if (p === '/v1/payperiod' && m === 'GET') {
-			const h = households.get(hh)!;
-			if (!h.payAnchorDate) return problem(res, 409, 'Pay period not configured');
-			const date = url.searchParams.get('date') ?? todayIso();
-			const bounds = periodFor(h.payPeriod, h.payAnchorDate, date);
-			const occ = calendar(hh, bounds.start, bounds.end);
-			const out = occ.filter((o) => o.kind !== 'income');
-			const dueCents = out.reduce((s, o) => s + o.amountCents, 0);
-			const paidCents = out
-				.filter((o) => o.paid)
-				.reduce((s, o) => s + (o.paid?.amountCents ?? 0), 0);
-			const remainingCents = out.filter((o) => !o.paid).reduce((s, o) => s + o.amountCents, 0);
-			const liquid = [...accounts.values()]
-				.filter(
-					(a) => a.householdId === hh && !a.archived && (a.type === 'checking' || a.type === 'cash')
-				)
-				.reduce((s, a) => s + spendableOf(a), 0);
-			return send(res, 200, {
-				period: h.payPeriod,
-				start: bounds.start,
-				end: bounds.end,
-				nextPayday: bounds.nextPayday,
-				daysLeft: bounds.daysLeft,
-				expectedIncomeCents: occ
-					.filter((o) => o.kind === 'income')
-					.reduce((s, o) => s + o.amountCents, 0),
-				dueCents,
-				paidCents,
-				remainingCents,
-				spendableCents: liquid - remainingCents,
-				occurrences: occ,
-				expensesCents: hhExpenses(hh, bounds.start, bounds.end).reduce(
-					(s, e) => s + e.amountCents,
-					0
-				)
-			});
 		}
 
 		// --- todos
@@ -4139,7 +4872,7 @@ const server = createServer(async (req, res) => {
 					'Security__DataKey is not set',
 					'https://couplescash.app/problems/bank_sync_not_configured'
 				);
-			if (token !== 'demo-token' && token !== 'demo-v5')
+			if (token !== 'demo-token' && token !== 'demo-v5' && token !== 'demo-household')
 				return send(res, 400, {
 					title: 'Validation failed',
 					status: 400,
@@ -4159,7 +4892,14 @@ const server = createServer(async (req, res) => {
 				bridgeErrors: []
 			};
 			bankLinks.set(link.id, link);
-			bridge.set(link.id, token === 'demo-v5' ? demoBridgeV5() : demoBridge());
+			bridge.set(
+				link.id,
+				token === 'demo-household'
+					? demoBridgeHousehold(households.get(hh)!.paydayWeekday)
+					: token === 'demo-v5'
+						? demoBridgeV5()
+						: demoBridge()
+			);
 			record(hh, user, 'bank.linked', 'bank_link', link.id, `linked bank ${link.name}`);
 			syncLink(link, user); // first sync inline
 			return send(res, 201, linkView(link));
@@ -4186,7 +4926,9 @@ const server = createServer(async (req, res) => {
 					note: null,
 					createdAt: nowIso(),
 					updatedAt: nowIso(),
-					archived: false
+					archived: false,
+					role: 'other',
+					ownerUserId: null
 				};
 				accounts.set(account.id, account);
 				snapshots.set(account.id, [
@@ -4267,11 +5009,7 @@ const server = createServer(async (req, res) => {
 
 		// --- v6: pending by account, the all-accounts feed, found bills, matcher
 		if (p === '/v1/pending' && m === 'GET') {
-			const live = (t: Tx) =>
-				t.householdId === hh &&
-				t.pending &&
-				!isHidden(t) &&
-				(t.status === 'pending' || t.status === 'confirmed');
+			const live = (t: Tx) => t.householdId === hh && t.pending && !isHidden(t);
 			const rowsAll = [...txs.values()].filter(live);
 			const groupOf = (
 				head: {
@@ -4431,7 +5169,9 @@ const server = createServer(async (req, res) => {
 				amountVaries: bs.amountVaries,
 				createdAt: nowIso(),
 				updatedAt: nowIso(),
-				archived: false
+				archived: false,
+				fromAccountId: null,
+				toAccountId: null
 			};
 			items.set(i.id, i);
 			applyBankNames(i, [bs.bankName.slice(0, 80)]);

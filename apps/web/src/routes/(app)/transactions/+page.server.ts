@@ -13,6 +13,8 @@ export const load: PageServerLoad = async (event) => {
 	const empty = {
 		accountId,
 		q,
+		// v7: fun-money accounts are personal; hidden unless asked for
+		showFun: event.url.searchParams.get('fun') === '1',
 		added: event.url.searchParams.has('added'),
 		feed: null as TransactionFeed | null,
 		review: [] as InboxItem[],

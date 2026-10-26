@@ -1,14 +1,14 @@
 import { expect, test } from '@playwright/test';
-import { registerWithHousehold, todayIso } from './helpers';
+import { registerWithHousehold, shiftDays, todayIso } from './helpers';
 
-test('create a monthly bill: it appears on the calendar and can be marked paid', async ({
+test('bills: grouped by pay week with chips; a bill can be marked paid on its page', async ({
 	page
 }) => {
 	await registerWithHousehold(page);
 	const today = todayIso();
 
 	await page.goto('/bills/new');
-	await page.getByRole('radiogroup', { name: 'Kind' }).getByText('Bill').click();
+	await page.getByRole('radiogroup', { name: 'Kind' }).getByText('Bill', { exact: true }).click();
 	await page.getByLabel('Name', { exact: true }).fill('Rent');
 	await page.getByLabel('Amount').fill('1800');
 	await page.getByLabel('Repeats').selectOption('monthly');
@@ -18,47 +18,39 @@ test('create a monthly bill: it appears on the calendar and can be marked paid',
 	await expect(page).toHaveURL(/\/bills\/[0-9a-f-]+/);
 	await expect(page.getByRole('heading', { name: 'Rent' })).toBeVisible();
 
-	// list shows it with the monthly-equivalent total
+	// a yearly bill far out lands under "Later"
+	await page.goto('/bills/new');
+	await page.getByLabel('Name', { exact: true }).fill('Car insurance');
+	await page.getByLabel('Amount').fill('432');
+	await page.getByLabel('Repeats').selectOption('yearly');
+	await page.getByLabel('First due date').fill(shiftDays(today, 90));
+	await page.getByRole('button', { name: 'Save', exact: true }).click();
+	await expect(page).toHaveURL(/\/bills\/[0-9a-f-]+/);
+
 	await page.goto('/bills');
-	await expect(page.getByRole('link', { name: /Rent/ })).toBeVisible();
-	await expect(page.getByTestId('monthly-total')).toHaveText('−$1,800.00');
-	await page.getByRole('radio', { name: 'Income' }).click();
-	await expect(page.getByText('No income yet.')).toBeVisible();
-
-	// Bills › Calendar: the day has an item, open the drawer and mark it paid
-	await page.getByRole('tab', { name: 'Calendar' }).click();
-	await expect(page).toHaveURL(/view=calendar/);
-	const day = page.locator(`[data-date="${today}"]`);
-	await expect(day).toHaveAttribute('aria-label', /1 item/);
-	await day.click();
-	const dialog = page.getByRole('dialog');
-	await expect(dialog.getByText('Rent')).toBeVisible();
-	const paid = dialog.getByRole('button', { name: 'Mark Rent paid' });
-	await paid.click();
-	await expect(dialog.getByRole('button', { name: 'Mark Rent unpaid' })).toHaveAttribute(
-		'aria-pressed',
-		'true'
-	);
-
-	// persisted: reload and it is still paid
-	await page.reload();
-	await page.locator(`[data-date="${today}"]`).click();
+	const week = page.locator('[data-group="week"]');
+	await expect(week.getByRole('heading', { name: 'This pay week' })).toBeVisible();
+	await expect(week.getByTestId('bill-row').filter({ hasText: 'Rent' })).toBeVisible();
 	await expect(
-		page.getByRole('dialog').getByRole('button', { name: 'Mark Rent unpaid' })
+		page
+			.locator('[data-group="later"]')
+			.getByTestId('bill-row')
+			.filter({ hasText: 'Car insurance' })
 	).toBeVisible();
+	await expect(page.getByRole('link', { name: /Calendar/ })).toHaveCount(0);
+	await page.getByRole('radio', { name: 'Income' }).click();
+	await expect(page.getByTestId('bills-none')).toBeVisible();
+	await page.getByRole('radio', { name: 'Transfers' }).click();
+	await expect(page.getByTestId('bills-none')).toBeVisible();
+	await page.getByRole('radio', { name: 'All' }).click();
 
-	// toggle back
-	await page.getByRole('dialog').getByRole('button', { name: 'Mark Rent unpaid' }).click();
-	await expect(
-		page.getByRole('dialog').getByRole('button', { name: 'Mark Rent paid' })
-	).toHaveAttribute('aria-pressed', 'false');
-
-	// close the drawer, then month navigation uses the proxy and the monthly item shows up next month too
-	await page.getByRole('dialog').getByRole('button', { name: 'Close' }).click();
-	await expect(page.getByRole('dialog')).toHaveCount(0);
-	const label = await page.getByTestId('month-label').innerText();
-	await page.getByRole('button', { name: 'Next month' }).click();
-	await expect(page.getByTestId('month-label')).not.toHaveText(label);
-	await expect(page.locator('[data-date][aria-label*="1 item"]')).toHaveCount(1);
-	expect(page.url()).toMatch(/\?view=calendar&m=\d{4}-\d{2}$/);
+	// the bill's page: tick it paid, it stays paid, untick
+	await page.getByTestId('bill-row').filter({ hasText: 'Rent' }).click();
+	const row = page.getByTestId('occurrence-row').filter({ hasText: 'Rent' }).first();
+	await row.getByRole('button', { name: 'Mark Rent paid' }).click();
+	await expect(row.getByRole('button', { name: 'Mark Rent unpaid' })).toBeVisible();
+	await page.reload();
+	const again = page.getByTestId('occurrence-row').first();
+	await again.getByRole('button', { name: 'Mark Rent unpaid' }).click();
+	await expect(again.getByRole('button', { name: 'Mark Rent paid' })).toBeVisible();
 });

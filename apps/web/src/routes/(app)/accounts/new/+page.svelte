@@ -10,7 +10,7 @@
 
 <svelte:head><title>New account · CouplesCash</title></svelte:head>
 
-<AppBar title="New account" back="/accounts" />
+<AppBar title="New account" back="/settings#accounts" />
 
 <main class="px-4 pt-2">
 	<form

@@ -1,7 +1,6 @@
 import { fail, redirect, type RequestEvent } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import type {
-	Account,
 	AuthResult,
 	BankLink,
 	Household,
@@ -20,21 +19,30 @@ import {
 } from '#lib/server/api.ts';
 import { setThemeCookie, type Theme } from '#lib/server/cookies.ts';
 import { echo, parseHouseholdSettings } from '#lib/server/forms.ts';
+import {
+	funRows,
+	paycheckGuess,
+	roleDefaults,
+	roleRows,
+	saveFun,
+	savePayday,
+	saveRoles,
+	setupData
+} from '#lib/server/setup.ts';
 
 /**
- * v6: one settings page (PLAN-V6 §4) with three sections: You (name, password, passkeys, theme,
- * notifications), Household (name, currency, week start, pay period, weekly target, partner,
- * auto-match level, transfers) and Banks (linked banks, CSV import, re-check matches).
+ * v7: one settings page (PLAN-V7 "Navigation"): You (name, password, passkeys, theme, payday push
+ * + bill reminders), Household (partner, payday, fun money, auto-match level), Accounts (role +
+ * owner per account) and Banks (linked banks with feed diagnostics, re-check, import a statement).
  */
 export const load: PageServerLoad = async (event) => {
 	const v = endpoints(event);
 	const quiet = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
 	const hasHousehold = !!event.locals.household;
-	const [me, vapidPublicKey, accounts, banks, matcher, csvCount] = await Promise.all([
+	const [me, vapidPublicKey, setup, matcher, csvCount] = await Promise.all([
 		api(event).get<{ user: User; household: Household | null }>('/auth/me'),
 		quiet(v.push.vapidPublicKey(), null as string | null),
-		hasHousehold ? quiet(api(event).get<Account[]>('/accounts'), [] as Account[]) : [],
-		hasHousehold ? quiet(v.banks.list(), null as BankLink[] | null) : null,
+		hasHousehold ? setupData(event) : null,
 		hasHousehold ? quiet(v.matcher.status(), null as MatcherStatus | null) : null,
 		hasHousehold
 			? quiet(
@@ -44,7 +52,24 @@ export const load: PageServerLoad = async (event) => {
 			: 0
 	]);
 	const prefs = vapidPublicKey ? await quiet(v.push.prefs(), null as PushPrefs | null) : null;
-	return { me, vapidPublicKey, prefs, accounts, banks, matcher, csvCount };
+	const accounts = setup?.accounts ?? [];
+	const banks = setup?.banks ?? null;
+	const rows = roleRows(accounts, banks);
+	return {
+		me,
+		vapidPublicKey,
+		prefs,
+		accounts,
+		banks: banks as BankLink[] | null,
+		matcher,
+		csvCount,
+		plan: setup?.plan ?? null,
+		categories: setup?.categories ?? [],
+		rows,
+		defaults: roleDefaults(rows, me.household),
+		funRows: funRows(accounts, setup?.items ?? []),
+		paycheck: setup ? await paycheckGuess(event, setup.items, setup.plan) : null
+	};
 };
 
 async function saveHousehold(event: RequestEvent, section: string) {
@@ -55,13 +80,7 @@ async function saveHousehold(event: RequestEvent, section: string) {
 		await endpoints(event).household.update(parsed.value);
 	} catch (e) {
 		const message = isApiError(e)
-			? (e.field('currency') ??
-				e.field('timezone') ??
-				e.field('payAnchorDate') ??
-				e.field('defaultAccountId') ??
-				e.field('weeklySpendCents') ??
-				e.field('autoMatchLevel') ??
-				e.message)
+			? (e.field('timezone') ?? e.field('paydayWeekday') ?? e.field('autoMatchLevel') ?? e.message)
 			: 'Could not save. Try again.';
 		return fail(isApiError(e) ? e.status : 500, { section, error: message, values: echo(data) });
 	}
@@ -129,12 +148,16 @@ export const actions: Actions = {
 		if (!Number.isInteger(hourLocal) || hourLocal < 0 || hourLocal > 23)
 			return fail(400, { pushError: 'Pick an hour.' });
 		try {
+			// v7: payday push + bill reminders only (partner activity and week summaries are gone;
+			// the payday push rides on `weekSummaryEnabled` for API builds without `paydayEnabled`)
+			const payday = data.get('paydayEnabled') === 'on';
 			const prefs = await endpoints(event).push.updatePrefs({
 				remindersEnabled: data.get('remindersEnabled') === 'on',
 				daysBefore: daysBefore.length ? daysBefore : [1],
 				hourLocal,
-				activityEnabled: data.get('activityEnabled') === 'on',
-				weekSummaryEnabled: data.get('weekSummaryEnabled') === 'on'
+				activityEnabled: false,
+				weekSummaryEnabled: payday,
+				paydayEnabled: payday
 			});
 			return { prefs, saved: true };
 		} catch (e) {
@@ -170,9 +193,20 @@ export const actions: Actions = {
 	},
 	// --- Household
 	household: (event) => saveHousehold(event, 'household'),
-	payperiod: (event) => saveHousehold(event, 'payperiod'),
-	weekly: (event) => saveHousehold(event, 'weekly'),
 	matching: (event) => saveHousehold(event, 'matching'),
+	payday: async (event) => {
+		const r = await savePayday(event, await event.request.formData());
+		return 'ok' in r ? { section: 'payday', saved: true } : r;
+	},
+	fun: async (event) => {
+		const r = await saveFun(event, await event.request.formData());
+		return 'ok' in r ? { section: 'fun', saved: true } : r;
+	},
+	// --- Accounts
+	roles: async (event) => {
+		const r = await saveRoles(event, await event.request.formData());
+		return 'ok' in r ? { section: 'roles', saved: true } : r;
+	},
 	// --- Banks
 	rematch: async (event) => {
 		try {

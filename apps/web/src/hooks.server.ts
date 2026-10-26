@@ -4,6 +4,7 @@ import { building } from '$app/env';
 import { decodeJwt } from '#lib/server/jwt.ts';
 import { ACCESS_COOKIE, REFRESH_COOKIE, isSecure, readTheme } from '#lib/server/cookies.ts';
 import { refreshSession } from '#lib/server/api.ts';
+import { legacyRedirect } from '#lib/utils/redirects.ts';
 
 const PUBLIC_PATHS = new Set([
 	'/login',
@@ -30,6 +31,13 @@ function isPublic(pathname: string): boolean {
 
 export const handle: Handle = async ({ event, resolve }) => {
 	const { pathname } = event.url;
+
+	// 0. v7: removed screens land on their new home (before auth, so a sign-in returns there)
+	const moved =
+		!building && (event.request.method === 'GET' || event.request.method === 'HEAD')
+			? legacyRedirect(pathname)
+			: null;
+	if (moved) redirect(308, moved);
 
 	// 1. Theme
 	event.locals.theme = readTheme(event.cookies);

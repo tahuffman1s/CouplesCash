@@ -1,24 +1,17 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
 	import { enhance } from '$app/forms';
-	import type { PayPeriod } from '#lib/types.ts';
-	import { AUTO_MATCH_LEVELS, COMMON_CURRENCIES, PAY_PERIODS } from '#lib/types.ts';
+	import { AUTO_MATCH_LEVELS } from '#lib/types.ts';
 	import type { PageProps } from './$types';
+	import AccountRolePicker from '#lib/components/AccountRolePicker.svelte';
 	import AppBar from '#lib/components/AppBar.svelte';
-	import HelperText from '#lib/components/HelperText.svelte';
+	import FunMoneyFields from '#lib/components/FunMoneyFields.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import InstallHint from '#lib/components/InstallHint.svelte';
 	import NotificationsCard from '#lib/components/NotificationsCard.svelte';
+	import PaydayFields from '#lib/components/PaydayFields.svelte';
 	import ThemePicker from '#lib/components/ThemePicker.svelte';
-	import { centsToInput, currencySymbol, formatMoney } from '#lib/utils/money.ts';
-	import {
-		diffDays,
-		formatWeekdayDate,
-		isValidISODate,
-		relativeTime,
-		today
-	} from '#lib/utils/dates.ts';
-	import { nextPayday } from '#lib/utils/payperiod.ts';
+	import { relativeTime } from '#lib/utils/dates.ts';
+	import { feedAdvice, feedSummary, firstName, weekdayName } from '#lib/utils/plan.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 
 	let { data, form }: PageProps = $props();
@@ -27,26 +20,9 @@
 	const f = $derived(form as Record<string, unknown> | null);
 	const errorFor = (section: string) =>
 		f?.section === section && typeof f.error === 'string' ? f.error : undefined;
-	const valuesFor = (section: string) =>
-		f?.section === section ? ((f.values as Record<string, string> | undefined) ?? {}) : {};
 
 	let changingPassword = $state(false);
-	const initial = untrack(() => ({
-		payPeriod: (data.household?.payPeriod ?? 'biweekly') as PayPeriod,
-		anchor: data.household?.payAnchorDate ?? '',
-		currency: data.household?.currency ?? 'USD'
-	}));
-	let payPeriod = $state<PayPeriod>(initial.payPeriod);
-	let anchor = $state(initial.anchor);
-	let currencyPick = $state(
-		COMMON_CURRENCIES.some((c) => c.code === initial.currency) ? initial.currency : 'other'
-	);
 	let detectedTz = $state('');
-	const preview = $derived.by(() => {
-		if (!anchor || !isValidISODate(anchor)) return null;
-		const next = nextPayday(payPeriod, anchor, today());
-		return { date: next, days: diffDays(today(), next) };
-	});
 	$effect(() => {
 		try {
 			detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
@@ -67,12 +43,6 @@
 		if (typeof f.rematchError === 'string') toasts.show(f.rematchError, 'error');
 	});
 
-	const bankLine = $derived.by(() => {
-		if (data.banks === null) return 'Not set up on this server';
-		if (data.banks.length === 0) return 'Pull balances and transactions with SimpleFIN';
-		const broken = data.banks.filter((b) => b.lastError).length;
-		return `${data.banks.length} linked${broken ? ` · ${broken} need${broken === 1 ? 's' : ''} attention` : ''}`;
-	});
 	const matcherLine = $derived.by(() => {
 		const m = data.matcher;
 		if (!m) return null;
@@ -94,6 +64,20 @@
 	});
 	const partner = $derived(hh?.members.find((m) => m.id !== data.user?.id) ?? null);
 	const level = $derived(hh?.autoMatchLevel ?? 'all');
+	const paydayWd = $derived(hh?.paydayWeekday ?? 5);
+	const incomeCategoryId = $derived(
+		data.categories.find((c) => c.name.toLowerCase() === 'income')?.id ?? null
+	);
+	/** pending rows we show per account (bills account from the plan; others unknown) */
+	const shownPending = (accountId: string | null) =>
+		accountId && accountId === data.plan?.billsAccount?.id
+			? data.plan.billsAccount.pending.length
+			: null;
+	const feeds = $derived(
+		(data.banks ?? []).flatMap((l) =>
+			l.accounts.map((x) => ({ link: l, ext: x, summary: feedSummary(x.lastFeed) }))
+		)
+	);
 
 	const card = 'card border border-base-300/60 bg-base-100 shadow-sm';
 	const row = 'flex min-h-14 items-center gap-3 rounded-xl px-1 py-2 hover:bg-base-200';
@@ -103,23 +87,29 @@
 		() =>
 		async ({ update }: { update: (o?: { reset?: boolean }) => Promise<void> }) =>
 			update({ reset: false });
+	const sections = $derived([
+		{ id: 'you', l: 'You' },
+		...(hh
+			? [
+					{ id: 'household', l: 'Household' },
+					{ id: 'accounts', l: 'Accounts' },
+					{ id: 'banks', l: 'Banks' }
+				]
+			: [])
+	]);
 </script>
 
 <svelte:head><title>Settings · CouplesCash</title></svelte:head>
 
-<AppBar title="Settings" back="/more" />
+<AppBar title="Settings" back="/week" />
 
-<main class="flex flex-col gap-4 px-4 pt-2">
-	<HelperText
-		id="settings"
-		text="Everything you can change, on one page: you, your household, your banks."
-	/>
-
-	<nav class="flex gap-2" aria-label="Settings sections">
-		{#each [{ id: 'you', l: 'You' }, ...(hh ? [{ id: 'household', l: 'Household' }, { id: 'banks', l: 'Banks' }] : [])] as s (s.id)}
+<main class="flex flex-col gap-4 px-4 pt-2 pb-4">
+	<nav class="-mx-4 flex gap-2 overflow-x-auto px-4" aria-label="Settings sections">
+		{#each sections as s (s.id)}
 			<a
 				href="#{s.id}"
-				class="btn min-h-10 rounded-full border border-base-300 btn-ghost px-4 btn-sm">{s.l}</a
+				class="btn min-h-10 shrink-0 rounded-full border border-base-300 btn-ghost px-4 btn-sm"
+				>{s.l}</a
 			>
 		{/each}
 	</nav>
@@ -138,7 +128,7 @@
 							type="text"
 							required
 							maxlength="40"
-							class="input-bordered input min-h-12 flex-1"
+							class="input-bordered input min-h-12 min-w-0 flex-1"
 							defaultValue={data.me.user.displayName}
 						/>
 						<button class="btn min-h-12 rounded-xl btn-secondary">Save</button>
@@ -147,7 +137,7 @@
 				{#if typeof f?.profileError === 'string'}<p class="text-sm text-error" role="alert">
 						{f.profileError}
 					</p>{/if}
-				<p class="text-xs text-base-content/60">Signed in as {data.me.user.email}</p>
+				<p class="truncate text-xs text-base-content/60">Signed in as {data.me.user.email}</p>
 			</form>
 
 			<div class="flex flex-col gap-2">
@@ -229,16 +219,19 @@
 						<button class="btn min-h-12 rounded-full btn-primary">Update password</button>
 					</form>
 				{/if}
+				<details class="group rounded-xl">
+					<summary class="{row} cursor-pointer list-none">
+						<span class={rowIcon}><Icon name="smartphone" size={20} /></span>
+						<span class="flex-1 font-medium">Install the app</span>
+						<Icon
+							name="chevron-down"
+							size={18}
+							class="text-base-content/40 group-open:rotate-180"
+						/>
+					</summary>
+					<div class="px-1 pt-2"><InstallHint /></div>
+				</details>
 			</div>
-
-			<details class="group rounded-xl">
-				<summary class="{row} cursor-pointer list-none">
-					<span class={rowIcon}><Icon name="smartphone" size={20} /></span>
-					<span class="flex-1 font-medium">Install the app</span>
-					<Icon name="chevron-down" size={18} class="text-base-content/40 group-open:rotate-180" />
-				</summary>
-				<div class="px-1 pt-2"><InstallHint /></div>
-			</details>
 		</div>
 	</section>
 
@@ -248,210 +241,57 @@
 			<div class="card-body gap-5 p-5">
 				<h2 id="household-h" class="text-lg font-semibold">Household</h2>
 
-				<form method="POST" action="?/household" class="flex flex-col gap-3" use:enhance={keep}>
-					{#if errorFor('household')}
-						<div class="alert text-sm alert-error" role="alert">{errorFor('household')}</div>
-					{/if}
-					<label class="form-control">
-						<span class="label-text mb-1 text-sm font-medium">Household name</span>
-						<input
-							name="name"
-							type="text"
-							required
-							maxlength="40"
-							class="input-bordered input min-h-12 w-full"
-							defaultValue={valuesFor('household').name ?? hh.name}
-						/>
-					</label>
-					<div class="grid grid-cols-2 gap-3">
-						<label class="form-control">
-							<span class="label-text mb-1 text-sm font-medium">Currency</span>
-							<select
-								name="currency"
-								class="select-bordered select min-h-12 w-full"
-								bind:value={currencyPick}
-							>
-								{#each COMMON_CURRENCIES as c (c.code)}
-									<option value={c.code}>{c.code} · {c.name}</option>
-								{/each}
-								<option value="other">Other…</option>
-							</select>
-						</label>
-						{#if currencyPick === 'other'}
-							<label class="form-control">
-								<span class="label-text mb-1 text-sm font-medium">ISO code</span>
-								<input
-									name="currencyCustom"
-									type="text"
-									maxlength="3"
-									minlength="3"
-									pattern={'[A-Za-z]{3}'}
-									autocapitalize="characters"
-									class="input-bordered input min-h-12 w-full uppercase"
-									placeholder="PLN"
-									defaultValue={COMMON_CURRENCIES.some((c) => c.code === hh.currency)
-										? ''
-										: hh.currency}
-								/>
-							</label>
-						{:else}
-							<div class="form-control">
-								<span class="label-text mb-1 text-sm font-medium">Looks like</span>
-								<p class="flex min-h-12 items-center text-lg font-semibold tabular">
-									{formatMoney(123456, { currency: currencyPick })}
-								</p>
-							</div>
-						{/if}
-					</div>
-					<div class="form-control">
-						<span class="label-text mb-1 text-sm font-medium">Week starts on</span>
-						<div class="join w-full" role="radiogroup" aria-label="Week starts on">
-							{#each [{ v: '0', l: 'Sunday' }, { v: '1', l: 'Monday' }] as o (o.v)}
-								<label
-									class="btn join-item min-h-11 flex-1 border border-base-300 btn-ghost has-checked:border-primary has-checked:bg-primary has-checked:text-primary-content"
-								>
-									<input
-										type="radio"
-										name="weekStart"
-										value={o.v}
-										class="sr-only"
-										defaultChecked={String(hh.weekStart) === o.v}
-									/>
-									{o.l}
-								</label>
-							{/each}
-						</div>
-					</div>
-					<label class="form-control">
-						<span class="label-text mb-1 text-sm font-medium">Default account for new bills</span>
-						<select
-							name="defaultAccountId"
-							class="select-bordered select min-h-12 w-full"
-							defaultValue={hh.defaultAccountId ?? ''}
-						>
-							<option value="">None</option>
-							{#each data.accounts as a (a.id)}
-								<option value={a.id}>{a.name} · {a.institution}</option>
-							{/each}
-						</select>
-					</label>
-					<button class="btn min-h-12 rounded-full btn-primary">Save household</button>
-				</form>
-
-				<!-- Pay period -->
-				<form
-					id="payperiod"
-					method="POST"
-					action="?/payperiod"
-					class="flex scroll-mt-20 flex-col gap-3 border-t border-base-300/60 pt-5"
-					use:enhance={keep}
-				>
-					<div>
-						<h3 class="font-semibold">Pay period</h3>
-						<p class="text-xs text-base-content/60">
-							Shows "Next payday" on the week and counts the paycheck in.
-						</p>
-					</div>
-					{#if errorFor('payperiod')}
-						<div class="alert text-sm alert-error" role="alert">{errorFor('payperiod')}</div>
-					{/if}
-					<div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Pay period">
-						{#each PAY_PERIODS as p (p.value)}
-							<label
-								class="btn min-h-11 justify-start rounded-xl px-3 text-left text-sm font-medium {payPeriod ===
-								p.value
-									? 'btn-primary'
-									: 'border border-base-300 btn-ghost'}"
-							>
-								<input
-									type="radio"
-									name="payPeriod"
-									value={p.value}
-									bind:group={payPeriod}
-									class="sr-only"
-								/>
-								{p.label}
-							</label>
-						{/each}
-					</div>
-					<label class="form-control">
-						<span class="label-text mb-1 text-sm font-medium">A recent payday</span>
-						<input
-							name="payAnchorDate"
-							type="date"
-							class="input-bordered input min-h-12 w-full"
-							bind:value={anchor}
-						/>
-					</label>
-					<p class="text-sm" aria-live="polite" data-testid="payday-preview">
-						{#if preview}
-							<Icon
-								name="calendar-clock"
-								size={16}
-								class="inline align-text-bottom text-secondary"
-							/>
-							Next payday: <strong>{formatWeekdayDate(preview.date)}</strong>
-							<span class="text-base-content/60"
-								>({preview.days === 1 ? 'tomorrow' : `in ${preview.days} days`})</span
-							>
-						{:else}
-							<span class="text-base-content/60">Pick a payday to preview the next one.</span>
-						{/if}
-					</p>
-					<button class="btn min-h-12 rounded-full btn-primary">Save pay period</button>
-				</form>
-
-				<!-- Weekly target -->
-				<form
-					id="weekly"
-					method="POST"
-					action="?/weekly"
-					class="flex scroll-mt-20 flex-col gap-3 border-t border-base-300/60 pt-5"
-					use:enhance={keep}
-				>
-					<div>
-						<h3 class="font-semibold">Weekly spending target</h3>
-						<p class="text-xs text-base-content/60">
-							One number for everything you spend in a week. Per-category amounts live on the
-							<a href="/week" class="link link-primary">Week</a>.
-						</p>
-					</div>
-					{#if errorFor('weekly')}
-						<div class="alert text-sm alert-error" role="alert">{errorFor('weekly')}</div>
-					{/if}
-					<div class="flex gap-2">
-						<label class="input-bordered input flex min-h-12 flex-1 items-center gap-2">
-							<span class="text-base-content/50">{currencySymbol()}</span>
-							<input
-								name="weeklySpend"
-								type="text"
-								inputmode="decimal"
-								class="grow tabular"
-								placeholder="Blank for none"
-								aria-label="Weekly spending target"
-								defaultValue={valuesFor('weekly').weeklySpend ??
-									(hh.weeklySpendCents != null ? centsToInput(hh.weeklySpendCents) : '')}
-							/>
-						</label>
-						<button class="btn min-h-12 rounded-xl btn-secondary">Save</button>
-					</div>
-				</form>
-
-				<!-- Partner -->
-				<a href="/couple" class="{row} border-t border-base-300/60 pt-4">
+				<a href="/couple" class={row}>
 					<span class={rowIcon}><Icon name="heart-handshake" size={20} /></span>
-					<span class="flex-1">
+					<span class="min-w-0 flex-1">
 						<span class="block font-medium">Partner</span>
-						<span class="block text-xs text-base-content/60" data-testid="partner-line">
+						<span class="block truncate text-xs text-base-content/60" data-testid="partner-line">
 							{partner
-								? `Shared with ${partner.displayName}`
+								? `Shared with ${firstName(partner.displayName)}`
 								: 'Invite your partner with a Couple Code'}
 						</span>
 					</span>
 					<Icon name="chevron-right" size={18} class="text-base-content/40" />
 				</a>
 
-				<!-- Matching -->
+				<form
+					id="payday"
+					method="POST"
+					action="?/payday"
+					class="flex scroll-mt-20 flex-col gap-3 border-t border-base-300/60 pt-5"
+					use:enhance={keep}
+					data-testid="settings-payday"
+				>
+					{#if typeof f?.paydayError === 'string'}
+						<div class="alert text-sm alert-error" role="alert">{f.paydayError}</div>
+					{/if}
+					<PaydayFields
+						weekday={paydayWd}
+						paycheckCents={data.paycheck?.amountCents ?? null}
+						found={data.paycheck?.source === 'found' ? data.paycheck : null}
+						{incomeCategoryId}
+					/>
+					<button class="btn min-h-12 rounded-full btn-primary">Save payday</button>
+				</form>
+
+				<form
+					id="fun"
+					method="POST"
+					action="?/fun"
+					class="flex scroll-mt-20 flex-col gap-3 border-t border-base-300/60 pt-5"
+					use:enhance={keep}
+					data-testid="settings-fun"
+				>
+					<h3 class="font-semibold">Fun money</h3>
+					{#if typeof f?.funError === 'string'}
+						<div class="alert text-sm alert-error" role="alert">{f.funError}</div>
+					{/if}
+					<FunMoneyFields rows={data.funRows} paydayName={weekdayName(paydayWd)} />
+					{#if data.funRows.length}
+						<button class="btn min-h-12 rounded-full btn-primary">Save fun money</button>
+					{/if}
+				</form>
+
 				<form
 					id="matching"
 					method="POST"
@@ -489,25 +329,11 @@
 							</label>
 						{/each}
 					</div>
-					<input type="hidden" name="autoIgnoreTransfersForm" value="1" />
-					<label class="flex min-h-11 cursor-pointer items-center justify-between gap-3">
-						<span class="text-sm font-medium"
-							>Automatically ignore transfers between linked accounts</span
-						>
-						<input
-							type="checkbox"
-							name="autoIgnoreTransfers"
-							class="toggle toggle-primary"
-							defaultChecked={hh.autoIgnoreTransfers !== false}
-							onchange={(e) => e.currentTarget.form?.requestSubmit()}
-						/>
-					</label>
 					<noscript>
 						<button class="btn min-h-11 rounded-full border border-base-300 btn-ghost">Save</button>
 					</noscript>
 				</form>
 
-				<!-- Time zone -->
 				<form
 					method="POST"
 					action="?/household"
@@ -515,7 +341,8 @@
 					use:enhance={keep}
 				>
 					<Icon name="globe" size={16} class="text-base-content/50" />
-					<span class="flex-1">Time zone <strong data-testid="timezone">{hh.timezone}</strong></span
+					<span class="min-w-0 flex-1"
+						>Time zone <strong data-testid="timezone">{hh.timezone}</strong></span
 					>
 					{#if detectedTz && detectedTz !== hh.timezone}
 						<input type="hidden" name="timezone" value={detectedTz} />
@@ -524,6 +351,52 @@
 						</button>
 					{/if}
 				</form>
+
+				<a href="/setup" class="{row} border-t border-base-300/60 pt-4" data-testid="rerun-setup">
+					<span class={rowIcon}><Icon name="list-checks" size={20} /></span>
+					<span class="flex-1">
+						<span class="block font-medium">Set up again</span>
+						<span class="block text-xs text-base-content/60"
+							>Banks, accounts, payday, fun money, notes, partner</span
+						>
+					</span>
+					<Icon name="chevron-right" size={18} class="text-base-content/40" />
+				</a>
+			</div>
+		</section>
+
+		<!-- ===== Accounts ===== -->
+		<section id="accounts" class="{card} scroll-mt-20" aria-labelledby="accounts-h">
+			<div class="card-body gap-3 p-5">
+				<div>
+					<h2 id="accounts-h" class="text-lg font-semibold">Accounts</h2>
+					<p class="text-xs text-base-content/60">
+						Which account is which. Only the bills account counts in the weekly math.
+					</p>
+				</div>
+				{#if data.rows.length === 0}
+					<p class="text-sm text-base-content/65">
+						No accounts yet. Link your banks below, or add one by hand.
+					</p>
+				{:else}
+					<form method="POST" action="?/roles" class="flex flex-col gap-3" use:enhance={keep}>
+						{#if typeof f?.rolesError === 'string'}
+							<div class="alert text-sm alert-error" role="alert">{f.rolesError}</div>
+						{/if}
+						<AccountRolePicker rows={data.rows} defaults={data.defaults} members={hh.members} />
+						<button class="btn min-h-12 rounded-full btn-primary" data-testid="save-roles"
+							>Save accounts</button
+						>
+					</form>
+				{/if}
+				<a href="/accounts/new" class="{row} border-t border-base-300/60 pt-3">
+					<span class={rowIcon}><Icon name="plus" size={20} /></span>
+					<span class="flex-1">
+						<span class="block font-medium">Add an account by hand</span>
+						<span class="block text-xs text-base-content/60">Cash, or a bank sync can't reach</span>
+					</span>
+					<Icon name="chevron-right" size={18} class="text-base-content/40" />
+				</a>
 			</div>
 		</section>
 
@@ -531,30 +404,61 @@
 		<section id="banks" class="{card} scroll-mt-20" aria-labelledby="banks-h">
 			<div class="card-body gap-3 p-5">
 				<h2 id="banks-h" class="text-lg font-semibold">Banks</h2>
-				<div class="flex flex-col">
-					<a href="/settings/banks" class={row}>
-						<span class={rowIcon}><Icon name="landmark" size={20} /></span>
-						<span class="flex-1">
-							<span class="block font-medium">Linked banks</span>
-							<span class="block text-xs text-base-content/60" data-testid="banks-line"
-								>{bankLine}</span
-							>
-						</span>
-						<Icon name="chevron-right" size={18} class="text-base-content/40" />
-					</a>
-					<a href="/imports/csv" class={row}>
-						<span class={rowIcon}><Icon name="file-spreadsheet" size={20} /></span>
-						<span class="flex-1">
-							<span class="block font-medium">Import a CSV</span>
-							<span class="block text-xs text-base-content/60"
-								>{data.csvCount
-									? `${data.csvCount} imported so far`
-									: 'A statement export from your bank'}</span
-							>
-						</span>
-						<Icon name="chevron-right" size={18} class="text-base-content/40" />
-					</a>
-				</div>
+				<a href="/settings/banks" class={row}>
+					<span class={rowIcon}><Icon name="landmark" size={20} /></span>
+					<span class="min-w-0 flex-1">
+						<span class="block font-medium">Linked banks</span>
+						<span class="block truncate text-xs text-base-content/60" data-testid="banks-line"
+							>{data.banks === null
+								? 'Not set up on this server'
+								: data.banks.length === 0
+									? 'Pull balances and transactions with SimpleFIN'
+									: `${data.banks.length} linked${data.banks.some((b) => b.lastError) ? ' · needs attention' : ''}`}</span
+						>
+					</span>
+					<Icon name="chevron-right" size={18} class="text-base-content/40" />
+				</a>
+
+				{#if feeds.length}
+					<div
+						class="flex flex-col gap-2 rounded-2xl bg-base-200/50 p-3"
+						data-testid="feed-diagnostics"
+					>
+						<p class="text-sm font-medium">Last sync</p>
+						<ul class="flex flex-col gap-2">
+							{#each feeds as fd (fd.ext.id)}
+								{@const advice = feedAdvice(fd.ext.lastFeed, shownPending(fd.ext.accountId))}
+								<li class="text-xs" data-testid="feed-line">
+									<p>
+										<span class="font-semibold">{fd.ext.accountName ?? fd.ext.name}</span>
+										{fd.summary ?? 'no sync since the update yet'}
+										{#if fd.ext.lastFeed?.at}
+											<span class="text-base-content/50">
+												· {relativeTime(fd.ext.lastFeed.at)}</span
+											>
+										{/if}
+									</p>
+									{#if advice && fd.ext.accountId === data.plan?.billsAccount?.id}
+										<p class="mt-0.5 text-base-content/60" data-testid="feed-advice">{advice}</p>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+
+				<a href="/imports/csv" class={row}>
+					<span class={rowIcon}><Icon name="file-spreadsheet" size={20} /></span>
+					<span class="flex-1">
+						<span class="block font-medium">Import a statement</span>
+						<span class="block text-xs text-base-content/60"
+							>{data.csvCount
+								? `${data.csvCount} imported so far`
+								: 'A CSV export, when the bank feed misses something'}</span
+						>
+					</span>
+					<Icon name="chevron-right" size={18} class="text-base-content/40" />
+				</a>
 				<form
 					method="POST"
 					action="?/rematch"
@@ -566,7 +470,7 @@
 							class="flex items-center gap-2 text-xs text-base-content/70"
 							data-testid="matcher-status"
 						>
-							<Icon name="wand-sparkles" size={14} class="text-secondary" />
+							<Icon name="wand-sparkles" size={14} class="shrink-0 text-secondary" />
 							{matcherLine}
 						</p>
 					{/if}

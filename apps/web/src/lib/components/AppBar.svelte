@@ -6,7 +6,8 @@
 		title,
 		back,
 		subtitle,
-		action
+		action,
+		gear = !back
 	}: {
 		title: string;
 		/** href for a back chevron on the left */
@@ -14,6 +15,8 @@
 		subtitle?: string;
 		/** right-aligned context action */
 		action?: Snippet;
+		/** v7: the gear → Settings (on the three tab screens) */
+		gear?: boolean;
 	} = $props();
 </script>
 
@@ -32,8 +35,20 @@
 				<p class="truncate text-xs text-base-content/60">{subtitle}</p>
 			{/if}
 		</div>
-		{#if action}
-			<div class="flex items-center gap-1">{@render action()}</div>
+		{#if action || gear}
+			<div class="flex items-center gap-1">
+				{#if action}{@render action()}{/if}
+				{#if gear}
+					<a
+						href="/settings"
+						class="btn btn-circle min-h-11 min-w-11 btn-ghost btn-sm"
+						aria-label="Settings"
+						data-testid="settings-gear"
+					>
+						<Icon name="settings" size={22} />
+					</a>
+				{/if}
+			</div>
 		{/if}
 	</div>
 </header>

@@ -62,9 +62,9 @@ test('pending lifecycle: a tipped bill posts in place, a dropped hold disappears
 		'Everyday'
 	);
 
-	// Money: Everyday shows its pending rows (diner $40 + fuel hold $1)
-	await page.goto('/accounts');
-	await expect(page.getByTestId('account-pending')).toHaveText('2 pending · −$41.00');
+	// the account shows its pending rows (diner $40 + fuel hold $1)
+	await page.goto(`${accountUrl}?tab=transactions`);
+	await expect(page.getByTestId('tx-available')).toContainText('$41.00 pending');
 
 	// the bank posts it with the tip under a new id → the same row, now −$48.00, still Fun
 	await bankSync(page, email, 'post');
@@ -85,13 +85,12 @@ test('pending lifecycle: a tipped bill posts in place, a dropped hold disappears
 	await expect(page.getByTestId('tx-row').filter({ hasText: 'SHELL OIL' })).toHaveCount(0);
 	await page.goto('/transactions');
 	await expect(reviewRow(page, 'SHELL OIL')).toHaveCount(0);
-	await page.goto('/accounts');
-	await expect(page.getByTestId('account-pending')).toHaveCount(0);
+	await page.goto(`${accountUrl}?tab=transactions`);
+	await expect(page.getByTestId('tx-balance')).toBeVisible();
+	await expect(page.getByText(/\$41\.00 pending/)).toHaveCount(0);
 });
 
-test('transfers: auto-ignored pair, Money section, one-sided + learned payee, setting off', async ({
-	page
-}) => {
+test('transfers: auto-ignored pair, one-sided + learned payee', async ({ page }) => {
 	const { email } = await setup(page, { savings: true });
 
 	// both sides of the pair were ignored automatically: posted rows with the other side named
@@ -102,81 +101,33 @@ test('transfers: auto-ignored pair, Money section, one-sided + learned payee, se
 	await expect(txRow(page, 'ONLINE TRANSFER FROM CHK').getByTestId('tx-status')).toHaveText(
 		'Transfer ← Everyday'
 	);
-
-	// Money → "Moved between accounts" → the full view
-	await page.goto('/accounts');
-	await expect(page.getByTestId('moved-total')).toHaveText('$500.00');
-	await page.getByTestId('moved').getByRole('link').click();
-	await expect(page).toHaveURL(/\/transfers$/);
-	await expect(page.getByTestId('transfer-flow')).toHaveText(/Everyday → Savings · \$500\.00/);
-	await expect(page.getByTestId('transfer-pair')).toHaveCount(1);
-	await page.getByRole('button', { name: 'Table' }).click();
-	await expect(page.getByRole('table', { name: /Transfers in and out/ })).toContainText('Savings');
-	await page.getByRole('button', { name: /Open Everyday side/ }).click();
+	await out.getByRole('button').click();
 	await expect(sheet(page).getByTestId('sheet-state')).toContainText('Transfer → Savings');
 	await expect(sheet(page).getByRole('button', { name: /Not a transfer/ })).toBeVisible();
 	await page.keyboard.press('Escape');
 
 	// one-sided: the brokerage transfer is only a suggestion; one tap marks it (no other side)
-	await page.goto('/transactions');
 	const brokerage = reviewRow(page, 'TRANSFER TO BROKERAGE');
 	await expect(brokerage.getByTestId('review-primary')).toHaveText('Transfer');
 	await brokerage.getByTestId('review-primary').click();
 	await expect(page.getByText('Marked as a transfer')).toBeVisible();
-	await page.goto('/transfers');
-	await expect(page.getByTestId('one-sided')).toHaveCount(1);
-	await expect(page.getByTestId('one-sided')).toContainText('Everyday → Other account');
-	await expect(page.getByTestId('transfers-total')).toHaveText('$1,500.00');
 
 	// the payee was learned: the next brokerage transfer is ignored automatically
 	await bankSync(page, email, 'brokerage');
 	await page.reload();
-	await expect(page.getByTestId('one-sided')).toHaveCount(2);
-	await expect(page.getByTestId('one-sided').filter({ hasText: '$200.00' })).toContainText('auto');
-	await page
-		.getByTestId('one-sided')
-		.filter({ hasText: '$200.00' })
-		.getByRole('button', { name: 'Not a transfer' })
+	await expect(reviewRow(page, 'TRANSFER TO BROKERAGE')).toHaveCount(0);
+	const second = txRow(page, 'TRANSFER TO BROKERAGE').filter({ hasText: '$200.00' });
+	await expect(second.getByTestId('tx-auto')).toBeVisible();
+	await second.getByRole('button').click();
+	await sheet(page)
+		.getByRole('button', { name: /Not a transfer/ })
 		.click();
-	await expect(page.getByText('Back in To review')).toBeVisible();
-	await expect(page.getByTestId('one-sided')).toHaveCount(1);
-
-	// Settings › Household › Matching: auto-ignore off (persists across a reload)
-	await page.goto('/settings#household');
-	const toggle = page.getByRole('checkbox', {
-		name: 'Automatically ignore transfers between linked accounts'
-	});
-	await expect(toggle).toBeChecked();
-	await toggle.click();
-	await expect(page.getByText('Saved', { exact: true })).toBeVisible();
-	await page.reload();
-	await expect(toggle).not.toBeChecked();
-
-	// the next pair waits in To review; one tap pairs it with the obvious other side
-	await bankSync(page, email, 'pair');
-	await page.goto('/transactions');
-	const next = reviewRow(page, 'ONLINE TRANSFER TO SAV REF 456');
-	await expect(next.getByTestId('review-primary')).toHaveText('Transfer');
-	await next.getByTestId('review-primary').click();
-	await expect(page.getByText('Transfer with Savings')).toBeVisible();
-	await page.goto('/transfers');
-	await expect(
-		page.getByTestId('transfer-flow').filter({ hasText: 'Everyday → Savings' })
-	).toContainText('$750.00');
+	await expect(page.getByText('Not a transfer any more')).toBeVisible();
+	await expect(reviewRow(page, 'TRANSFER TO BROKERAGE')).toHaveCount(1);
 });
 
-test('account transactions tab: filters, search, manual expense, the sheet', async ({ page }) => {
+test('account transactions tab: filters, search, the sheet', async ({ page }) => {
 	const { accountUrl } = await setup(page);
-
-	// a typed expense on the same account shows up next to the bank rows
-	await page.goto('/expenses/new');
-	await page.getByLabel('What was it?').fill('Lunch with Sam');
-	await page.getByLabel('Amount').fill('12.50');
-	await page.getByLabel('Date').fill(todayIso());
-	await page.getByLabel('Category').selectOption({ label: 'Fun' });
-	await page.getByLabel('Account').selectOption({ label: 'Everyday' });
-	await page.getByRole('button', { name: 'Save expense' }).click();
-	await expect(page).toHaveURL(/\/transactions\?added=1/);
 
 	await page.goto(accountUrl);
 	await page.getByRole('tab', { name: 'Transactions' }).click();
@@ -185,7 +136,6 @@ test('account transactions tab: filters, search, manual expense, the sheet', asy
 		/Available \$2,459\.00\s*·\s*\$41\.00 pending/
 	);
 	const rows = page.getByTestId('tx-row');
-	await expect(txRow(page, 'Lunch with Sam').getByTestId('tx-status')).toHaveText('Fun');
 	await expect(txRow(page, 'KROGER #456').getByTestId('tx-status')).toHaveText('To review');
 	await expect(txRow(page, 'THE DINER').getByTestId('tx-status')).toHaveText('Pending');
 	await expect(txRow(page, 'ONLINE TRANSFER TO SAV').getByTestId('tx-status')).toContainText(
@@ -199,9 +149,7 @@ test('account transactions tab: filters, search, manual expense, the sheet', asy
 	await expect(txRow(page, 'KROGER #456')).toHaveCount(0);
 	await filter('To review').click();
 	await expect(txRow(page, 'KROGER #456')).toHaveCount(1);
-	await expect(txRow(page, 'Lunch with Sam')).toHaveCount(0);
-	await filter('Matched').click();
-	await expect(txRow(page, 'Lunch with Sam')).toHaveCount(1);
+	await expect(txRow(page, 'ONLINE TRANSFER TO SAV')).toHaveCount(0);
 	await filter('Transfers').click();
 	await expect(txRow(page, 'ONLINE TRANSFER TO SAV')).toHaveCount(1);
 	await expect(rows).toHaveCount(1);
@@ -211,7 +159,7 @@ test('account transactions tab: filters, search, manual expense, the sheet', asy
 	await page.getByLabel('Search transactions').fill('kroger');
 	await expect(rows).toHaveCount(1);
 	await page.getByLabel('Search transactions').fill('');
-	await expect(txRow(page, 'Lunch with Sam')).toBeVisible();
+	await expect(txRow(page, 'PLANET FITNESS')).toBeVisible();
 
 	// a bank row offers every action
 	await txRow(page, 'KROGER #456').getByRole('button').click();
@@ -219,20 +167,21 @@ test('account transactions tab: filters, search, manual expense, the sheet', asy
 	await expect(page.getByText('Expense added in Groceries')).toBeVisible();
 	await expect(txRow(page, 'KROGER #456').getByTestId('tx-status')).toHaveText('Groceries');
 
-	// Money's "N pending" line opens the Pending filter
-	await page.goto('/accounts');
-	await page.getByTestId('account-pending').click();
-	await expect(page).toHaveURL(/filter=pending/);
+	await filter('Matched').click();
+	await expect(txRow(page, 'KROGER #456')).toHaveCount(1);
+
+	// a link with the Pending filter opens on it
+	await page.goto(`${accountUrl}?tab=transactions&filter=pending`);
 	await expect(filter('Pending')).toHaveAttribute('aria-checked', 'true');
 	await expect(txRow(page, 'THE DINER')).toHaveCount(1);
-	await expect(txRow(page, 'Lunch with Sam')).toHaveCount(0);
+	await expect(txRow(page, 'KROGER #456')).toHaveCount(0);
 });
 
 test('matching: match Rent from the sheet, unmatch', async ({ page }) => {
 	await setup(page);
 	const firstOfMonth = `${todayIso().slice(0, 7)}-01`;
 	// created after the sync: the new bill is re-checked against To review and suggested
-	await addBill(page, { name: 'Rent', amount: '1850', firstDue: firstOfMonth });
+	const rentUrl = await addBill(page, { name: 'Rent', amount: '1850', firstDue: firstOfMonth });
 
 	await page.goto('/transactions');
 	const rent = reviewRow(page, 'RENT PAYMENT');
@@ -247,13 +196,11 @@ test('matching: match Rent from the sheet, unmatch', async ({ page }) => {
 	await expect(page.getByText('Matched to Rent')).toBeVisible();
 	await expect(txRow(page, 'RENT PAYMENT').getByTestId('tx-status')).toHaveText('Rent');
 
-	// week: the bank-paid bill opens the same sheet
-	await page.goto(`/week?start=${firstOfMonth}`);
-	await expect(page.getByTestId('spendable-label')).toHaveText('Available now');
+	// the bill's payment opens the same sheet
+	await page.goto(rentUrl);
 	await page
-		.getByTestId('occurrence-row')
-		.filter({ hasText: 'Rent' })
-		.getByTestId('from-bank')
+		.locator(`[data-testid="payment-row"][data-date="${firstOfMonth}"]`)
+		.getByTestId('payment-source')
 		.click();
 	await expect(sheet(page).getByTestId('sheet-state')).toContainText('Paid Rent');
 	await page.keyboard.press('Escape');
@@ -267,11 +214,10 @@ test('matching: match Rent from the sheet, unmatch', async ({ page }) => {
 		.click();
 	await expect(page.getByText('Back in To review')).toBeVisible();
 	await expect(reviewRow(page, 'RENT PAYMENT')).toHaveCount(1);
-	await page.goto(`/bills?view=calendar&m=${todayIso().slice(0, 7)}`);
-	await page.locator(`[data-date="${firstOfMonth}"]`).click();
+	await page.goto(rentUrl);
 	await expect(
-		page.getByRole('dialog').getByRole('button', { name: 'Mark Rent paid' })
-	).toHaveAttribute('aria-pressed', 'false');
+		page.locator(`[data-testid="payment-row"][data-date="${firstOfMonth}"]`)
+	).toHaveAttribute('data-paid', 'false');
 });
 
 test('bills: create one from a transaction, link a transaction from the bill side', async ({

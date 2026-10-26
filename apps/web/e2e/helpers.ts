@@ -169,3 +169,59 @@ export async function swipe(page: Page, locator: ReturnType<Page['locator']>, dx
 export async function hydrated(page: Page) {
 	await expect(page.locator('html[data-ready="1"]')).toHaveCount(1);
 }
+
+// ---- v7 --------------------------------------------------------------------------------------
+
+export const WEEKDAY_NAMES = [
+	'Sunday',
+	'Monday',
+	'Tuesday',
+	'Wednesday',
+	'Thursday',
+	'Friday',
+	'Saturday'
+];
+export const weekdayOf = (iso: string) => {
+	const [y, m, d] = iso.split('-').map(Number);
+	return new Date(y, m - 1, d).getDay();
+};
+/** The payday that starts the pay week containing `iso`. */
+export const payWeekStart = (iso: string, payday: number) =>
+	shiftDays(iso, -((weekdayOf(iso) - payday + 7) % 7));
+export const usd = (cents: number) =>
+	new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
+
+/** Links the mock's household-shaped bank (`demo-household`: US Bank, Ally HYS, two Ally checkings). */
+export async function linkHouseholdBank(page: Page) {
+	await page.goto('/settings/banks');
+	await page.getByLabel('Name').fill('Our banks');
+	await page.getByLabel('Setup token').fill('demo-household');
+	await page.getByRole('button', { name: 'Link bank' }).click();
+	const linked = page.getByText(/Linked Our banks · 4 accounts found/);
+	await expect(linked.or(page.getByRole('alert'))).toBeVisible();
+	test.skip((await linked.count()) === 0, 'the demo-household bank only exists in the mock API');
+}
+
+/**
+ * The fast path through setup (steps 2–4 with their defaults): roles as guessed, payday (default
+ * Friday, or `payday`), the found paycheck, $20 / $150 fun money. Lands on /week.
+ */
+export async function setupHousehold(page: Page, opts: { payday?: number } = {}) {
+	await linkHouseholdBank(page);
+	await page.goto('/setup?step=roles');
+	await hydrated(page);
+	await page.getByTestId('setup-save').click();
+	await expect(page).toHaveURL(/step=payday/);
+	if (opts.payday !== undefined)
+		await page
+			.getByRole('radiogroup', { name: 'Payday' })
+			.getByLabel(WEEKDAY_NAMES[opts.payday])
+			.check({ force: true });
+	await expect(page.getByLabel('Paycheck amount')).toHaveValue('2450.00');
+	await page.getByTestId('setup-save').click();
+	await expect(page).toHaveURL(/step=fun/);
+	await page.getByTestId('setup-save').click();
+	await expect(page).toHaveURL(/step=notes/);
+	await page.goto('/week');
+	await expect(page.getByTestId('plan-receipt')).toBeVisible();
+}

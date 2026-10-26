@@ -10,7 +10,8 @@ export type Household = {
 	members: Member[];
 	// v2 settings
 	currency: string /* ISO 4217, default USD */;
-	weekStart: 0 | 1;
+	/** v7: derived = paydayWeekday (kept for compatibility); older builds send 0 | 1. */
+	weekStart: number;
 	timezone: string /* IANA */;
 	defaultAccountId: string | null;
 	payPeriod: PayPeriod;
@@ -21,6 +22,8 @@ export type Household = {
 	autoIgnoreTransfers?: boolean;
 	/** v6: what the matcher may do on its own (default `all`). Older builds omit it. */
 	autoMatchLevel?: AutoMatchLevel;
+	/** v7: 0 = Sunday … 6 = Saturday (default 5 = Friday). The pay week runs payday → the day before the next. */
+	paydayWeekday?: number;
 };
 /** v6: `off` = suggestions only; `bills` = auto-apply bill/income/one-off matches and transfers; `all` = also categories. */
 export type AutoMatchLevel = 'off' | 'bills' | 'all';
@@ -51,7 +54,14 @@ export type Account = {
 	pendingOutCents?: number;
 	/** v5: receives bank or CSV rows. */
 	linked?: boolean;
+	/** v7: what the account is for in the Friday plan (older builds omit it → `other`). */
+	role?: AccountRole;
+	ownerUserId?: string | null;
+	ownerName?: string | null;
 };
+/** v7: Bills (exactly one, the only account in the weekly math) · Savings · Fun money (per person) · Other. */
+export type AccountRole = 'bills' | 'savings' | 'fun' | 'other';
+export const ACCOUNT_ROLES: readonly AccountRole[] = ['bills', 'savings', 'fun', 'other'];
 export type BalanceSnapshot = { balanceCents: number; recordedAt: string; recordedBy: string };
 
 export type Category = {
@@ -63,7 +73,8 @@ export type Category = {
 	isDefault: boolean;
 };
 
-export type Kind = 'bill' | 'subscription' | 'income';
+/** v7 adds `transfer` (fun money and other planned moves between your own accounts). */
+export type Kind = 'bill' | 'subscription' | 'income' | 'transfer';
 export type Frequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly' | 'once';
 export type RecurringItem = {
 	id: string;
@@ -90,6 +101,11 @@ export type RecurringItem = {
 	bankNamesLearned?: string[];
 	/** v6: widens the amount tolerance (utilities, credit-card payments). */
 	amountVaries?: boolean;
+	/** v7: `transfer` items move money from → to (both in the household). */
+	fromAccountId?: string | null;
+	toAccountId?: string | null;
+	fromAccountName?: string | null;
+	toAccountName?: string | null;
 };
 
 export type OccurrenceStatus = 'planned' | 'cleared' | 'overdue';
@@ -173,7 +189,9 @@ export const ACCOUNT_TYPES: readonly AccountType[] = [
 	'loan'
 ];
 export const LIABILITY_TYPES: ReadonlySet<AccountType> = new Set(['credit', 'loan']);
+/** What the quick-add sheet and the bill form cycle through (transfers have their own fields). */
 export const KINDS: readonly Kind[] = ['bill', 'subscription', 'income'];
+export const ALL_KINDS: readonly Kind[] = ['bill', 'subscription', 'income', 'transfer'];
 export const FREQUENCIES: readonly Frequency[] = [
 	'weekly',
 	'biweekly',
@@ -242,8 +260,10 @@ export type PushPrefs = {
 	daysBefore: number[];
 	hourLocal: number;
 	activityEnabled: boolean;
-	/** v4: "Week ahead" / "left this week" summaries. */
+	/** v4: "Week ahead" / "left this week" summaries (v7: the payday push replaces them). */
 	weekSummaryEnabled: boolean;
+	/** v7 (assumed, optional): the one payday push. Older builds omit it → `weekSummaryEnabled`. */
+	paydayEnabled?: boolean;
 	subscriptions: PushSubscriptionInfo[];
 };
 
@@ -371,6 +391,8 @@ export type ExternalAccount = {
 	accountId: string | null;
 	accountName: string | null;
 	updatedAt: string;
+	/** v7: what the bank feed contained on the last sync (null before the first v7 sync). */
+	lastFeed?: FeedStats;
 };
 export type SyncResult = {
 	linkId: string;
@@ -683,3 +705,94 @@ export const AUTO_MATCH_LEVELS: readonly { value: AutoMatchLevel; label: string;
 		},
 		{ value: 'all', label: 'Everything', hint: 'Also file regular shops into their usual category' }
 	];
+
+// ---- v7 (docs/API-CONTRACT.md § v7 additions) --------------------------------------------
+
+export type PlanLineKind = 'bill' | 'subscription' | 'income' | 'transfer' | 'oneoff';
+export type PlanLine = { kind: PlanLineKind; occurrence: Occurrence };
+export type ChecklistItem = {
+	key: 'paycheck' | 'fun' | 'sweep';
+	label: string;
+	amountCents: number;
+	done: boolean;
+	auto: boolean;
+	transactionId: string | null;
+	itemId: string | null;
+	dueDate: string | null;
+};
+export type Sweep = {
+	weekStart: string;
+	plannedCents: number;
+	actualCents: number | null;
+	doneAt: string | null;
+	auto: boolean;
+	/** API notes: the raw (possibly negative) left-at-end the plan was frozen from */
+	leftCents?: number;
+	transactionId?: string | null;
+};
+export type FeedStats = {
+	pending: number;
+	posted: number;
+	availableReported: boolean;
+	at: string;
+} | null;
+export type PlanBillsAccount = {
+	id: string;
+	name: string;
+	availableCents: number;
+	balanceCents: number;
+	availableFromBank: boolean;
+	pending: InboxItem[];
+	pendingOutCents: number;
+	feed: FeedStats;
+};
+export type PlanAccount = {
+	id: string;
+	name: string;
+	role: AccountRole;
+	ownerName: string | null;
+	balanceCents: number;
+	availableCents: number | null;
+};
+export type PlanSetup = {
+	banksLinked: boolean;
+	rolesSet: boolean;
+	paycheckKnown: boolean;
+	billsAdded: boolean;
+	partnerJoined: boolean;
+};
+export type Plan = {
+	start: string;
+	end: string;
+	nextPayday: string;
+	isCurrent: boolean;
+	isPayday: boolean;
+	today: string;
+	/** null → setup needed (no bills account yet) */
+	billsAccount: PlanBillsAccount | null;
+	accounts: PlanAccount[];
+	bills: PlanLine[];
+	funMoney: PlanLine[];
+	oneOffs: PlanLine[];
+	income: PlanLine[];
+	/** unpaid remainders */
+	billsOutCents: number;
+	funOutCents: number;
+	oneOffOutCents: number;
+	incomeInCents: number;
+	/** available − bills − fun − one-offs (+ unpaid income only when it lands before the end) */
+	leftAtEndCents: number;
+	/** e.g. student loans from savings: shown, not in the math */
+	savingsBills: PlanLine[];
+	/** payday only (empty otherwise); the sweep amount is last week's left-at-end, frozen */
+	checklist: ChecklistItem[];
+	sweep: Sweep | null;
+	toReviewCount: number;
+	setup: PlanSetup;
+};
+export const ROLE_LABEL: Record<AccountRole, string> = {
+	bills: 'Bills',
+	savings: 'Savings',
+	fun: 'Fun money',
+	other: 'Other'
+};

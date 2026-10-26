@@ -5,18 +5,18 @@ this app; the SvelteKit server (BFF) holds the auth cookies and proxies to the .
 
 ## Scripts
 
-| Command          | What it does                                                                                                      |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                                                |
-| `pnpm build`     | Production build with `adapter-node` into `build/`                                                                |
-| `pnpm preview`   | Serve the production build on http://localhost:4173                                                               |
-| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                                                   |
-| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                                              |
-| `pnpm lint`      | Prettier check + ESLint                                                                                           |
-| `pnpm format`    | Prettier write                                                                                                    |
-| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money, dates, pay period, push, codes, CSV, week, transactions, quick add) |
-| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                                                    |
-| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                                                |
+| Command          | What it does                                                                                                                                       |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`       | Vite dev server on http://localhost:5173 (expects the API on 8080)                                                                                 |
+| `pnpm build`     | Production build with `adapter-node` into `build/`                                                                                                 |
+| `pnpm preview`   | Serve the production build on http://localhost:4173                                                                                                |
+| `pnpm start`     | `node build` – run the built server (needs `ORIGIN`, `API_URL`)                                                                                    |
+| `pnpm check`     | `svelte-check` (TypeScript + Svelte)                                                                                                               |
+| `pnpm lint`      | Prettier check + ESLint                                                                                                                            |
+| `pnpm format`    | Prettier write                                                                                                                                     |
+| `pnpm test:unit` | Vitest unit tests (`src/**/*.spec.ts`: money, dates, push, codes, CSV, week, transactions, quick add, plan, notes, roles, setup, bills, redirects) |
+| `pnpm test:e2e`  | Playwright on iPhone 14 + Pixel 7 viewports against a mock API                                                                                     |
+| `pnpm icons`     | Regenerate `static/icons/*.png` from the inline SVG (uses `sharp`)                                                                                 |
 
 ## Environment variables
 
@@ -29,6 +29,43 @@ Declared in `src/env.ts` (`defineEnvVars`). Copy `.env.example` to `.env` for lo
 | `PUBLIC_APP_NAME` | `CouplesCash`           | Display name; available in the browser via `$app/env/public`.                                                                      |
 | `PORT` / `HOST`   | `3000` / `0.0.0.0`      | adapter-node runtime.                                                                                                              |
 | `BODY_SIZE_LIMIT` | `1M` (Dockerfile)       | adapter-node request body cap.                                                                                                     |
+
+## v7 — our Friday, automated
+
+PLAN-V7. Tailored to one household: the Friday routine she used to do in her notes app with a
+calculator is the home screen, and everything that doesn't serve it is gone from the web (the API
+keeps the old endpoints; nothing is dropped from the database).
+
+**Navigation**: three tabs — **This week** (`/week`, home) · **Transactions** (`/transactions`, badge =
+to review) · **Bills** (`/bills`) — and a gear in the app bar → **Settings** (`AppBar` `gear`, shown on
+screens without a back link).
+
+| Screen                                     | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **This week** (`/week`, `GET /plan?date=`) | Header "Fri Oct 23 – Thu Oct 29" with ← → (one pay week at a time; weekday names come from `paydayWeekday`). Payday checklist on top (`PaydayChecklist.svelte`: paycheck, fun money, "Move $253.17 to savings" with **Copy** and **Done**; "auto" when the bank ticked it; all done → "Payday done ✓"). Accounts strip (`AccountsStrip.svelte`, 2 × 2: US Bank · Savings · Fun (Travis) · Fun (Jess) → `/accounts/[id]`). The calculation as a receipt (`PlanReceipt.svelte`): "US Bank, available now" (+ "after 3 pending · −$62.40", or "balance − pending" without a bank available balance; expands to **every** pending row of the bills account), "− Bills before next Friday", "− Fun money", "− One-offs", "+ Paycheck" while it hasn't arrived, then **= Left on Thursday** (red when negative) with **Copy** (`CopyButton.svelte` → "253.17"). Every line expands; bills tick paid / unpaid in place (`?/paid`). Savings bills (student loans) are a note under it ("From savings: …"). One "N to review →" line. With no bills account yet the page is the **setup overview** instead. |
+| **Setup** (`/setup?step=`)                 | Six skippable steps (`utils/setup.ts`): 1 link your banks (inline SimpleFIN claim → straight on to 2), 2 which account is which (`AccountRolePicker.svelte`: Bills / Savings / Fun money / Other + whose; defaults from `utils/roles.ts`; untracked bank accounts are created on save, the bills one named after its bank), 3 payday (weekday, default Friday) + paycheck (prefilled from the income item, a found income bill or a payroll deposit), 4 fun money ($20 every payday + $150 on the 1st each → `transfer` items via `POST /recurring/bulk`), 5 **Paste your notes** (`NotesImport.svelte` + `utils/notes.ts`: one bill per line read with the quick-add grammar; checkbox + chips per line; student loans default to Savings; unreadable lines listed as skipped; "Add N bills" → bulk), 6 invite your partner (Couple Code). Server logic shared with Settings: `src/lib/server/setup.ts`.                                                                                                                                                                                          |
+| **Transactions**                           | To review (one tap) + **Pending** (every in-flight row of the shown accounts, to review or not, transfer legs included; count badge) + posted by day. Fun-money accounts are hidden by default ("Show fun money" → `?fun=1`) and never get review buttons.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Bills**                                  | One list grouped _This pay week_ / _Next 4 weeks_ / _Later_ (`utils/bills.ts`), chips All · Bills · Subscriptions · Income · Transfers · One-offs, the account per row (Bills / Savings / "→ Fun (Travis)" for transfers), Found bills, "+" quick add and **Paste from notes** (`/bills/paste`). The bill form has a fourth kind, **Transfer** (from → to); bill detail shows "Moves: US Bank → Fun (Travis)".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **Settings** (one page)                    | **You**: name, theme, notifications (the **Payday reminder** push — sent as `weekSummaryEnabled` + `paydayEnabled` — and bill reminders only), passkeys, password. **Household**: partner, payday + paycheck, fun money (edits the transfer items), auto-match level, time zone, "Set up again". **Accounts**: the role picker, "Add an account by hand" (`/accounts/new`). **Banks**: linked banks, **feed diagnostics** from `lastFeed` ("U.S. Bank sent 3 pending, 47 posted · available balance reported" + what it means), Import a statement (`/imports/csv`), Re-check matches.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+
+- **Removed**: Insights + month report, goals, to-pay list, activity page, weekly and monthly budgets,
+  typed expenses (and "Already spent?" in quick add), the calendar, the Money tab / accounts index,
+  the transfers page, the More tab, pay-period / currency / week-start settings, partner-activity and
+  week-summary pushes, helper hints, the v6 first-run card and the found-bills card on the week.
+- **Redirects** (`src/lib/utils/redirects.ts`, applied first in `hooks.server.ts`, 308): `/accounts`,
+  `/insights*`, `/goals*`, `/todos`, `/activity`, `/expenses*`, `/more`, `/payperiod`, `/pending`,
+  `/transfers` → `/week`; `/calendar` → `/bills`; `/inbox` → `/transactions`; `/settings/household` →
+  `/settings#household`; `/settings/notifications` → `/settings#you`. Kept: `/accounts/[id]`,
+  `/accounts/new`, `/bills/[id]`, `/bills/new`, `/settings/banks`, `/settings/passkeys`, `/couple`,
+  `/imports/csv`.
+- **Mock API** (`e2e/mock-api.ts`): `/v1/plan` (PLAN-V7 math), sweep done / undo, account roles,
+  `paydayWeekday`, `transfer` items auto-paid from the bank feed, `POST /recurring/bulk`, `lastFeed`,
+  fun rows never in review; setup token `demo-household` (their banks) and
+  `POST /__mock/bank-sync?phase=household|payday`.
+- **Pure helpers** (vitest): `plan.ts` (labels, copy text, receipt lines, checklist, feed
+  diagnostics), `notes.ts`, `roles.ts`, `setup.ts`, `bills.ts`, `redirects.ts`.
+
+The v6 section below describes the previous screens; where it disagrees, this section wins.
 
 ## v6 — five tabs, one sentence, one tap
 

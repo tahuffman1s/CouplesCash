@@ -21,7 +21,10 @@ test('found bills: Add matches the past payments, Not a bill hides it for good',
 	await mapChecking(page);
 	await bankSync(page, email, 'netflix');
 
+	// v7: found bills live on Bills only (never on the plan)
 	await page.goto('/week');
+	await expect(page.getByTestId('found-bills')).toHaveCount(0);
+	await page.goto('/bills');
 	const card = page.getByTestId('found-bills');
 	await expect(card).toContainText('We found 2 regular payments');
 	const netflix = card.getByTestId('found-bill').filter({ hasText: 'Netflix' });
@@ -34,7 +37,7 @@ test('found bills: Add matches the past payments, Not a bill hides it for good',
 	await expect(card.getByTestId('found-bill')).toHaveCount(1);
 
 	// Not a bill: gone, and a later sync does not bring it back
-	await page.goto('/bills');
+	await page.reload();
 	const spotify = page.getByTestId('found-bill').filter({ hasText: 'Spotify' });
 	await expect(spotify).toBeVisible();
 	await spotify.getByRole('button', { name: 'Spotify is not a bill' }).click();
@@ -46,7 +49,7 @@ test('found bills: Add matches the past payments, Not a bill hides it for good',
 
 	// the Netflix rows are matched, not waiting for review
 	await page.getByRole('radio', { name: 'Subscriptions' }).click();
-	await expect(page.getByTestId('bill-list').getByRole('link', { name: /Netflix/ })).toBeVisible();
+	await expect(page.getByTestId('bill-row').filter({ hasText: 'Netflix' })).toBeVisible();
 	await page.goto('/transactions');
 	await expect(reviewRow(page, 'NETFLIX.COM')).toHaveCount(0);
 	await expect(txRow(page, 'NETFLIX.COM')).toHaveCount(3);

@@ -44,7 +44,7 @@ test('"netflix 15.49 on the 7th" → a monthly subscription on day 7, named for 
 	await expect(page.getByText(/Netflix added · every month · next/)).toBeVisible();
 
 	await page.getByRole('radio', { name: 'Subscriptions' }).click();
-	const row = page.getByTestId('bill-list').getByRole('link', { name: /Netflix/ });
+	const row = page.getByTestId('bill-row').filter({ hasText: 'Netflix' });
 	await expect(row).toContainText('−$15.49');
 	await row.click();
 	await expect(page.getByRole('heading', { name: 'Netflix' })).toBeVisible();
@@ -56,12 +56,13 @@ test('"netflix 15.49 on the 7th" → a monthly subscription on day 7, named for 
 
 test('"oil change 60 friday" → a one-off this Friday', async ({ page }) => {
 	await registerWithHousehold(page);
-	await page.goto('/week');
+	await page.goto('/bills');
 	await quickAdd(page, 'oil change 60 friday');
 	await expect(page.getByText(/Oil change added · one time/)).toBeVisible();
 	await page.goto('/bills?tab=once');
 	await page.getByRole('radio', { name: 'One-offs' }).click();
-	const row = page.getByTestId('one-offs').getByRole('link', { name: /Oil change/ });
+	const row = page.getByTestId('bill-row').filter({ hasText: 'Oil change' });
+	await expect(row.getByTestId('one-off-status')).toHaveText('Planned');
 	await expect(row).toContainText(monthDay(nextWeekday(5)));
 	await expect(row).toContainText('−$60.00');
 	await row.click();
@@ -75,7 +76,9 @@ test('"paycheck 3200 every other friday" → income every two weeks', async ({ p
 	await expect(page.getByText(/Paycheck added · every 2 weeks · next/)).toBeVisible();
 	await page.goto('/bills');
 	await page.getByRole('radio', { name: 'Income' }).click();
-	await expect(page.getByTestId('monthly-total')).toHaveText('+$6,933.33');
+	const pay = page.getByTestId('bill-row').filter({ hasText: 'Paycheck' });
+	await expect(pay).toContainText('+$3,200.00');
+	await expect(pay).toContainText('/2wk');
 	await openBill(page, 'Paycheck');
 	await expect(page.getByText('Income · Every 2 weeks')).toBeVisible();
 	await expect(page.locator('dd').first()).toHaveText(monthDay(nextWeekday(5)));
@@ -115,9 +118,7 @@ test('chips correct what the sentence got wrong; every 6 months is two yearly it
 	await page.goto('/bills');
 	await quickAdd(page, 'car insurance 216 every 6 months');
 	await expect(page.getByText(/Car insurance added · 2 items · every 6 months/)).toBeVisible();
-	await expect(
-		page.getByTestId('bill-list').getByRole('link', { name: /Car insurance/ })
-	).toHaveCount(2);
+	await expect(page.getByTestId('bill-row').filter({ hasText: 'Car insurance' })).toHaveCount(2);
 
 	// "More options" carries the sentence into the full form
 	await hydrated(page);

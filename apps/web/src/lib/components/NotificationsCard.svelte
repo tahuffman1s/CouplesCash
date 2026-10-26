@@ -42,7 +42,7 @@
 	let currentEndpoint = $state('');
 	let working = $state(false);
 
-	const DAYS = [0, 1, 2, 3, 7];
+	const DAYS = [0, 1, 2, 3];
 	const dayLabel = (d: number) =>
 		d === 0 ? 'Same day' : d === 1 ? '1 day before' : `${d} days before`;
 
@@ -194,6 +194,23 @@
 							update({ reset: false })}
 				>
 					<p class="text-sm font-medium">What to send</p>
+					<div class="form-control">
+						<label class="label cursor-pointer justify-start gap-3 px-0">
+							<input
+								type="checkbox"
+								name="paydayEnabled"
+								class="toggle toggle-secondary"
+								defaultChecked={prefs.paydayEnabled ?? prefs.weekSummaryEnabled ?? true}
+								data-testid="payday-push-toggle"
+							/>
+							<span class="label-text">Payday reminder</span>
+						</label>
+						<p class="pl-15 text-xs text-base-content/60">
+							One push on payday, at the hour below: <em
+								>“Payday · move $253.17 to savings · fun money $40 sent ✓”</em
+							>
+						</p>
+					</div>
 					<label class="label cursor-pointer justify-start gap-3 px-0">
 						<input
 							type="checkbox"
@@ -204,7 +221,7 @@
 						<span class="label-text">Bill reminders</span>
 					</label>
 					<div class="form-control">
-						<span class="label-text mb-1 text-sm font-medium">When</span>
+						<span class="label-text mb-1 text-sm font-medium">Remind me</span>
 						<div class="flex flex-wrap gap-2" role="group" aria-label="Days before">
 							{#each DAYS as d (d)}
 								<label
@@ -245,33 +262,6 @@
 							>In your household's time zone.</span
 						>
 					</label>
-					<label class="label cursor-pointer justify-start gap-3 px-0">
-						<input
-							type="checkbox"
-							name="activityEnabled"
-							class="toggle toggle-secondary"
-							defaultChecked={prefs.activityEnabled}
-						/>
-						<span class="label-text">Partner activity (payments, auto-pay, new expenses)</span>
-					</label>
-					<div class="form-control">
-						<label class="label cursor-pointer justify-start gap-3 px-0">
-							<input
-								type="checkbox"
-								name="weekSummaryEnabled"
-								class="toggle toggle-secondary"
-								defaultChecked={prefs.weekSummaryEnabled ?? true}
-								data-testid="week-summary-toggle"
-							/>
-							<span class="label-text">Weekly summary</span>
-						</label>
-						<p class="pl-15 text-xs text-base-content/60">
-							Two pushes a week, at the hour above: the day before your week starts – <em
-								>“Week ahead: $1,240 planned, $860 expected left”</em
-							>
-							– and on day five – <em>“You have $312 left this week · budget $40 under”</em>.
-						</p>
-					</div>
 					<button class="btn min-h-12 rounded-full btn-primary">Save preferences</button>
 				</form>
 

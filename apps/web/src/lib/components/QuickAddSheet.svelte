@@ -117,13 +117,6 @@
 		q.set('anchor', draft.anchorDate);
 		return `/bills/new?${q}`;
 	});
-	const expenseHref = $derived.by(() => {
-		const q = new SvelteURLSearchParams();
-		if (draft.name) q.set('name', draft.name);
-		if (draft.amountCents) q.set('amount', centsToInput(draft.amountCents));
-		return `/expenses/new?${q}`;
-	});
-
 	function reset() {
 		text = '';
 		overrides = {};
@@ -433,9 +426,7 @@
 			<a href={moreHref} class="btn min-h-11 rounded-full btn-ghost btn-sm" data-testid="quick-more"
 				>More options</a
 			>
-			<a href={expenseHref} class="btn min-h-11 rounded-full btn-ghost btn-sm"
-				>Already spent? Add an expense</a
-			>
+			<a href="/bills/paste" class="btn min-h-11 rounded-full btn-ghost btn-sm">Paste from notes</a>
 		</div>
 	</form>
 </BottomSheet>

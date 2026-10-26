@@ -5,51 +5,37 @@ import type {
 	BillSuggestion,
 	CalendarResponse,
 	Category,
-	Occurrence,
 	RecurringItem
 } from '#lib/types.ts';
 import { api, endpoints } from '#lib/server/api.ts';
 import { quickAddAction } from '#lib/server/quickadd.ts';
-import { addDays, endOfMonth, startOfMonth, today } from '#lib/utils/dates.ts';
+import { addDays, today } from '#lib/utils/dates.ts';
 
-/** v6 Bills: everything that repeats, plus one-offs. List ⇄ Calendar (`?view=calendar&m=`). */
+/** v7 Bills: one list grouped by pay week (this pay week · next 4 weeks · later), found bills. */
 export const load: PageServerLoad = async (event) => {
 	const q = event.url.searchParams;
 	// v6: expenses live in Transactions now
 	if (q.get('tab') === 'expenses') redirect(308, '/transactions');
-	const m = q.get('m');
-	const month = m && /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : today().slice(0, 7);
-	const view: 'list' | 'calendar' = q.get('view') === 'calendar' ? 'calendar' : 'list';
-	const d = q.get('d');
 	const empty = {
-		view,
-		month,
-		day: d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null,
 		tab: q.get('tab'),
+		added: Number(q.get('added') ?? 0) || 0,
 		items: null as RecurringItem[] | null,
 		categories: [] as Category[],
 		accounts: [] as Account[],
 		suggestions: [] as BillSuggestion[],
-		occurrences: [] as Occurrence[],
 		oneOffPaid: [] as string[]
 	};
 	if (!event.locals.household) return empty;
 	const client = api(event);
+	const v = endpoints(event);
 	const quiet = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
-	const [items, categories, accounts, suggestions, calendar] = await Promise.all([
-		client.get<RecurringItem[]>('/recurring'),
-		quiet(client.get<Category[]>('/categories'), [] as Category[]),
-		quiet(client.get<Account[]>('/accounts'), [] as Account[]),
-		quiet(endpoints(event).billSuggestions.list(), [] as BillSuggestion[]),
-		view === 'calendar'
-			? client
-					.get<CalendarResponse>(
-						`/calendar?from=${startOfMonth(`${month}-01`)}&to=${endOfMonth(`${month}-01`)}`
-					)
-					.then((c) => c.occurrences)
-			: Promise.resolve([] as Occurrence[])
+	const [items, categories, accounts, suggestions] = await Promise.all([
+		v.recurring.list(),
+		quiet(v.categories(), [] as Category[]),
+		quiet(v.accounts.list(), [] as Account[]),
+		quiet(v.billSuggestions.list(), [] as BillSuggestion[])
 	]);
-	// which one-offs are paid (their single occurrence), for the One-offs chip
+	// which one-offs are paid (their single occurrence), for their Paid / Late / Planned badge
 	const onceDates = items.filter((i) => i.frequency === 'once').map((i) => i.anchorDate);
 	let oneOffPaid: string[] = [];
 	if (onceDates.length) {
@@ -60,15 +46,7 @@ export const load: PageServerLoad = async (event) => {
 			.then((c) => c.occurrences.filter((o) => o.paid).map((o) => o.itemId))
 			.catch(() => [] as string[]);
 	}
-	return {
-		...empty,
-		items,
-		categories,
-		accounts,
-		suggestions,
-		occurrences: calendar,
-		oneOffPaid
-	};
+	return { ...empty, items, categories, accounts, suggestions, oneOffPaid };
 };
 
 export const actions: Actions = { quickAdd: quickAddAction };
