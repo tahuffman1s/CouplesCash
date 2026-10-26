@@ -1,6 +1,7 @@
 # CLAUDE.md — CouplesCash cheat-sheet for coding agents
 
-Couples' shared-finance PWA. Two users per household; manual accounts, recurring
+Couples' shared-finance PWA, **tailored in v7 to one household's Friday routine** (see `docs/PLAN-V7.md`: the
+pay-week plan "available − bills − fun money − one-offs = left on Thursday", payday checklist, savings sweep). Two users per household; manual accounts, recurring
 bills/subscriptions/income, calendar, donut chart; v2 adds push reminders, autopay
 auto-marking, activity feed, expenses + budgets, pay-period view, savings goals,
 month report, to-pay checklist, household settings and passkeys; v3 adds bank sync
@@ -8,11 +9,11 @@ month report, to-pay checklist, household settings and passkeys; v3 adds bank sy
 and weekly budgets; v5 adds the pending lifecycle, transfer detection/analysis, per-account
 transactions and matching any transaction to bills. Runs on a Raspberry Pi 4 via Docker
 Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` (v2) and
-`docs/PLAN-V3.md` (v3), `docs/PLAN-V4.md` (v4), `docs/PLAN-V5.md` (v5) for the why.
+`docs/PLAN-V3.md` (v3), `docs/PLAN-V4.md` (v4), `docs/PLAN-V5.md` (v5), `docs/PLAN-V6.md` (v6), `docs/PLAN-V7.md` (v7 — read this first) for the why.
 
 ## Source of truth
 - **`docs/API-CONTRACT.md` defines every route, shape and error** (v2 routes under
-  "# v2 additions", v3 under "# v3 additions", v4 under "# v4 additions", v5 under "# v5 additions"). Web and API are built against it
+  "# v2 additions", v3 under "# v3 additions", v4 under "# v4 additions", v5 under "# v5 additions", v6 under "# v6 additions", v7 under "# v7 additions"). Web and API are built against it
   independently. Change the contract first, then both sides.
 - `docs/PLAN.md` §5 + `docs/PLAN-V2.md` "Data model additions" + `docs/PLAN-V3.md` "Data
   model" are the data model; `docs/PLAN.md` §7 the security checklist (non-negotiable).
@@ -126,6 +127,12 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   **never log or return an access URL** or a setup token — logs carry link names and counts.
   Rotating the key = re-link; no re-encryption path. Bridge `errors` are surfaced (link
   `last_error` + `bank.error` activity), never swallowed.
+- **Friday plan (v7)**: the week is the **pay week** (`households.payday_weekday` → day before next payday). Only the
+  account with `role = 'bills'` counts: available = bank `availableCents` else `balanceCents − pendingOutCents` (never
+  sum other checking accounts). Fun-money accounts (`role = 'fun'`, one owner each) never enter To review. Fun money is
+  `kind = 'transfer'` items (from/to accounts) auto-paid by matching transfers; the savings sweep is frozen at payday
+  00:00 from last week's left-at-end and auto-done by a bills→savings transfer. The web has three tabs (This week ·
+  Transactions · Bills) + Settings; removed screens redirect to `/week` — don't re-add them without a plan change.
 - **Week view**: a *planned item* is any occurrence due in the week (incl. `frequency: once` one-offs);
   `varianceCents = paid.amountCents − amountCents`; left-at-end = spendable (checking+cash) + unpaid income
   − unpaid planned outflow for the rest of the week; weekly budgets are separate `budgets` rows with
