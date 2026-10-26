@@ -13,6 +13,7 @@ import {
 	leftLabel,
 	lineName,
 	lineStatus,
+	waitingForBank,
 	noteText,
 	onThe,
 	orderAccounts,
@@ -302,6 +303,15 @@ describe('checklist + sweep', () => {
 				'2026-10-26'
 			)
 		).toBe('Paid');
+	});
+	it('a tick by hand or by autopay waits for the bank; a bank payment does not', () => {
+		const paid = (source: 'manual' | 'autopay' | 'bank' | undefined) =>
+			line({ paid: { paidAt: '', paidBy: null, amountCents: 1, auto: false, source } });
+		expect(waitingForBank(paid('manual'))).toBe(true);
+		expect(waitingForBank(paid('autopay'))).toBe(true);
+		expect(waitingForBank(paid(undefined))).toBe(true);
+		expect(waitingForBank(paid('bank'))).toBe(false);
+		expect(waitingForBank(line())).toBe(false);
 	});
 });
 

@@ -82,7 +82,8 @@ public sealed class FridayService(
         var householdId = household.Id;
         var from = today.AddDays(-LookbackDays);
         var to = today.AddDays(PlanEngine.TransferWindowDays);
-        var paidSet = (await items.ListPaymentsAsync(conn, householdId, from, to, ct)).Select(p => (p.RecurringItemId, p.DueDate)).ToHashSet();
+        var paidSet = (await items.ListPaymentsAsync(conn, householdId, from, to, ct))
+            .Where(p => p.Source == PaymentSource.Bank).Select(p => (p.RecurringItemId, p.DueDate)).ToHashSet();
         var byId = accountRows.ToDictionary(a => a.Id);
         var planned = transferItems
             .SelectMany(i => RecurrenceEngine.Expand(i.Rule, from, to).Where(d => !paidSet.Contains((i.Id, d))).Select(d => (Item: i, Due: d)))
@@ -108,7 +109,7 @@ public sealed class FridayService(
             var item = itemsById[m.ItemId];
             await imports.LockAsync(conn, householdId, m.OutflowId, ct);
             var outRow = await imports.GetAsync(conn, householdId, m.OutflowId, ct);
-            if (outRow is null || !Claimable(outRow) || await items.InsertPaymentIfUnpaidAsync(conn, item.Id, m.DueDate, m.AmountCents, now, ct) is null)
+            if (outRow is null || !Claimable(outRow) || await items.PayFromBankAsync(conn, item.Id, m.DueDate, m.AmountCents, now, ct) is null)
             {
                 continue;
             }

@@ -4,7 +4,8 @@
   POST /simplefin/claim/<token>  -> 200, body = access URL with Basic-auth userinfo pointing back at this server
                                     (token "expired" -> 403, like an already-claimed token)
   GET  /simplefin/accounts       -> 200 JSON { errors: [], accounts: [...] }; needs Basic auth user:pass (else 403);
-                                    honours start-date / end-date (exclusive) / pending=1
+                                    honours start-date / end-date (exclusive) / pending=1; like the real Bridge, a range over
+                                    45 days gets an advisory in errors and one over 90 days is cut to 90 (also in errors)
   POST /__phase/<n>              -> enables a data-set phase (phases accumulate): 2 adds a second RENT PAYMENT so auto-match can be
                                     observed; 3 adds "JIFFY LUBE #42" -54.20 today, which clears a planned $60 one-off (v4);
                                     v5 pending lifecycle and transfers (a later phase may also remove what an earlier one added):
@@ -23,7 +24,8 @@ v6 dataset (a second, independent Bridge user for the matcher smoke; claim token
 
 v7 dataset (their real shape; claim token "v7"; phases via POST /__phase/v7/<n>[?cents=N]):
   1 (always) US Bank checking (balance 2408.07, available 2345.67): "ACME CORP PAYROLL" +1500.00 today, pending ×3 = −62.40
-    ("WALMART SUPERCENTER" −25.00, "SHELL OIL 5741" −30.00 in the v2 shape posted=0 + transacted_at, "STARBUCKS 0091" −7.40);
+    ("WALMART SUPERCENTER" −25.00 posted on its expected post date 3 days out + transacted_at today, "SHELL OIL 5741" −30.00
+    in the v2 shape posted=0 + transacted_at, "STARBUCKS 0091" −7.40);
     Ally High Yield Savings (balance 10000.00, no available-balance): "NELNET STUDENT LOAN" −250.00 today;
     two Ally checking fun accounts: "TARGET 0042" −15.00 today, "SEPHORA 118" −22.00 yesterday;
   2 the Friday fun money: US Bank −20.00 ×2 "ONLINE TRANSFER TO ALLY BANK" + +20.00 on each fun account (balances follow);
@@ -35,6 +37,7 @@ import argparse
 import base64
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -169,7 +172,9 @@ def v7_accounts(args):
     usb_balance, usb_available, sav_balance, fun1_balance, fun2_balance = 240807, 234567, 1000000, 11000, 9500
     usb = [
         {"id": "v7-payroll-1", "posted": today, "amount": "1500.00", "description": "ACME CORP PAYROLL"},
-        {"id": "v7-walmart-p1", "posted": today, "amount": "-25.00", "description": "WALMART SUPERCENTER", "pending": True},
+        # dated by the bank on the day it expects to post (3 days out); it happened today
+        {"id": "v7-walmart-p1", "posted": days_ago(args, -3), "transacted_at": today, "amount": "-25.00",
+         "description": "WALMART SUPERCENTER", "pending": True},
         {"id": "v7-shell-p1", "posted": 0, "transacted_at": yesterday, "amount": "-30.00", "description": "SHELL OIL 5741"},
         {"id": "v7-sbux-p1", "posted": today, "amount": "-7.40", "description": "STARBUCKS 0091", "pending": True},
     ]
@@ -238,6 +243,14 @@ class Handler(BaseHTTPRequestHandler):
         start = int(q.get("start-date", ["0"])[0])
         end = int(q.get("end-date", [str(2**40)])[0])
         pending = q.get("pending", ["0"])[0] == "1"
+        errors = []
+        if "start-date" in q:
+            days = ((end if "end-date" in q else int(time.time())) - start) / 86400
+            if days > 90:
+                start = end - 90 * 86400
+                errors.append("You requested more than 90 days of transactions; only 90 days were returned.")
+            elif days > 45:
+                errors.append("Requesting more than 45 days of transactions may not be supported in the future.")
 
         result = []
         for acct in dataset(self.args):
@@ -246,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
                    if start <= (t.get("posted") or t.get("transacted_at", 0)) < end
                    and (pending or not (t.get("pending", False) or t.get("posted") == 0))]
             result.append({**acct, "transactions": txs})
-        return self._send(200, json.dumps({"errors": [], "accounts": result}), "application/json")
+        return self._send(200, json.dumps({"errors": errors, "accounts": result}), "application/json")
 
     def do_POST(self):
         url = urlparse(self.path)

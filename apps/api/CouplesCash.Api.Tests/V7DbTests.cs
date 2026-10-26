@@ -108,6 +108,56 @@ public class V7DbTests
     }
 
     [DbFact]
+    public async Task A_bank_transaction_takes_over_a_tick_by_hand_or_autopay_but_never_another_bank_payment()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
+        await using var sp = Services(connectionString);
+        Assert.True(sp.GetRequiredService<DbUpMigrator>().Run());
+
+        var ct = CancellationToken.None;
+        var now = DateTime.UtcNow;
+        var today = DateOnly.FromDateTime(now);
+        var users = sp.GetRequiredService<UserRepository>();
+        var households = sp.GetRequiredService<HouseholdRepository>();
+        var items = sp.GetRequiredService<RecurringRepository>();
+        var db = sp.GetRequiredService<NpgsqlDataSource>();
+
+        var user = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Tester", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var household = await households.CreateAsync(user.Id, "V7 DB takeover", now, ct);
+        try
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            RecurringItemRow Create(string name, bool autoPay) => items.CreateAsync(conn, household.Id, user.Id,
+                new RecurringFields(name, Kind.Bill, 6_000, null, null, Frequency.Monthly, today, null, autoPay, null, null), now, ct).GetAwaiter().GetResult();
+            var water = Create("Water", autoPay: false);
+            var phone = Create("Phone", autoPay: true);
+
+            // Ticked by hand / by autopay before the bank shows it.
+            await items.UpsertPaymentAsync(conn, water.Id, today, user.Id, 6_000, now, auto: false, PaymentSource.Manual, ct);
+            await items.UpsertPaymentAsync(conn, phone.Id, today, null, 6_000, now, auto: true, PaymentSource.Autopay, ct);
+
+            // The bank rows arrive at their real amounts: each takes the payment over.
+            var waterPaid = await items.PayFromBankAsync(conn, water.Id, today, 7_240, now, ct);
+            Assert.Equal((PaymentSource.Bank, 7_240L, (Guid?)null, true), (waterPaid!.Source, waterPaid.AmountCents, waterPaid.PaidBy, waterPaid.Auto));
+            Assert.Equal(PaymentSource.Bank, (await items.PayFromBankAsync(conn, phone.Id, today, 6_000, now, ct))!.Source);
+
+            // A second bank row never replaces a bank payment.
+            Assert.Null(await items.PayFromBankAsync(conn, water.Id, today, 1_000, now, ct));
+            Assert.Equal(7_240, (await items.GetPaymentAsync(conn, water.Id, today, ct))!.AmountCents);
+
+            // An unpaid occurrence is simply paid.
+            var fresh = Create("Internet", autoPay: false);
+            Assert.Equal(PaymentSource.Bank, (await items.PayFromBankAsync(conn, fresh.Id, today, 5_750, now, ct))!.Source);
+        }
+        finally
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = household.Id });
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = @Id", new { Id = user.Id });
+        }
+    }
+
+    [DbFact]
     public async Task Five_pending_transactions_on_one_account_are_all_stored_and_listed()
     {
         var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;

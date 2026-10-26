@@ -54,12 +54,39 @@ public class BankSyncRulesTests
     }
 
     [Fact]
-    public void Fetch_window_is_90_days_first_then_30_and_ends_tomorrow_exclusive()
+    public void Fetch_window_is_90_days_first_then_30_and_runs_two_weeks_ahead()
     {
         var today = new DateOnly(2026, 10, 23);
 
-        Assert.Equal((new DateOnly(2026, 7, 25), new DateOnly(2026, 10, 24)), BankSyncRules.FetchWindow(null, today));
-        Assert.Equal((new DateOnly(2026, 9, 23), new DateOnly(2026, 10, 24)), BankSyncRules.FetchWindow(Now.AddHours(-6), today));
+        Assert.Equal((new DateOnly(2026, 7, 25), new DateOnly(2026, 11, 6)), BankSyncRules.FetchWindow(null, today));
+        Assert.Equal((new DateOnly(2026, 9, 23), new DateOnly(2026, 11, 6)), BankSyncRules.FetchWindow(Now.AddHours(-6), today));
+    }
+
+    [Fact]
+    public void A_regular_sync_is_one_request_inside_the_bridges_45_day_advisory()
+    {
+        var (start, end) = BankSyncRules.FetchWindow(Now.AddHours(-6), new DateOnly(2026, 10, 23));
+
+        var request = Assert.Single(BankSyncRules.FetchRequests(start, end));
+        Assert.Equal((start, end, true), request);
+        Assert.True(end.DayNumber - start.DayNumber <= 44);
+    }
+
+    [Fact]
+    public void The_first_sync_splits_its_history_into_requests_of_44_days_newest_first_with_pending_only_in_the_newest()
+    {
+        var (start, end) = BankSyncRules.FetchWindow(null, new DateOnly(2026, 10, 23));
+
+        var requests = BankSyncRules.FetchRequests(start, end);
+
+        Assert.Equal(
+            [
+                (new DateOnly(2026, 9, 23), new DateOnly(2026, 11, 6), true),
+                (new DateOnly(2026, 8, 10), new DateOnly(2026, 9, 23), false),
+                (new DateOnly(2026, 7, 25), new DateOnly(2026, 8, 10), false),
+            ],
+            requests);
+        Assert.All(requests, r => Assert.InRange(r.EndExclusive.DayNumber - r.Start.DayNumber, 1, BankSyncRules.MaxRequestDays));
     }
 
     [Theory]

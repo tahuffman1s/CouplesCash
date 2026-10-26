@@ -410,6 +410,8 @@ const billSuggestions = new Map<string, BillSuggestionRec>();
 const lastRematch = new Map<string, number>(); // by household (1/min)
 const matcherRuns = new Map<string, { at: string; autoMatched: number }>(); // by household
 const sweeps = new Map<string, SweepRec>(); // `${hh}:${weekStart}`
+/** v7: only a bank payment closes an occurrence for matching; a tick by hand or by autopay is taken over by its bank row. */
+const bankPaid = (key: string) => payments.get(key)?.source === 'bank';
 
 const PORT = Number(process.env.MOCK_API_PORT ?? 8099);
 const ACCESS_TTL = Number(process.env.MOCK_ACCESS_TTL ?? 900);
@@ -1623,7 +1625,7 @@ function suggest(
 		const from = toIso(new Date(parse(tx.postedOn).getTime() - window * 86400_000));
 		const to = toIso(new Date(parse(tx.postedOn).getTime() + window * 86400_000));
 		for (const d of expand(i, from, to)) {
-			if (payments.has(`${i.id}:${d}`)) continue;
+			if (bankPaid(`${i.id}:${d}`)) continue;
 			const distance = Math.abs(parse(d).getTime() - parse(tx.postedOn).getTime());
 			const rank = distance - names.any * 3 * 86400_000; // a name match is worth 3 days
 			if (!best || rank < best.rank)
@@ -2020,7 +2022,7 @@ function autoApply(hh: string, rows: Tx[]): number {
 		const s = tx.suggestion;
 		if (s?.kind === 'occurrence' && s.confidence >= 90) {
 			const item = items.get(s.itemId);
-			if (!item || payments.has(`${item.id}:${s.dueDate}`)) continue;
+			if (!item || bankPaid(`${item.id}:${s.dueDate}`)) continue;
 			const rule = payeeRules.get(`${hh}:${normPayee(tx.payee ?? tx.description)}`);
 			const bank = nameScores(item, tx).bank;
 			if (!(rule && rule.itemId === s.itemId) && bank < 0.8) continue;
@@ -2449,7 +2451,7 @@ function confirmTx(
 			return { status: 400, detail: 'That bill does not match the direction of this transaction' };
 		if (!expand(item, date, date).includes(date))
 			return { status: 400, detail: 'Not an occurrence' };
-		if (payments.has(`${item.id}:${date}`))
+		if (bankPaid(`${item.id}:${date}`))
 			return { status: 400, detail: 'That occurrence is already paid' };
 		payments.set(`${item.id}:${date}`, {
 			paidAt: nowIso(),
@@ -3067,7 +3069,7 @@ function matchPlannedTransfers(hh: string) {
 		if (i.householdId !== hh || i.archived || i.kind !== 'transfer') continue;
 		for (const d of expand(i, addDaysIso(today, -35), addDaysIso(today, 7))) {
 			const key = `${i.id}:${d}`;
-			if (payments.has(key)) continue;
+			if (bankPaid(key)) continue;
 			const fits = outflows(i.fromAccountId).filter(
 				(t) => Math.abs(-t.amountCents - i.amountCents) <= 100 && dayDistance(t.postedOn, d) <= 2
 			);
@@ -3217,8 +3219,11 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 			else lines.bills.push({ kind: o.kind, occurrence: o });
 		}
 	}
+	// a tick by hand or by autopay keeps counting until the bank shows it (the money is still in available)
 	const unpaid = (l: PlanLine[]) =>
-		l.filter((x) => !x.occurrence.paid).reduce((s, x) => s + x.occurrence.amountCents, 0);
+		l
+			.filter((x) => x.occurrence.paid?.source !== 'bank')
+			.reduce((s, x) => s + x.occurrence.amountCents, 0);
 	const billsOutCents = unpaid(lines.bills);
 	const funOutCents = unpaid(lines.funMoney);
 	const oneOffOutCents = unpaid(lines.oneOffs);

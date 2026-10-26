@@ -39,7 +39,30 @@ public sealed class SimpleFinException(SimpleFinError error, string message, Exc
 }
 
 /// <summary>One parsed <c>GET /accounts</c> response. Amounts are already integer cents.</summary>
-public sealed record SimpleFinAccountSet(IReadOnlyList<string> Errors, IReadOnlyList<SimpleFinAccount> Accounts);
+public sealed record SimpleFinAccountSet(IReadOnlyList<string> Errors, IReadOnlyList<SimpleFinAccount> Accounts)
+{
+    /// <summary>
+    /// Adds an older history response to this (newer) one: balances and account details stay this response's, the older
+    /// transactions are appended where their id is new, accounts only the older one has are kept, and errors are combined.
+    /// </summary>
+    public SimpleFinAccountSet WithHistory(SimpleFinAccountSet older)
+    {
+        var olderById = older.Accounts.GroupBy(a => a.Id, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        var accounts = Accounts.Select(a =>
+        {
+            if (!olderById.TryGetValue(a.Id, out var history))
+            {
+                return a;
+            }
+
+            var ids = a.Transactions.Select(t => t.Id).ToHashSet(StringComparer.Ordinal);
+            return a with { Transactions = [.. a.Transactions, .. history.Transactions.Where(t => ids.Add(t.Id))] };
+        }).ToList();
+        var known = Accounts.Select(a => a.Id).ToHashSet(StringComparer.Ordinal);
+        accounts.AddRange(older.Accounts.Where(a => known.Add(a.Id)));
+        return new SimpleFinAccountSet([.. Errors.Concat(older.Errors).Distinct(StringComparer.Ordinal)], accounts);
+    }
+}
 
 public sealed record SimpleFinAccount(
     string Id,

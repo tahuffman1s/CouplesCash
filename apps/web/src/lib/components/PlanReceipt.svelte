@@ -94,7 +94,8 @@
 						</ul>
 						{#if l.key === 'bills' || l.key === 'oneoffs' || l.key === 'fun'}
 							<p class="mt-1 text-xs text-base-content/55">
-								Only what's still unpaid counts. Bills tick themselves when the bank shows them.
+								A bill counts until the bank shows it, so ticking one early never changes the
+								number. Bills tick themselves when the bank shows them.
 							</p>
 						{/if}
 					{/if}

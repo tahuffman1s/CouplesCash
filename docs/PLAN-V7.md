@@ -43,6 +43,9 @@ US Bank, available now             $2,345.67   ← bank available balance (alrea
 ```
 - **Move to savings** = this week's frozen sweep while it is not ticked. Last week's leftover sits in US Bank until she moves it,
   so it is not this week's money; once the transfer shows up (or she taps Done) the line goes away and `available` already reflects it.
+- **Left on Thursday is the balance after everything is paid**, so a tick never moves it: a bill paid from the bank is
+  already out of `available`; a bill ticked by hand (or by autopay) still counts until the bank shows it, and that bank
+  transaction then takes the tick over. It moves only when the bank does, by the difference between paid and planned.
 - **Available now** = the bills account's bank `availableCents`; when the bank doesn't report it,
   `balanceCents − pendingOutCents` (so pending is never ignored and never double-counted).
 - Bills/one-offs count only when due in the pay week **and** assigned to the bills account or unassigned. Savings

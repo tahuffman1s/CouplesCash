@@ -76,7 +76,9 @@ public sealed class MatchingService(
         // v7: planned transfers are matched by FridayService (pairs / bills-account outflows), never by the matcher or as bills.
         var itemRows = (await items.ListAsync(conn, householdId, null, ct)).Where(i => i.Kind != Kind.Transfer).ToList();
         var itemsById = itemRows.ToDictionary(i => i.Id);
-        var paid = (await items.ListPaymentsAsync(conn, householdId, from, to, ct)).Select(p => (p.RecurringItemId, p.DueDate)).ToHashSet();
+        // Only a bank payment closes an occurrence for matching: one ticked by hand or by autopay is still waiting for its bank row.
+        var paid = (await items.ListPaymentsAsync(conn, householdId, from, to, ct))
+            .Where(p => p.Source == PaymentSource.Bank).Select(p => (p.RecurringItemId, p.DueDate)).ToHashSet();
         var occurrences = itemRows
             .SelectMany(i => RecurrenceEngine.Expand(i.Rule, from, to).Select(d => (Item: i, Due: d, Paid: paid.Contains((i.Id, d)))))
             .ToList();
@@ -416,7 +418,7 @@ public sealed class MatchingService(
             return false;
         }
 
-        if (await items.InsertPaymentIfUnpaidAsync(conn, item.Id, dueDate, row.Magnitude, now, ct) is null)
+        if (await items.PayFromBankAsync(conn, item.Id, dueDate, row.Magnitude, now, ct) is null)
         {
             return false;
         }

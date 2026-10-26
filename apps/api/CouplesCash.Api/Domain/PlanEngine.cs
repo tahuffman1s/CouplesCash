@@ -163,13 +163,15 @@ public static class PlanEngine
         bucket == PlanBucket.OneOff ? "oneoff" : kind.ToDb();
 
     /// <summary>
-    /// Sums of the unpaid occurrences due in <paramref name="week"/> per bucket and
-    /// <c>leftAtEnd = available − bills − fun − one-offs + income</c> (savings bills and unrelated items never count).
+    /// Sums of the occurrences due in <paramref name="week"/> whose money has not moved through the bank yet, per bucket, and
+    /// <c>leftAtEnd = available − bills − fun − one-offs + income</c> (savings bills and unrelated items never count). A line paid from a
+    /// bank transaction is already in <c>available</c>; one ticked by hand or by autopay keeps counting until its bank row arrives (it then
+    /// takes the payment over), so ticking never moves the number — only the bank does.
     /// </summary>
     public static PlanTotals Totals(WeekWindow week, long availableCents, IEnumerable<(PlanOccurrence Occurrence, PlanBucket Bucket)> lines)
     {
         long bills = 0, fun = 0, oneOff = 0, income = 0;
-        foreach (var (o, bucket) in lines.Where(l => !l.Occurrence.IsPaid && week.Contains(l.Occurrence.DueDate)))
+        foreach (var (o, bucket) in lines.Where(l => !l.Occurrence.PaidFromBank && week.Contains(l.Occurrence.DueDate)))
         {
             switch (bucket)
             {

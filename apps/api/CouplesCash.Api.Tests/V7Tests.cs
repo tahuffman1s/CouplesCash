@@ -190,6 +190,22 @@ public class V7Tests
     }
 
     [Fact]
+    public void Ticking_a_bill_by_hand_never_moves_left_on_thursday_only_the_bank_does()
+    {
+        // Rent ticked by hand (or by autopay) before the bank shows it: the $1,850 is still in available, so it still counts.
+        var ticked = Week.Select(o => o.ItemId == Id(1) ? o with { PaidCents = 185_000 } : o).ToList();
+        var before = PlanEngine.Totals(PayWeek, 234_567, Week, UsBank, Roles);
+        var byHand = PlanEngine.Totals(PayWeek, 234_567, ticked, UsBank, Roles);
+        Assert.Equal(before, byHand);
+
+        // The bank row arrives at $1,862.40: available drops by it and the line is paid from the bank → left moves only by the difference.
+        var fromBank = Week.Select(o => o.ItemId == Id(1) ? o with { PaidCents = 186_240, PaidFromBank = true } : o).ToList();
+        var posted = PlanEngine.Totals(PayWeek, 234_567 - 186_240, fromBank, UsBank, Roles);
+        Assert.Equal(199_250 - 185_000, posted.BillsOutCents);
+        Assert.Equal(25_317 - 1_240, posted.LeftAtEndCents);
+    }
+
+    [Fact]
     public void Her_note_without_the_bank_available_balance()
     {
         // Balance $2,408.07 − pending $62.40 → the same $2,345.67 → the same $253.17.

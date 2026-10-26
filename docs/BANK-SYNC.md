@@ -48,7 +48,9 @@ How the pieces fit:
    `DATA_KEY` (AES-256-GCM) before it touches the database, never logged, never returned to
    the browser. The token itself is now spent; a second app needs a second token.
 3. **Sync.** Every `SYNC_INTERVAL_HOURS` (default 6) the background job fetches the last 30
-   days (90 on the first sync), updates the balances of mapped accounts, drops transactions it
+   days through two weeks ahead (so pending charges the bank dates on their post day are included;
+   90 days of history on the first sync, in requests of at most 44 days so the Bridge never warns
+   about the range), updates the balances of mapped accounts, drops transactions it
    has already seen, and files the new ones in the inbox with a suggestion each.
 
 ## Requirements

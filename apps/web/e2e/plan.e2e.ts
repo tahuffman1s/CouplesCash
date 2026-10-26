@@ -82,12 +82,12 @@ test('the plan reads like her note and its math follows bills paid and one-offs 
 	await expect(page.getByText(`Copied ${(left / 100).toFixed(2)}`)).toBeVisible();
 	expect(await page.evaluate(() => navigator.clipboard.readText())).toBe((left / 100).toFixed(2));
 
-	// a bill marked paid leaves the math
+	// a bill ticked by hand: the money is still in the account until the bank shows it, so the
+	// number she writes down does not move (it never jumps up)
 	await bills.getByRole('button', { name: 'Mark Water paid' }).click();
-	left += 6000;
+	await expect(bills.getByTestId('plan-status')).toHaveText('Paid · waiting for the bank');
 	await expect(page.getByTestId('left-on')).toHaveText(usd(left));
-	await expect(page.getByTestId('plan-amount-bills')).toHaveText('$0.00');
-	await expect(bills.getByTestId('plan-status')).toHaveText('Paid');
+	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$60.00');
 
 	// a one-off from one sentence joins it
 	await quickAdd(page, 'oil change 60 today');

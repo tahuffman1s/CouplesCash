@@ -786,6 +786,7 @@ v7_friday_flow() {
   local V7TOKEN; V7TOKEN="$(printf 'http://127.0.0.1:%s/simplefin/claim/v7' "$SMOKE_SIMPLEFIN_PORT" | base64 -w0)"
   request POST /v1/banks/simplefin/claim "$T_TOKEN" "$(jq -nc --arg t "$V7TOKEN" '{setupToken:$t,name:"Their banks"}')"; expect 201 "claim the v7 Bridge (US Bank + Ally ×3)"
   LINK7="$(echo "$BODY" | jq -r .id)"
+  v7check "the first sync stays inside the Bridge's limits (no 45/90-day notices)" '.lastError==null and (.bridgeErrors|length==0)'
   local EXTS; EXTS="$BODY"
   map7() { # map7 EXTERNAL-ID NAME TYPE INSTITUTION → prints the new account id
     local ext; ext="$(echo "$EXTS" | jq -r --arg x "$1" '.accounts[] | select(.externalId==$x) | .id')"

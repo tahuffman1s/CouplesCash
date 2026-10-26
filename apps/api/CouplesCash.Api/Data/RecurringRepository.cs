@@ -227,12 +227,18 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
             new { ItemId = itemId, DueDate = dueDate, Now = now, AmountCents = amountCents }, ct));
 
     /// <summary>Inbox auto-match: inserts an automatic payment only when the occurrence is unpaid (a bank transaction proves the money moved, so autopay skips do not apply).</summary>
-    public Task<PaymentRow?> InsertPaymentIfUnpaidAsync(NpgsqlConnection conn, Guid itemId, DateOnly dueDate, long amountCents, DateTime now, CancellationToken ct) =>
+    /// <summary>
+    /// v7 automatic payment from a bank transaction (<c>paid_by NULL, auto true, source bank</c>). An occurrence ticked by hand or by
+    /// autopay is taken over — the bank row is what the money really did; one already paid from the bank is left alone (null).
+    /// </summary>
+    public Task<PaymentRow?> PayFromBankAsync(NpgsqlConnection conn, Guid itemId, DateOnly dueDate, long amountCents, DateTime now, CancellationToken ct) =>
         conn.QuerySingleOrDefaultAsync<PaymentRow>(Cmd(
             $"""
             INSERT INTO occurrence_payments (recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto, source)
             VALUES (@ItemId, @DueDate, @Now, NULL, @AmountCents, true, 'bank')
-            ON CONFLICT (recurring_item_id, due_date) DO NOTHING
+            ON CONFLICT (recurring_item_id, due_date) DO UPDATE
+                SET paid_at = EXCLUDED.paid_at, paid_by = NULL, amount_cents = EXCLUDED.amount_cents, auto = true, source = 'bank'
+                WHERE occurrence_payments.source <> 'bank'
             RETURNING {PaymentColumns}
             """,
             new { ItemId = itemId, DueDate = dueDate, Now = now, AmountCents = amountCents }, ct));

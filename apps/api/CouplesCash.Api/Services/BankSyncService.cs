@@ -102,15 +102,32 @@ public sealed class BankSyncService(
         var today = time.Today();
         var (start, endExclusive) = BankSyncRules.FetchWindow(link.LastSyncedAt, today);
 
+        // One request on a regular sync; the first sync's 90 days of history come in further requests that stay inside the
+        // Bridge's per-request limit (a longer one is cut and reported as an error).
+        var requests = BankSyncRules.FetchRequests(start, endExclusive);
         SimpleFinAccountSet set;
         try
         {
-            set = await client.GetAccountsAsync(accessUrl, start, endExclusive, includePending: true, ct);
+            set = await client.GetAccountsAsync(accessUrl, requests[0].Start, requests[0].EndExclusive, includePending: true, ct);
         }
         catch (SimpleFinException ex)
         {
             await RecordFailureAsync(link, actorId, ex.Message, manual, ct);
             throw;
+        }
+
+        foreach (var (olderStart, olderEnd, _) in requests.Skip(1))
+        {
+            try
+            {
+                set = set.WithHistory(await client.GetAccountsAsync(accessUrl, olderStart, olderEnd, includePending: false, ct));
+            }
+            catch (SimpleFinException ex)
+            {
+                // History is a nice-to-have: the recent window already holds balances and pending.
+                logger.LogWarning("Bank sync of {LinkId}: history before {End} skipped: {Message}", link.Id, olderEnd, ex.Message);
+                break;
+            }
         }
 
         var currency = await households.CurrencyAsync(householdId, ct);

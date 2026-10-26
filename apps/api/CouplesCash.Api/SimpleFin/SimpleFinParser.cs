@@ -152,6 +152,20 @@ public static class SimpleFinParser
             postedOn = transactedAt is > 0 ? DateOnly.FromDateTime(FromUnix(transactedAt.Value)) : today;
         }
 
+        // A pending charge is dated when it happened: some banks put the day they expect it to post in `posted`.
+        if (pending)
+        {
+            if (transactedAt is > 0)
+            {
+                postedOn = DateOnly.FromDateTime(FromUnix(transactedAt.Value));
+            }
+
+            if (postedOn > today)
+            {
+                postedOn = today;
+            }
+        }
+
         return new SimpleFinTransaction(
             id,
             postedOn,

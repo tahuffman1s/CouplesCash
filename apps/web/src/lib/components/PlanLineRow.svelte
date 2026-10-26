@@ -4,7 +4,7 @@
 	import Icon from './Icon.svelte';
 	import { formatDate } from '#lib/utils/dates.ts';
 	import { signedMoney } from '#lib/utils/money.ts';
-	import { lineName, lineStatus } from '#lib/utils/plan.ts';
+	import { lineName, lineStatus, waitingForBank } from '#lib/utils/plan.ts';
 
 	/**
 	 * v7: one line of the plan's expanded rows (a bill, a fun-money transfer, a one-off, the
@@ -18,6 +18,8 @@
 
 	const o = $derived(line.occurrence);
 	const status = $derived(lineStatus(line, today));
+	// ticked, but the money is still in the account until the bank shows it: still counted
+	const waiting = $derived(waitingForBank(line));
 	const income = $derived(o.kind === 'income');
 	let busy = $state(false);
 </script>
@@ -68,12 +70,14 @@
 					: status === 'Late'
 						? 'text-error'
 						: 'text-base-content/60'}
-				data-testid="plan-status">{status}{o.paid?.auto ? ' · auto' : ''}</span
+				data-testid="plan-status"
+				>{status}{waiting ? ' · waiting for the bank' : o.paid?.auto ? ' · auto' : ''}</span
 			>
 		</span>
 	</a>
 	<span
-		class="shrink-0 font-mono text-sm tabular {o.paid ? 'text-base-content/45 line-through' : ''}"
-		>{signedMoney((income ? 1 : -1) * (o.paid?.amountCents ?? o.amountCents))}</span
+		class="shrink-0 font-mono text-sm tabular {o.paid && !waiting
+			? 'text-base-content/45 line-through'
+			: ''}">{signedMoney((income ? 1 : -1) * (o.paid?.amountCents ?? o.amountCents))}</span
 	>
 </li>

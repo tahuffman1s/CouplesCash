@@ -265,6 +265,15 @@ export function lineName(line: PlanLine): string {
 	return line.kind === 'transfer' ? n.replace(/^fun money\s*·\s*/i, '') || n : n;
 }
 
+/**
+ * Ticked by hand or by autopay, and the bank hasn't shown it yet: the money is still in the account, so the line still
+ * counts in the plan until its bank transaction arrives (which then takes the tick over).
+ */
+export function waitingForBank(line: PlanLine): boolean {
+	const p = line.occurrence.paid;
+	return !!p && p.source !== 'bank';
+}
+
 /** Status word for a planned line: Paid / Late / Planned. */
 export function lineStatus(line: PlanLine, today: ISODate): 'Paid' | 'Late' | 'Planned' {
 	const o = line.occurrence;

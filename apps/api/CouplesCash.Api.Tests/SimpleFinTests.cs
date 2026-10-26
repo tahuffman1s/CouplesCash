@@ -229,6 +229,52 @@ public class SimpleFinClientHelperTests
     }
 
     [Fact]
+    public void A_pending_charge_is_dated_when_it_happened_never_ahead()
+    {
+        // Today is 2026-10-23 (1792756800 = 12:00 UTC); some banks put the expected post day in `posted`.
+        const string json =
+            """
+            {
+              "errors": [],
+              "accounts": [
+                {
+                  "id": "A1", "name": "Checking", "currency": "USD", "balance": "10.00", "balance-date": 1792756800,
+                  "transactions": [
+                    { "id": "p1", "posted": 1793016000, "transacted_at": 1792756800, "amount": "-25.00", "description": "WALMART", "pending": true },
+                    { "id": "p2", "posted": 1793016000, "amount": "-7.40", "description": "STARBUCKS", "pending": true },
+                    { "id": "t1", "posted": 1792670400, "transacted_at": 1792584000, "amount": "-5.00", "description": "POSTED" }
+                  ]
+                }
+              ]
+            }
+            """;
+
+        var today = new DateOnly(2026, 10, 23);
+        var txs = SimpleFinParser.Parse(json, today).Accounts[0].Transactions;
+
+        Assert.Equal(today, txs[0].PostedOn);                   // transacted_at, not the post day 3 days out
+        Assert.Equal(today, txs[1].PostedOn);                   // no transacted_at: never in the future
+        Assert.Equal(new DateOnly(2026, 10, 22), txs[2].PostedOn); // posted rows keep their posted date
+    }
+
+    [Fact]
+    public void History_requests_add_older_transactions_but_keep_the_newest_balances()
+    {
+        static SimpleFinAccount Account(string id, long balance, params string[] txIds) =>
+            new(id, id, "USD", balance, null, DateTime.UnixEpoch, "Bank", null,
+                [.. txIds.Select(t => new SimpleFinTransaction(t, new DateOnly(2026, 10, 23), -100, t, null, null, false))]);
+        var recent = new SimpleFinAccountSet(["notice"], [Account("A", 500, "t3", "t2")]);
+        var older = new SimpleFinAccountSet(["notice", "older"], [Account("A", 100, "t2", "t1"), Account("B", 7, "b1")]);
+
+        var merged = recent.WithHistory(older);
+
+        Assert.Equal(["notice", "older"], merged.Errors);
+        Assert.Equal(["A", "B"], merged.Accounts.Select(a => a.Id));
+        Assert.Equal(500, merged.Accounts[0].BalanceCents);
+        Assert.Equal(["t3", "t2", "t1"], merged.Accounts[0].Transactions.Select(t => t.Id));
+    }
+
+    [Fact]
     public void AccountsEndpoint_strips_credentials_into_basic_auth_and_builds_the_query()
     {
         var (endpoint, basic) = SimpleFinClient.AccountsEndpoint(

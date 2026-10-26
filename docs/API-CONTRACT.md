@@ -399,7 +399,7 @@ Deviations and clarifications from the tables above, as built in `apps/api`:
   parses both the v1 shape the Bridge serves today (`errors: string[]`, per-account `org`, `payee`/`memo`) and the v2 draft
   (`errlist: [{code,msg}]`, top-level `connections`, `transacted_at`, `posted: 0` while pending → treated as pending, dated
   by `transacted_at` or today). Amounts are decimal strings → integer cents (banker's rounding); dates are unix seconds.
-  Requests send `start-date`, `end-date` (exclusive, = tomorrow) and `pending=1`; the Basic credentials from the access
+  Requests send `start-date`, `end-date` (exclusive) and `pending=1`; the Basic credentials from the access
   URL's userinfo go in the `Authorization` header. SimpleFIN transaction ids are only unique per account, so the dedupe
   fingerprint is `sha256('simplefin|' + accountExternalId + '|' + txId)`.
 - **`Occurrence.paid.source`**: `'manual' | 'autopay' | 'bank'` (new column `occurrence_payments.source`). `'bank'` for both
@@ -640,8 +640,8 @@ Deviations and clarifications from the "# v5 additions" tables, as built in `app
   occurrences are listed with `paid` set. Max 20, best first. `transferPeers` = rows that would pass the transfer peer check
   (already paired to this row first), max 20.
 - **`POST /inbox/{id}/match`** (any status): `400 errors.itemId` sign/kind, `400 errors.dueDate` not an occurrence, `400 errors.status`
-  for dropped/superseded rows, `409` (problem title "Occurrence already paid") when the occurrence is paid by another transaction, by
-  hand or by autopay. Matching the occurrence the row already pays is a no-op. Payment: `source 'bank'`, `auto false`, `paidBy` = caller,
+  for dropped/superseded rows, `409` (problem title "Occurrence already paid") when the occurrence is paid by another transaction
+  (v7: a tick by hand or by autopay is taken over by this transaction, no 409; confirm-as-occurrence likewise). Matching the occurrence the row already pays is a no-op. Payment: `source 'bank'`, `auto false`, `paidBy` = caller,
   amount = |bank amount|; learns payee → item. Event `transaction.matched` (`data.previousStatus`, `reversedExpense`, `reversedPayment`,
   `unpairedPeerId`).
 - **`GET /accounts/{id}/transactions`**: `filter` all (default) | pending (bank `pending = true`) | review (status pending) | matched
@@ -755,7 +755,7 @@ Deviations and clarifications from the "# v6 additions" tables, as built in `app
   shows them on auto rows).
 - **Automatic actions.** Occurrence: the matcher's `auto` (fuzzy) or, with the built-in engine, the v3 rule (confidence ≥ 90 and a
   learned rule / bank name naming the item), only at level `bills|all`: the occurrence is paid with the bank amount (`paid_by NULL`,
-  `auto true`, `source bank`; skipped when already paid), the row is confirmed with `auto`, learning applies, and
+  `auto true`, `source bank`; skipped when already paid from a bank transaction — v7: a tick by hand or by autopay is taken over), the row is confirmed with `auto`, learning applies, and
   `transaction.automatched` is written with `data: { transactionId, itemId, dueDate, amountCents, auto, reason, score, engine }`.
   Category: the matcher's `auto` at level `all` for money out only: an expense with `deduct = false` (created by the link's creator on a
   sync, the importer on a CSV import, the household's first member on a sweep), the row confirmed with `confirmed.auto = true` and no
@@ -928,7 +928,9 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   never in the math); on any other account → not listed. Income on the bills account or unassigned → `income`. Transfers: from the bills
   account to a `fun` account → `funMoney`; from the bills account elsewhere → `bills` (line kind `transfer`); into the bills account →
   `income`; between two other accounts → not listed. Before setup (no bills account) every account that is not savings / fun counts as the
-  bills side. Paid lines are listed (ticked) and never counted. `billsOutCents` / `funOutCents` / `oneOffOutCents` / `incomeInCents` are
+  bills side. Lines paid from a bank transaction (`paid.source = 'bank'`) are listed (ticked) and not counted — their money is
+  already in `available`; lines ticked by hand or by autopay are listed as paid but **keep counting** until their bank transaction
+  arrives and takes the payment over, so a tick never moves `leftAtEndCents` (only the bank does, by the paid − planned difference). `billsOutCents` / `funOutCents` / `oneOffOutCents` / `incomeInCents` are
   the unpaid planned amounts; **`leftAtEndCents = available − sweepOut − billsOut − funOut − oneOffOut + incomeIn`** where unpaid income counts only
   when due inside the pay week (≤ end = the day before the next payday): the next payday's paycheck belongs to the new week, and this
   week's paycheck, once it posts, is paid and already in available — it is never added twice. For a past week `leftAtEndCents` is the
@@ -939,6 +941,11 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   account ordered bills, savings, fun, other, then name. `setup`: `banksLinked` (a bank link exists), `rolesSet` (a bills account exists),
   `paycheckKnown` (an active income item), `billsAdded` (an active bill / subscription), `partnerJoined` (two members). `toReviewCount` =
   household rows to review. `sweep` = this week's sweep row (`Sweep` gains `leftCents`, `transactionId`).
+  **Fetch window (v7).** A sync covers `today − 30` (`− 90` on the first sync) … `today + 14` (exclusive): some banks put the
+  expected post day in a pending charge's `posted`, and `end-date` is midnight UTC, so a window ending tomorrow missed both. Each Bridge
+  request is at most 44 days (the Bridge warns in `errors` above 45 days and cuts ranges over 90): a regular sync is one request; the
+  first sync adds older history requests without `pending` (best effort — a failed history request is logged and skipped). A pending
+  charge is dated by `transacted_at` when present and never after today.
   `sweepOutCents` (current week only) = the frozen sweep's `planned_cents` while it is not ticked: last week's leftover is still in the
   bills account until it moves to savings, so it is not this week's money. Once ticked — by the bank or by a person — it is 0 (the
   money has left `available`). Past and future weeks: 0. The sweep freeze itself (`PreviousWeekLeft`) never subtracts a sweep.

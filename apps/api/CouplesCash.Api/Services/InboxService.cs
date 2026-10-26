@@ -170,7 +170,8 @@ public sealed class InboxService(
             return error;
         }
 
-        if (await items.GetPaymentAsync(uow.Connection, item!.Id, dueDate, ct) is not null)
+        // A tick by hand or by autopay is taken over by the bank transaction; a payment from another transaction is not.
+        if (await items.GetPaymentAsync(uow.Connection, item!.Id, dueDate, ct) is { Source: PaymentSource.Bank })
         {
             return new InboxError("dueDate", "This occurrence is already paid.");
         }
@@ -188,7 +189,7 @@ public sealed class InboxService(
 
     /// <summary>
     /// v5 "Match to a bill or income" from any status: validates first (sign ↔ kind, real due date, 409 when the occurrence is paid
-    /// by another transaction or by hand), then reverses whatever the row stood for (expense, other payment, transfer + peer) and pays
+    /// by another transaction; one ticked by hand or by autopay is taken over), then reverses whatever the row stood for (expense, other payment, transfer + peer) and pays
     /// the occurrence with the bank amount. Learns payee → item. Matching to the occurrence it already pays is a no-op.
     /// </summary>
     public async Task<InboxError?> MatchAsync(UnitOfWork uow, Guid householdId, Guid userId, string? actorName, string currency, ImportedTransactionRow row, Guid itemId, DateOnly dueDate, bool quiet, CancellationToken ct)
@@ -210,13 +211,10 @@ public sealed class InboxService(
             return null;
         }
 
-        if (await items.GetPaymentAsync(uow.Connection, item!.Id, dueDate, ct) is { } payment)
+        // A tick by hand or by autopay is taken over by this transaction; a payment from another transaction is not.
+        if (await items.GetPaymentAsync(uow.Connection, item!.Id, dueDate, ct) is { Source: PaymentSource.Bank })
         {
-            var other = await imports.FindConfirmedForOccurrenceAsync(uow.Connection, householdId, item.Id, dueDate, ct);
-            return new InboxError("dueDate", other is not null
-                ? "This occurrence is already paid by another transaction; unmatch that one first."
-                : payment.Source == PaymentSource.Autopay ? "This occurrence was auto-paid; mark it unpaid first." : "This occurrence was marked paid by hand; mark it unpaid first.",
-                Conflict: true);
+            return new InboxError("dueDate", "This occurrence is already paid by another transaction; unmatch that one first.", Conflict: true);
         }
 
         var reversal = await ReverseAsync(uow, householdId, userId, row, ct);
