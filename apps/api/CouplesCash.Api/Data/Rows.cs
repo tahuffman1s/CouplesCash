@@ -40,6 +40,9 @@ public sealed class HouseholdRow
 
     /// <summary>v5: ignore detected transfer pairs and learned transfer payees automatically (default on).</summary>
     public bool AutoIgnoreTransfers { get; init; } = true;
+
+    /// <summary>v6: off | bills | all (default all).</summary>
+    public AutoMatchLevel AutoMatchLevel { get; init; } = AutoMatchLevel.All;
 }
 
 public sealed class MemberRow
@@ -158,8 +161,17 @@ public sealed class RecurringItemRow
 
     public string? Url { get; init; }
 
-    /// <summary>"Bank shows it as" (v4): seeds a payee rule so the first matching bank transaction auto-applies.</summary>
+    /// <summary>"Bank shows it as" (v4). v6: read-only legacy column, no longer written; <see cref="BankNames"/> replaces it.</summary>
     public string? PayeeHint { get; init; }
+
+    /// <summary>v6: names the user says the bank uses for this item (≤ 10). Each seeds a payee rule naming the item.</summary>
+    public string[] BankNames { get; init; } = [];
+
+    /// <summary>v6: normalised payees learned from confirmed matches (≤ 10, oldest evicted first).</summary>
+    public string[] BankNamesLearned { get; init; } = [];
+
+    /// <summary>v6: utilities, card payments — the matcher widens the amount tolerance and date window.</summary>
+    public bool AmountVaries { get; init; }
 
     public Guid CreatedBy { get; init; }
 
@@ -621,6 +633,17 @@ public sealed class ImportedTransactionRow
     /// <summary>Account transaction lists: bank (an imported row) or manual (a typed expense on the account; id = expense id).</summary>
     public string Kind { get; init; } = "bank";
 
+    // v6
+
+    /// <summary>Score behind the stored suggestion (null = none).</summary>
+    public int? MatchScore { get; init; }
+
+    /// <summary>JSON <c>{ name, amount, date, reason, engine }</c> (null = none).</summary>
+    public string? MatchDetail { get; init; }
+
+    /// <summary>A person sent this row back to review; automatic matching never applies it again.</summary>
+    public bool AutoBlocked { get; init; }
+
     public bool IsHidden => IgnoreReason is "dropped" or "superseded";
 
     public bool IsTransfer => Status == "ignored" && IgnoreReason == "transfer";
@@ -671,4 +694,60 @@ public sealed class CsvImportRow
     public DateTime CreatedAt { get; init; }
 
     public string? CreatedByName { get; init; }
+}
+
+// ---------------------------------------------------------------------------------------------
+// v6
+// ---------------------------------------------------------------------------------------------
+
+public sealed class BillSuggestionRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public string Name { get; init; } = "";
+
+    public Kind Kind { get; init; }
+
+    public long AmountCents { get; init; }
+
+    public bool AmountVaries { get; init; }
+
+    public Frequency Frequency { get; init; }
+
+    public DateOnly NextDue { get; init; }
+
+    public string BankName { get; init; } = "";
+
+    public Guid[] SampleTransactionIds { get; init; } = [];
+
+    public DateOnly? LastSeen { get; init; }
+
+    public int Score { get; init; }
+
+    /// <summary>open | accepted | dismissed</summary>
+    public string Status { get; init; } = "open";
+
+    public Guid? ItemId { get; init; }
+
+    public byte[] Fingerprint { get; init; } = [];
+
+    public DateTime CreatedAt { get; init; }
+
+    public DateTime UpdatedAt { get; init; }
+}
+
+/// <summary>An imported row as found-bill detection sees it.</summary>
+public sealed class DetectionRow
+{
+    public Guid Id { get; init; }
+
+    public DateOnly PostedOn { get; init; }
+
+    public long AmountCents { get; init; }
+
+    public string Description { get; init; } = "";
+
+    public string? Payee { get; init; }
 }

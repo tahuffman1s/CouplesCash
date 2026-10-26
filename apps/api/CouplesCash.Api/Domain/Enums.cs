@@ -58,6 +58,14 @@ public enum WeekSummaryKind
     Left,
 }
 
+/// <summary>v6 household setting: off = suggestions only; bills = auto-apply bill/income/one-off matches and transfers; all = also auto-categorise expenses.</summary>
+public enum AutoMatchLevel
+{
+    Off,
+    Bills,
+    All,
+}
+
 public static class EnumExtensions
 {
     /// <summary>Lower-case name used in the database CHECK constraints and in JSON.</summary>

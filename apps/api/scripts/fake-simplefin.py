@@ -15,6 +15,12 @@
                                     10 another "TRANSFER TO BROKERAGE" -1000 today
   GET  /__health                 -> 200 ok
 
+v6 dataset (a second, independent Bridge user for the matcher smoke; claim token "v6"; phases via POST /__phase/v6/<n>):
+  1 (always) one checking account: "ACH DEBIT OAKWOOD PROPERTY MGMT RENT" -1850.00 today, "JIFFY LUBE #42" -54.20 today,
+    "NETFLIX.COM 866-579-7172 CA" -15.49 at today-87/-58/-29/today, "SPOTIFY USA" -10.99 at today-60/-30/today,
+    pending "STARBUCKS STORE 1234" -5.25 today;
+  2 "CITY WATER UTIL" -45.00 today;  3 "PLANET FITNESS" -29.99 today
+
 Usage: fake-simplefin.py --port 8765 --rent-date YYYY-MM-DD --rent2-date YYYY-MM-DD [--today YYYY-MM-DD]
 """
 import argparse
@@ -26,7 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 USER, PASSWORD = "demo-user", "demo-pass"
-STATE = {"phases": {1}}
+V6_USER, V6_PASSWORD = "v6-user", "v6-pass"
+STATE = {"phases": {1}, "v6": {1}}
 
 
 def noon(date_str):
@@ -108,6 +115,36 @@ def accounts(args):
     return result
 
 
+def v6_accounts(args):
+    today = noon(args.today)
+    phases = STATE["v6"]
+    tx = [
+        {"id": "v6-rent-1", "posted": today, "amount": "-1850.00", "description": "ACH DEBIT OAKWOOD PROPERTY MGMT RENT"},
+        {"id": "v6-jiffy-1", "posted": today, "amount": "-54.20", "description": "JIFFY LUBE #42"},
+        {"id": "v6-coffee-p1", "posted": today, "amount": "-5.25", "description": "STARBUCKS STORE 1234", "pending": True},
+    ]
+    for i, ago in enumerate((87, 58, 29, 0)):
+        tx.append({"id": f"v6-netflix-{i}", "posted": days_ago(args, ago), "amount": "-15.49", "description": "NETFLIX.COM 866-579-7172 CA"})
+    for i, ago in enumerate((60, 30, 0)):
+        tx.append({"id": f"v6-spotify-{i}", "posted": days_ago(args, ago), "amount": "-10.99", "description": "SPOTIFY USA"})
+    if 2 in phases:
+        tx.append({"id": "v6-water-1", "posted": today, "amount": "-45.00", "description": "CITY WATER UTIL"})
+    if 3 in phases:
+        tx.append({"id": "v6-gym-1", "posted": today, "amount": "-29.99", "description": "PLANET FITNESS"})
+    return [
+        {
+            "org": {"domain": "demobank.example", "name": "Demo Bank", "url": "https://demobank.example"},
+            "id": "ACT-V6-CHECKING",
+            "name": "Everyday Checking",
+            "currency": "USD",
+            "balance": "3200.00",
+            "available-balance": "3194.75",
+            "balance-date": today,
+            "transactions": tx,
+        }
+    ]
+
+
 class Handler(BaseHTTPRequestHandler):
     args = None
 
@@ -132,8 +169,10 @@ class Handler(BaseHTTPRequestHandler):
 
         auth = self.headers.get("Authorization", "")
         expected = "Basic " + base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
-        if auth != expected:
+        expected_v6 = "Basic " + base64.b64encode(f"{V6_USER}:{V6_PASSWORD}".encode()).decode()
+        if auth not in (expected, expected_v6):
             return self._send(403, "forbidden")
+        dataset = v6_accounts if auth == expected_v6 else accounts
 
         q = parse_qs(url.query)
         start = int(q.get("start-date", ["0"])[0])
@@ -141,7 +180,7 @@ class Handler(BaseHTTPRequestHandler):
         pending = q.get("pending", ["0"])[0] == "1"
 
         result = []
-        for acct in accounts(self.args):
+        for acct in dataset(self.args):
             txs = [t for t in acct["transactions"] if start <= t["posted"] < end and (pending or not t.get("pending", False))]
             result.append({**acct, "transactions": txs})
         return self._send(200, json.dumps({"errors": [], "accounts": result}), "application/json")
@@ -152,6 +191,10 @@ class Handler(BaseHTTPRequestHandler):
         if length:
             self.rfile.read(length)
 
+        if url.path.startswith("/__phase/v6/"):
+            STATE["v6"].add(int(url.path.rsplit("/", 1)[1]))
+            return self._send(200, "v6 phases " + ",".join(str(p) for p in sorted(STATE["v6"])))
+
         if url.path.startswith("/__phase/"):
             STATE["phases"].add(int(url.path.rsplit("/", 1)[1]))
             return self._send(200, "phases " + ",".join(str(p) for p in sorted(STATE["phases"])))
@@ -161,7 +204,8 @@ class Handler(BaseHTTPRequestHandler):
             if token == "expired":
                 return self._send(403, "forbidden")
             host = self.headers.get("Host") or f"127.0.0.1:{self.args.port}"
-            return self._send(200, f"http://{USER}:{PASSWORD}@{host}/simplefin")
+            user, password = (V6_USER, V6_PASSWORD) if token == "v6" else (USER, PASSWORD)
+            return self._send(200, f"http://{user}:{password}@{host}/simplefin")
 
         return self._send(404, "not found")
 

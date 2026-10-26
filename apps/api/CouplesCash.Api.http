@@ -571,6 +571,58 @@ Content-Type: application/json
 GET {{host}}/v1/inbox?status=ignored&includeHidden=1
 Authorization: Bearer {{accessToken}}
 
+### v6: household setting — auto-match level: off (suggestions only) | bills (bills, income, one-offs, transfers) | all (also categories)
+PATCH {{host}}/v1/couple
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "autoMatchLevel": "all" }
+
+### v6: a bill with bank names (≤ 10, 2–80 chars; case-insensitive duplicates dropped) and a varying amount
+# @name water
+POST {{host}}/v1/recurring
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Water", "kind": "bill", "amountCents": 4500, "frequency": "monthly", "anchorDate": "2026-11-20",
+  "bankNames": ["City Water", "CITY OF SPRINGFIELD UTIL"], "amountVaries": true }
+
+### v6: forget a learned bank name (0-based index into bankNamesLearned)
+DELETE {{host}}/v1/recurring/{{water.response.body.id}}/bank-names/learned/0
+Authorization: Bearer {{accessToken}}
+
+### v6: matcher status (engine fuzzy | builtin, reachability, version, this household's last run)
+GET {{host}}/v1/matcher/status
+Authorization: Bearer {{accessToken}}
+
+### v6: re-score every To-review row now (202; 429 + Retry-After more than once a minute)
+POST {{host}}/v1/inbox/rematch
+Authorization: Bearer {{accessToken}}
+
+### v6: pending transactions grouped by account
+GET {{host}}/v1/pending
+Authorization: Bearer {{accessToken}}
+
+### v6: Transactions tab — pending pinned (first page), posted rows + manual expenses newest first
+GET {{host}}/v1/transactions?limit=50
+Authorization: Bearer {{accessToken}}
+
+### v6: found bills ("We found 3 regular payments")
+# @name found
+GET {{host}}/v1/bill-suggestions
+Authorization: Bearer {{accessToken}}
+
+### v6: add a found bill (overrides optional) — creates the item and matches the payments it was found from
+POST {{host}}/v1/bill-suggestions/{{found.response.body.0.id}}/accept
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Netflix" }
+
+### v6: not a bill (never suggested again)
+POST {{host}}/v1/bill-suggestions/{{found.response.body.1.id}}/dismiss
+Authorization: Bearer {{accessToken}}
+
 ### Banks: unlink (inbox rows and mapped accounts are kept)
 DELETE {{host}}/v1/banks/{{link.response.body.id}}
 Authorization: Bearer {{accessToken}}

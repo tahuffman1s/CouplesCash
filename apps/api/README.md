@@ -12,7 +12,11 @@ the pending lifecycle (a posted transaction with a new id replaces its pending r
 available balances + pending outflow on linked accounts (spendable uses the available balance), transfer detection with
 auto-ignore, learned transfer payees and a transfer report (`/v1/transfers`), per-account transactions
 (`/v1/accounts/{id}/transactions`), and matching any transaction to bills from either side (candidates, match, unmatch,
-bill from a transaction, bill payments, link).
+bill from a transaction, bill payments, link). v6 hands scoring to the Python **matcher** service (`apps/matcher`,
+[`docs/MATCHER-CONTRACT.md`](../../docs/MATCHER-CONTRACT.md)) with the built-in C# matcher as fallback: bank names per item
+(user + learned), `amountVaries`, a household auto-match level (`off | bills | all`), automatic matching on every sync, CSV import,
+item change and a scheduler sweep, found bills (`/v1/bill-suggestions`), the pending view (`/v1/pending`), the all-accounts
+Transactions feed (`/v1/transactions`) and `/v1/matcher/status`.
 
 ```
 apps/api/
@@ -26,10 +30,14 @@ apps/api/
 │  ├─ Program.cs                  # host, DI, pipeline, --migrate, --vapid
 │  ├─ Endpoints/                  # one static class per area, MapGroup("/v1")
 │  ├─ Auth/                       # Argon2idPasswordHasher, TokenService, CoupleCodeService, JwtOptions, WebAuthnOptions
+│  ├─ Matching/                   # v6: MatcherClient (typed HttpClient, X-Matcher-Key, chunking), MatchingService (matcher → built-in
+│  │                              # fallback, auto-match / auto-categorise, sweeps), MatchingQueue, MatcherStatusTracker, wire models
 │  ├─ Domain/                     # pure, unit-tested: RecurrenceEngine, PayPeriodEngine, GoalProjection, SchedulerRules, BudgetMath, Money,
 │  │                              # TransactionMatcher (suggestions), Fingerprint (dedupe), BankSyncRules (interval, cooldown, window),
 │  │                              # WeekEngine (week bounds, status/variance, left-at-end, weekly budget rows + history, spendable),
-│  │                              # PendingReconciler (v5 pending → posted / dropped / superseded), TransferAnalysis (+ PaymentHistory)
+│  │                              # PendingReconciler (v5 pending → posted / dropped / superseded), TransferAnalysis (+ PaymentHistory),
+│  │                              # v6: BankNames (validation, learning), MatchingRules (levels, built-in detail), RematchRules (debounce,
+│  │                              # rate limit), BillSuggestionRules (fingerprint, upsert plan, anchor), PendingGrouping
 │  ├─ Data/                       # NpgsqlDataSource, Dapper repositories, UnitOfWork, DbUpMigrator
 │  ├─ Services/                   # AuthSessionService, OccurrenceService, SummaryService, BudgetService, GoalService,
 │  │                              # ActivityService (+ summaries), PasskeyService (Fido2NetLib), DTO mapping,
@@ -38,15 +46,18 @@ apps/api/
 │  ├─ SimpleFin/                  # ISimpleFinClient + SimpleFinClient (claim, GET /accounts, URL masking/rewrite), SimpleFinParser
 │  ├─ Security/                   # DataProtector: AES-256-GCM for the stored access URL (Security__DataKey)
 │  ├─ Push/                       # PushOptions, VapidKeys (--vapid), WebPushSender (Lib.Net.Http.WebPush), PushNotifier queue + dispatcher
-│  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene, bank sync, week summaries)
+│  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene, bank sync, rematch sweep, found bills,
+│  │                              # week summaries) + MatchingWorker (debounced immediate rematch / found bills)
 │  ├─ Validation/                 # FluentValidation validators + endpoint filter
 │  ├─ Infrastructure/             # ProblemDetails, exception handler, rate limiting, OpenAPI bearer, options, feature filters
 │  └─ Migrations/000N_*.sql       # embedded, journaled in public.schema_versions (0001 = v1, 0002 = v2, 0003 = v3 imports, 0004 = v4 week,
-│                                 # 0005 = v5 transactions)
+│                                 # 0005 = v5 transactions, 0006 = v6 matcher: bank names, auto-match level, match detail, bill_suggestions)
 └─ CouplesCash.Api.Tests/         # xunit: recurrence, pay period, goal projection, scheduler rules (+ week summaries), budget math,
                                   # WeekEngine, VAPID keys, activity summaries, WebAuthn config, couple codes, tokens, Argon2,
                                   # DataProtector, Fingerprint, TransactionMatcher (+ one-off tolerances), SimpleFIN parser/client helpers,
-                                  # bank sync rules, v3 + v4 validators, PendingReconciler, v5 transfers/candidates/analysis/validators
+                                  # bank sync rules, v3 + v4 validators, PendingReconciler, v5 transfers/candidates/analysis/validators,
+                                  # v6 MatcherClient (contract JSON, chunking, 401/413/422/5xx/timeout/disabled fallback), bank names,
+                                  # learning, rematch debounce/rate limit, found bills, pending grouping, built-in detail
 ```
 
 ## Run locally
@@ -127,6 +138,28 @@ route → unlink. Before the bank part the smoke also covers the always-on v4 ch
 `PUT /budgets/{id}?period=weekly` returning a `WeekBudgetRow`, `/week` for the current, a past (no snapshots → `leftAtEndCents`
 null) and a future (`projected`) week, and that planning the one-off lowers `leftAtEndCents` by exactly its amount.
 
+**v6 matcher flow.** The smoke always checks the engine-independent v6 surface (bank names + legacy `payeeHint`, `amountVaries`,
+`autoMatchLevel`, `/matcher/status`, rematch 202/429, `/pending`, `/transactions`, found-bill routes). With a matcher it replaces the
+v3–v5 bank flows (they assert built-in scores) by a fuzzy-matcher flow in a fresh household against the fake Bridge's v6 dataset:
+
+```bash
+# terminal 1 — as above, plus the matcher (the smoke starts it itself on the URL's port when it is down and uv is installed,
+# and then also stops it to check the built-in fallback)
+export Matcher__BaseUrl=http://127.0.0.1:8090 Matcher__Key=devkey-devkey-devkey-devkey-devkey-12
+dotnet run --project CouplesCash.Api
+# terminal 2
+SMOKE_SIMPLEFIN_PORT=8765 SMOKE_SCHEDULER_WAIT=40 SMOKE_MATCHER_URL=http://127.0.0.1:8090 \
+  SMOKE_MATCHER_KEY=devkey-devkey-devkey-devkey-devkey-12 scripts/smoke.sh http://localhost:8080
+```
+
+It walks: Rent 1850 with bank name "Oakwood" + "ACH DEBIT OAKWOOD PROPERTY MGMT RENT" −1850 → auto-matched (`engine: fuzzy`,
+score 100, reason) and "OAKWOOD PROPERTY MGMT RENT" learned → one-off "Oil change" 60 without a bank name + "JIFFY LUBE #42" −54.20 →
+only a suggestion (name 30 %) → add bank name "Jiffy Lube" → debounced rematch auto-matches it → `/pending` grouped by account,
+`/transactions` (pending pinned on page 1 only, keyset paging, search), `WeekView.pendingOutCents` → four NETFLIX.COM rows over
+four months → found bill "Netflix monthly 15.49" → accept → item with the bank name and 4 past payments matched → Spotify dismissed and
+never returned → level `off` keeps a perfect match a suggestion, `bills` + rematch applies it → matcher stopped → status
+`reachable: false`, a bank-name match still auto-applies with `engine: builtin`.
+
 With `SMOKE_SCHEDULER_WAIT > 0` the bank part also walks **v5** through further fake-Bridge phases (each picked up by the
 scheduler, so every step polls for its effect): a pending "THE DINER" −40.00 confirmed as an expense posts under a new id at
 −48.00 → one row, `pending: false`, still confirmed, the expense follows to 48.00 (`transaction.posted`); a $1.00 fuel hold
@@ -167,6 +200,12 @@ from a transaction + `/payments`; occurrence-side candidates + link + 409; `/wee
 | `Sync__ManualCooldownMinutes` | `15` | "Sync now" cooldown per link (429 + `Retry-After`); counts manual syncs only |
 | `Sync__ClaimSyncBudgetSeconds` | `20` | Time budget for the inline first sync during claim; on timeout the link is returned and the scheduler retries |
 | `SimpleFin__BaseUrl` | empty | Test override: rewrites the scheme/host/port of the claim and access URLs (fake Bridge). Never set in production |
+| `Matcher__BaseUrl` | empty | v6 Python matcher, `http://matcher:8090` in compose (`http://localhost:8090` native). Empty (or no key) = the built-in C# matcher is used and found bills are paused |
+| `Matcher__Key` | empty | Shared secret sent as `X-Matcher-Key` (= `.env` `MATCHER_KEY`). **Secret**; never logged |
+| `Matcher__TimeoutSeconds` | `30` | Per request; a timeout falls back to the built-in matcher |
+| `Matcher__RematchMinutes` | `30` | Scheduler sweep over every To-review row per household (`0` = every tick) |
+| `Matcher__DebounceSeconds` | `10` | Immediate rematch after an item / bank name / auto level change, and found bills after a sync, wait this long after the last trigger (≤ 60 s) |
+| `Matcher__ChunkSize` | `1000` | Transactions per `/v1/match` request (candidates are cut to ±10 days of each chunk, ≤ `Matcher__MaxCandidates` = 2000) |
 | `ASPNETCORE_URLS` | `http://+:8080` | Listening address |
 | `ASPNETCORE_ENVIRONMENT` | `Production` | `Development` enables docs, readable logs and the dev JWT secret |
 

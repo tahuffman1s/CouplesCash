@@ -115,6 +115,16 @@ public static class ActivitySummaries
 
     public static string TransactionAutomatched(string itemName, long amountCents, string currency) => $"matched {Bold(itemName)} · {Money(amountCents, currency)} (auto)";
 
+    public static string TransactionAutocategorized(string name, string categoryName, long amountCents, string currency) =>
+        $"categorized {Bold(name)} · {Money(amountCents, currency)} as {Bold(categoryName)} (auto)";
+
+    public static string BillSuggestionDismissed(string name) => $"dismissed the found bill {Bold(name)}";
+
+    public static string BillSuggestionAccepted(RecurringItemRow i, int matched, string currency) =>
+        $"added found {KindName(i.Kind)} {Bold(i.Name)} · {Money(i.AmountCents, currency)} {FrequencyName(i.Frequency)}{(matched > 0 ? $" and matched {Plural(matched, "past payment")}" : "")}";
+
+    public static string BankNameForgotten(RecurringItemRow i, string name) => $"forgot the bank name {Bold(name)} of {Bold(i.Name)}";
+
     public static string TransactionIgnored(string name, long amountCents, string currency) => $"ignored {Bold(name)} · {Money(amountCents, currency)}";
 
     public static string TransactionRestored(string name, long amountCents, string currency) => $"restored {Bold(name)} · {Money(amountCents, currency)} to the inbox";

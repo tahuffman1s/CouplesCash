@@ -4,6 +4,7 @@ using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Matching;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -18,7 +19,8 @@ public static class RecurringEndpoints
         var group = v1.MapGroup("/recurring").WithTags("Recurring").RequireAuthorization().RequireHousehold();
 
         group.MapGet("", List).WithSummary("Recurring items, optionally filtered by kind");
-        group.MapPost("", Create).WithValidation<RecurringRequest>().WithSummary("Create a bill, subscription or income (frequency 'once' = a planned one-off; payeeHint seeds a bank payee rule)");
+        group.MapPost("", Create).WithValidation<RecurringRequest>()
+            .WithSummary("Create a bill, subscription or income (frequency 'once' = a planned one-off; bankNames ≤ 10 — legacy payeeHint maps to one — and amountVaries feed the matcher)");
         group.MapGet("/{id:guid}", Get).WithSummary("Get a recurring item");
         group.MapPut("/{id:guid}", Update).WithValidation<RecurringRequest>().WithSummary("Replace a recurring item");
         group.MapDelete("/{id:guid}", Archive).WithSummary("Archive (soft delete) a recurring item");
@@ -36,6 +38,10 @@ public static class RecurringEndpoints
             .WithSummary("Unmatched bank rows within ±?days (default 10) of the due date, ranked (to review, or confirmed as an expense)");
         group.MapPost("/{id:guid}/occurrences/{date}/link", LinkTransaction).WithValidation<LinkTransactionRequest>()
             .WithSummary("Pay the occurrence with a bank transaction ({ transactionId }) · 409 when it is already paid by another transaction or by hand");
+
+        // v6
+        group.MapDelete("/{id:guid}/bank-names/learned/{index:int}", ForgetLearnedName)
+            .WithSummary("Forget a learned bank name (0-based index into bankNamesLearned) · 404 when out of range");
 
         return group;
     }
@@ -74,6 +80,7 @@ public static class RecurringEndpoints
         AccountRepository accounts,
         HouseholdRepository households,
         ActivityService activity,
+        MatchingQueue matching,
         TimeProvider time,
         CancellationToken ct)
     {
@@ -88,9 +95,11 @@ public static class RecurringEndpoints
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         var now = time.Now();
         var row = await items.CreateAsync(uow.Connection, householdId, userId, ToFields(request), now, ct);
-        await SyncPayeeRuleAsync(imports, uow.Connection, householdId, row.Id, previousHint: null, row.PayeeHint, now, ct);
+        await SyncBankNameRulesAsync(imports, uow.Connection, householdId, row.Id, [], row.BankNames, row.BankNamesLearned, now, ct);
         await activity.RecordAsync(uow, householdId, userId, "recurring.created", "recurring", row.Id,
-            ActivitySummaries.RecurringCreated(row, currency), new { itemId = row.Id, kind = row.Kind.ToDb(), amountCents = row.AmountCents }, ct, principal.GetDisplayName());
+            ActivitySummaries.RecurringCreated(row, currency),
+            new { itemId = row.Id, kind = row.Kind.ToDb(), amountCents = row.AmountCents, bankNames = row.BankNames, amountVaries = row.AmountVaries }, ct, principal.GetDisplayName());
+        uow.AfterCommit(() => matching.Enqueue(householdId, MatchingJobKind.Rematch));
         await uow.CommitAsync(ct);
 
         return TypedResults.Created($"/v1/recurring/{row.Id}", row.ToDto(time.Today()));
@@ -112,6 +121,7 @@ public static class RecurringEndpoints
         CategoryRepository categories,
         AccountRepository accounts,
         ActivityService activity,
+        MatchingQueue matching,
         TimeProvider time,
         CancellationToken ct)
     {
@@ -135,10 +145,12 @@ public static class RecurringEndpoints
             return TypedResults.NotFound();
         }
 
-        await SyncPayeeRuleAsync(imports, uow.Connection, householdId, row.Id, existing.PayeeHint, row.PayeeHint, now, ct);
+        await SyncBankNameRulesAsync(imports, uow.Connection, householdId, row.Id, existing.BankNames, row.BankNames, row.BankNamesLearned, now, ct);
 
         await activity.RecordAsync(uow, householdId, userId, "recurring.updated", "recurring", row.Id,
-            ActivitySummaries.RecurringUpdated(row), new { itemId = row.Id, kind = row.Kind.ToDb(), amountCents = row.AmountCents }, ct, principal.GetDisplayName());
+            ActivitySummaries.RecurringUpdated(row),
+            new { itemId = row.Id, kind = row.Kind.ToDb(), amountCents = row.AmountCents, bankNames = row.BankNames, amountVaries = row.AmountVaries }, ct, principal.GetDisplayName());
+        uow.AfterCommit(() => matching.Enqueue(householdId, MatchingJobKind.Rematch));
         await uow.CommitAsync(ct);
         return TypedResults.Ok(row.ToDto(time.Today()));
     }
@@ -308,9 +320,9 @@ public static class RecurringEndpoints
         var hint = Truncate(source, 80);
         var now = time.Now();
         var fields = new RecurringFields(name, kind, row.Magnitude, categoryId, accountId, request.Frequency ?? Frequency.Monthly,
-            row.PostedOn, EndDate: null, AutoPay: false, Notes: null, Url: null, PayeeHint: hint.Length == 0 ? null : hint);
+            row.PostedOn, EndDate: null, AutoPay: false, Notes: null, Url: null, BankNames: BankNames.FromRequest(null, hint));
         var item = await items.CreateAsync(uow.Connection, householdId, userId, fields, now, ct);
-        await SyncPayeeRuleAsync(imports, uow.Connection, householdId, item.Id, previousHint: null, item.PayeeHint, now, ct);
+        await SyncBankNameRulesAsync(imports, uow.Connection, householdId, item.Id, [], item.BankNames, [], now, ct);
 
         // The first occurrence is the transaction's own date; matching reverses whatever the row stood for before.
         var error = await inbox.MatchAsync(uow, householdId, userId, actorName, currency, row, item.Id, item.AnchorDate, quiet: true, ct);
@@ -324,8 +336,9 @@ public static class RecurringEndpoints
             new { itemId = item.Id, transactionId = row.Id, kind = item.Kind.ToDb(), amountCents = item.AmountCents, dueDate = item.AnchorDate, previousStatus = row.Status }, ct, actorName);
 
         var fresh = await imports.GetAsync(uow.Connection, householdId, row.Id, ct) ?? row;
+        var freshItem = await items.GetAsync(uow.Connection, householdId, item.Id, ct) ?? item;
         await uow.CommitAsync(ct);
-        return TypedResults.Created($"/v1/recurring/{item.Id}", new FromTransactionResponse(item.ToDto(time.Today()), fresh.ToDto()));
+        return TypedResults.Created($"/v1/recurring/{item.Id}", new FromTransactionResponse(freshItem.ToDto(time.Today()), fresh.ToDto()));
     }
 
     private static async Task<Results<Ok<List<BillPaymentDto>>, NotFound, ValidationProblem>> Payments(
@@ -474,30 +487,79 @@ public static class RecurringEndpoints
     }
 
     /// <summary>
-    /// v4 payee hint → learned item rule: a (new or changed) hint upserts <c>payee_rules(payee_norm(hint), item_id)</c>; a cleared or
-    /// changed hint removes the previous rule when it still points at this item. Hints that normalise to nothing are ignored.
+    /// v6 bank names → item payee rules (v4 payee hint semantics, per name): every new user name upserts
+    /// <c>payee_rules(payee_norm(name), item_id)</c> so the built-in matcher can auto-apply it; a removed name's rule is cleared when it
+    /// still points at this item and no remaining user or learned name has the same normalised form. Names that normalise to nothing
+    /// are ignored.
     /// </summary>
-    internal static async Task SyncPayeeRuleAsync(ImportRepository imports, NpgsqlConnection conn, Guid householdId, Guid itemId, string? previousHint, string? hint, DateTime now, CancellationToken ct)
+    internal static async Task SyncBankNameRulesAsync(
+        ImportRepository imports,
+        NpgsqlConnection conn,
+        Guid householdId,
+        Guid itemId,
+        IEnumerable<string> previousNames,
+        IEnumerable<string> names,
+        IEnumerable<string> learnedNames,
+        DateTime now,
+        CancellationToken ct)
     {
-        var previousNorm = Norm(previousHint);
-        var norm = Norm(hint);
-        if (previousNorm == norm)
+        var before = previousNames.Select(Norm).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        var after = names.Select(Norm).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        var learned = learnedNames.Select(Norm).OfType<string>().ToHashSet(StringComparer.Ordinal);
+
+        foreach (var removed in before.Where(n => !after.Contains(n) && !learned.Contains(n)))
         {
-            return;
+            await imports.ClearItemRuleAsync(conn, householdId, removed, itemId, ct);
         }
 
-        if (previousNorm is not null)
+        foreach (var added in after.Where(n => !before.Contains(n)))
         {
-            await imports.ClearItemRuleAsync(conn, householdId, previousNorm, itemId, ct);
+            await imports.SetItemRuleAsync(conn, householdId, added, itemId, now, ct);
+        }
+    }
+
+    private static string? Norm(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : TransactionMatcher.NormalisePayee(value, null) is { Length: > 0 } n ? n : null;
+
+    /// <summary>
+    /// v6 <c>DELETE /recurring/{id}/bank-names/learned/{index}</c>: removes one learned name (and its item payee rule unless a user name
+    /// normalises the same), then re-scores rows to review.
+    /// </summary>
+    private static async Task<Results<Ok<RecurringItemDto>, NotFound>> ForgetLearnedName(
+        Guid id,
+        int index,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        RecurringRepository items,
+        ImportRepository imports,
+        ActivityService activity,
+        MatchingQueue matching,
+        TimeProvider time,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var item = await items.GetAsync(uow.Connection, householdId, id, ct);
+        if (item is null || index < 0 || index >= item.BankNamesLearned.Length)
+        {
+            return TypedResults.NotFound();
         }
 
-        if (norm is not null)
+        var name = item.BankNamesLearned[index];
+        var remaining = item.BankNamesLearned.Where((_, i) => i != index).ToList();
+        var now = time.Now();
+        await items.SetLearnedNamesAsync(uow.Connection, householdId, item.Id, remaining, now, ct);
+        if (Norm(name) is { } norm && !item.BankNames.Concat(remaining).Any(n => Norm(n) == norm))
         {
-            await imports.SetItemRuleAsync(conn, householdId, norm, itemId, now, ct);
+            await imports.ClearItemRuleAsync(uow.Connection, householdId, norm, item.Id, ct);
         }
 
-        static string? Norm(string? value) =>
-            string.IsNullOrWhiteSpace(value) ? null : TransactionMatcher.NormalisePayee(value, null) is { Length: > 0 } n ? n : null;
+        await activity.RecordAsync(uow, householdId, principal.GetUserId(), "recurring.updated", "recurring", item.Id,
+            ActivitySummaries.BankNameForgotten(item, name), new { itemId = item.Id, forgotLearnedName = name }, ct, principal.GetDisplayName());
+        var fresh = await items.GetAsync(uow.Connection, householdId, item.Id, ct) ?? item;
+        uow.AfterCommit(() => matching.Enqueue(householdId, MatchingJobKind.Rematch));
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(fresh.ToDto(time.Today()));
     }
 
     private static RecurringFields ToFields(RecurringRequest r) => new(
@@ -512,5 +574,6 @@ public static class RecurringEndpoints
         r.AutoPay ?? false,
         string.IsNullOrWhiteSpace(r.Notes) ? null : r.Notes.Trim(),
         string.IsNullOrWhiteSpace(r.Url) ? null : r.Url.Trim(),
-        string.IsNullOrWhiteSpace(r.PayeeHint) ? null : r.PayeeHint.Trim());
+        BankNames.FromRequest(r.BankNames, r.PayeeHint),
+        r.AmountVaries ?? false);
 }

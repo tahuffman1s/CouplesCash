@@ -35,6 +35,7 @@ public static class DataServiceCollectionExtensions
         services.AddSingleton<WebAuthnRepository>();
         services.AddSingleton<BankRepository>();
         services.AddSingleton<ImportRepository>();
+        services.AddSingleton<BillSuggestionRepository>();
 
         return services;
     }

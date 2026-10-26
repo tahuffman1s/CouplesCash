@@ -1,6 +1,7 @@
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Matching;
 using CouplesCash.Api.Push;
 using CouplesCash.Api.Services;
 using Npgsql;
@@ -16,6 +17,8 @@ namespace CouplesCash.Api.Scheduler;
 /// <item>deletes expired WebAuthn challenges and dead push subscriptions;</item>
 /// <item>(v3) syncs every enabled bank link whose last sync is older than <c>Sync__IntervalHours</c>, auto-matching
 /// high-confidence recurring payments — see <see cref="BankSyncService"/>;</item>
+/// <item>(v6) "rematch": re-scores every To-review row of a household at most every <c>Matcher__RematchMinutes</c> (30) — see
+/// <see cref="MatchingService"/>; "found-bills": daily regular-payment detection per household — see <see cref="BillSuggestionService"/>;</item>
 /// <item>(v4) sends week summaries during each user's <c>hourLocal</c>: "week ahead" the day before the week starts and
 /// "week left" on its 5th day, once per (user, week, kind) via <c>week_summary_log</c> — see <see cref="WeekService"/>.</item>
 /// </list>
@@ -34,6 +37,8 @@ public sealed class SchedulerService(
     PushNotifier notifier,
     BankSyncService bankSync,
     WeekService weeks,
+    MatchingService matching,
+    BillSuggestionService bills,
     IHostApplicationLifetime lifetime,
     TimeProvider time,
     ILogger<SchedulerService> logger) : BackgroundService
@@ -89,6 +94,8 @@ public sealed class SchedulerService(
         await RunPhaseAsync("reminders", () => RemindersAsync(nowUtc, ct));
         await RunPhaseAsync("hygiene", () => HygieneAsync(nowUtc, ct));
         await RunPhaseAsync("bank-sync", () => bankSync.SyncDueAsync(nowUtc, ct));
+        await RunPhaseAsync("rematch", () => matching.SweepDueAsync(nowUtc, ct));
+        await RunPhaseAsync("found-bills", () => bills.DetectDueAsync(nowUtc, ct));
         await RunPhaseAsync("week-summaries", () => WeekSummariesAsync(nowUtc, ct));
     }
 

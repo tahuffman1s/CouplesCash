@@ -4,7 +4,7 @@ namespace CouplesCash.Api.Endpoints;
 
 public static class EndpointExtensions
 {
-    /// <summary>Maps every route of the v1 – v5 contract plus <c>/health</c>.</summary>
+    /// <summary>Maps every route of the v1 – v6 contract plus <c>/health</c>.</summary>
     public static IEndpointRouteBuilder MapCouplesCash(this IEndpointRouteBuilder app)
     {
         app.MapHealth();
@@ -31,6 +31,9 @@ public static class EndpointExtensions
         v1.MapImports();
         v1.MapWeek();
         v1.MapTransfers();
+        v1.MapMatching();
+        v1.MapTransactions();
+        v1.MapBillSuggestions();
 
         return app;
     }

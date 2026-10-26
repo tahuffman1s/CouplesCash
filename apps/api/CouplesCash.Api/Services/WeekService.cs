@@ -113,7 +113,8 @@ public sealed class WeekService(
             Projected: WeekEngine.IsFuture(week, today),
             Days: days,
             Overdue: overdue,
-            Budget: BuildBudget(week, household.WeeklySpendCents, categoryRows, weeklyBudgets, weekOccurrences, weekExpenses));
+            Budget: BuildBudget(week, household.WeeklySpendCents, categoryRows, weeklyBudgets, weekOccurrences, weekExpenses),
+            PendingOutCents: PendingOut(accountRows));
     }
 
     /// <summary>Weekly budget rows for the week: the overall target (if any) and every category with a weekly budget, in category order.</summary>
@@ -140,6 +141,10 @@ public sealed class WeekService(
             totalSpent,
             WeekEngine.History(week, targetCents, budgeted, weekOccurrences, weekExpenses));
     }
+
+    /// <summary>v6 "Pending $X" beside Spendable: still-pending bank outflows on the same accounts Spendable counts (active checking + cash).</summary>
+    public static long PendingOut(IEnumerable<AccountRow> accounts) =>
+        accounts.Where(a => a.Type.IsSpendable() && a.ArchivedAt is null).Sum(a => a.PendingOutCents);
 
     public static WeekOccurrence ToWeekOccurrence(OccurrenceDto o) =>
         new(o.ItemId, o.Kind, o.AmountCents, o.DueDate, o.Paid?.AmountCents, o.CategoryId);

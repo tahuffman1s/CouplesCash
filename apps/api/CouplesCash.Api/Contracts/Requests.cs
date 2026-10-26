@@ -29,7 +29,8 @@ public sealed record HouseholdSettingsRequest(
     Optional<PayPeriod?> PayPeriod,
     Optional<DateOnly?> PayAnchorDate,
     Optional<long?> WeeklySpendCents,
-    Optional<bool?> AutoIgnoreTransfers);
+    Optional<bool?> AutoIgnoreTransfers,
+    Optional<AutoMatchLevel?> AutoMatchLevel = default);
 
 public sealed record AccountRequest(
     string Name,
@@ -56,7 +57,9 @@ public sealed record RecurringRequest(
     bool? AutoPay,
     string? Notes,
     string? Url,
-    string? PayeeHint);
+    string? PayeeHint,
+    string[]? BankNames = null,
+    bool? AmountVaries = null);
 
 public sealed record MarkPaidRequest(long? AmountCents);
 
@@ -146,3 +149,10 @@ public sealed record FromTransactionRequest(Guid? TransactionId, string? Name, K
 
 /// <summary><c>POST /v1/recurring/{id}/occurrences/{date}/link</c>.</summary>
 public sealed record LinkTransactionRequest(Guid? TransactionId);
+
+// ---------------------------------------------------------------------------------------------
+// v6
+// ---------------------------------------------------------------------------------------------
+
+/// <summary><c>POST /v1/bill-suggestions/{id}/accept</c>: every field overrides what was detected.</summary>
+public sealed record BillSuggestionAcceptRequest(string? Name, Kind? Kind, long? AmountCents, Frequency? Frequency, DateOnly? NextDue);

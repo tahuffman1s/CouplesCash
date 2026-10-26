@@ -1,0 +1,100 @@
+using System.Security.Claims;
+using CouplesCash.Api.Auth;
+using CouplesCash.Api.Contracts;
+using CouplesCash.Api.Data;
+using CouplesCash.Api.Domain;
+using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Services;
+using Microsoft.AspNetCore.Http.HttpResults;
+using Npgsql;
+
+namespace CouplesCash.Api.Endpoints;
+
+/// <summary>v6: the Transactions tab feed (every account) and pending transactions grouped by account.</summary>
+public static class TransactionEndpoints
+{
+    public static RouteGroupBuilder MapTransactions(this RouteGroupBuilder v1)
+    {
+        var group = v1.MapGroup("").WithTags("Transactions").RequireAuthorization().RequireHousehold();
+
+        group.MapGet("/transactions", Feed)
+            .WithSummary("Transactions feed: pending (every in-progress row, first page only), posted rows + manual expenses newest first; ?accountId=&q=&before=&limit≤200");
+        group.MapGet("/pending", Pending)
+            .WithSummary("Pending transactions grouped by account (accounts with pending first, by pending outflow), with totals");
+
+        return group;
+    }
+
+    private static async Task<Results<Ok<TransactionFeedDto>, ValidationProblem>> Feed(
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        AccountRepository accounts,
+        ImportRepository imports,
+        CancellationToken ct,
+        Guid? accountId = null,
+        string? q = null,
+        string? before = null,
+        int limit = InboxEndpoints.DefaultLimit)
+    {
+        var search = string.IsNullOrWhiteSpace(q) ? null : q.Trim();
+        if (search is { Length: > AccountEndpoints.MaxSearchLength })
+        {
+            return Problems.Validation("q", $"At most {AccountEndpoints.MaxSearchLength} characters.");
+        }
+
+        InboxCursor? cursor = null;
+        if (!string.IsNullOrWhiteSpace(before))
+        {
+            if (!InboxEndpoints.TryParseCursor(before, out var parsed))
+            {
+                return Problems.Validation("before", "Must be a nextBefore value from a previous page.");
+            }
+
+            cursor = parsed;
+        }
+
+        var householdId = principal.GetHouseholdId();
+        if (accountId is { } a && !await accounts.ExistsAsync(householdId, a, ct))
+        {
+            return Problems.Validation("accountId", "Unknown account.");
+        }
+
+        var size = Math.Clamp(limit, 1, InboxEndpoints.MaxLimit);
+        var pending = cursor is null
+            ? (await imports.ListBankPendingAsync(householdId, accountId, search, reviewOrConfirmedOnly: false, ct)).Select(r => r.ToAccountTransaction()).ToList()
+            : [];
+        var rows = await imports.ListAccountTransactionsAsync(householdId, new AccountTransactionQuery(accountId, "posted", search, null, null, false), cursor, size, ct);
+        var items = rows.Take(size).Select(r => r.ToAccountTransaction()).ToList();
+        var nextBefore = rows.Count > size ? InboxEndpoints.Cursor(rows[size - 1]) : null;
+
+        await using var conn = await db.OpenConnectionAsync(ct);
+        var toReview = await imports.CountPendingAsync(conn, householdId, ct);
+        return TypedResults.Ok(new TransactionFeedDto(pending, items, nextBefore, toReview));
+    }
+
+    private static async Task<Ok<PendingViewDto>> Pending(
+        ClaimsPrincipal principal,
+        AccountRepository accounts,
+        BankRepository banks,
+        ImportRepository imports,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var accountRows = await accounts.ListAsync(householdId, ct);
+        var externals = await banks.ListExternalAccountsAsync(householdId, ct);
+        var rows = await imports.ListBankPendingAsync(householdId, null, null, reviewOrConfirmedOnly: true, ct);
+
+        var places = accountRows
+            .Select(a => new PendingAccount(a.Id, null, a.Name, a.Institution, a.BalanceCents, a.AvailableCents, a.Linked))
+            .Concat(externals.Where(e => e.AccountId is null)
+                .Select(e => new PendingAccount(null, e.Id, e.Name, e.OrgName, e.BalanceCents, e.AvailableCents, Linked: false)))
+            .ToList();
+        var entries = rows.Select(r => new PendingEntry<InboxItemDto>(r.ToDto(), r.AccountId, r.ExternalAccountId, r.AmountCents)).ToList();
+        var groups = PendingGrouping.Group(places, entries)
+            .Select(b => new PendingGroupDto(b.Account.AccountId, b.Account.Name, b.Account.Institution, b.Account.BalanceCents, b.Account.AvailableCents,
+                b.Count, b.OutCents, b.InCents, b.Items))
+            .ToList();
+
+        return TypedResults.Ok(new PendingViewDto(groups.Sum(g => g.PendingOutCents), groups.Sum(g => g.PendingInCents), groups.Sum(g => g.PendingCount), groups));
+    }
+}

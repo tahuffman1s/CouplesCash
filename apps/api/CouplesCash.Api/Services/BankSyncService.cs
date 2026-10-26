@@ -4,6 +4,7 @@ using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Endpoints;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Matching;
 using CouplesCash.Api.Push;
 using CouplesCash.Api.Security;
 using CouplesCash.Api.SimpleFin;
@@ -23,6 +24,8 @@ public sealed class BankSyncService(
     AccountRepository accounts,
     HouseholdRepository households,
     InboxService inbox,
+    MatchingService matching,
+    MatchingQueue matchingQueue,
     ISimpleFinClient client,
     DataProtector protector,
     SyncOptions options,
@@ -140,10 +143,12 @@ public sealed class BankSyncService(
                 newIds.AddRange(await ReconcileAccountAsync(uow, link, account, external, start, today, judgeAbsence, currency, now, stats, ct));
             }
 
+            // v6: the fuzzy matcher (built-in fallback) scores the new rows; transfers are auto-ignored first, then bills / income /
+            // one-offs auto-match and (level all) expenses auto-categorise.
             var newRows = await imports.ListByIdsAsync(uow.Connection, householdId, newIds, ct);
-            var suggested = await inbox.SuggestAsync(uow.Connection, householdId, newRows, ct);
-            var autoMatched = await inbox.AutoMatchAsync(uow, householdId, currency, newRows, suggested.Suggestions, ct);
-            var autoIgnored = await inbox.AutoIgnoreTransfersAsync(uow, householdId, newRows, suggested, ct);
+            var run = await matching.RunAsync(uow, householdId, newRows, MatchRunMode.NewRows, link.CreatedBy, ct);
+            var autoMatched = run.AutoMatched + run.AutoCategorized;
+            var autoIgnored = run.AutoIgnored;
 
             var nameOverride = link.Name == DefaultLinkName && firstOrg is not null ? firstOrg : null;
             var updated = await banks.MarkSyncedAsync(uow.Connection, householdId, link.Id, now, manual, set.Errors, nameOverride, ct) ?? link;
@@ -157,7 +162,10 @@ public sealed class BankSyncService(
                     newTransactions = newRows.Count,
                     updatedAccounts,
                     autoMatched,
+                    autoMatchedOccurrences = run.AutoMatched,
+                    autoCategorized = run.AutoCategorized,
                     autoIgnoredTransfers = autoIgnored,
+                    engine = run.Engine,
                     posted = stats.Posted,
                     replaced = stats.Replaced,
                     dropped = stats.Dropped,
@@ -172,14 +180,20 @@ public sealed class BankSyncService(
                 uow.AfterCommit(() => notifier.ToHousehold(householdId, actorId, new PushPayload(
                     Title: "Bank sync",
                     Body: $"Synced {linkName} · {toReview} to review",
-                    Url: "/inbox",
+                    Url: "/transactions",
                     Tag: $"sync-{link.Id}")));
+            }
+
+            // Found bills after every sync that brought new transactions (debounced in the background; skipped without the matcher).
+            if (newRows.Count > 0)
+            {
+                uow.AfterCommit(() => matchingQueue.Enqueue(householdId, MatchingJobKind.FoundBills));
             }
 
             await uow.CommitAsync(ct);
             logger.LogInformation(
-                "Scheduler bank sync of {LinkId}: {New} new, {Updated} balance(s) updated, {Auto} auto-matched, {Transfers} transfer(s) auto-ignored, {Posted} posted ({Replaced} under a new id), {Dropped} dropped, {Superseded} superseded, {Errors} bridge error(s)",
-                link.Id, newRows.Count, updatedAccounts, autoMatched, autoIgnored, stats.Posted, stats.Replaced, stats.Dropped, stats.Superseded, set.Errors.Count);
+                "Scheduler bank sync of {LinkId}: {New} new, {Updated} balance(s) updated, {Auto} auto-matched ({Engine}), {Transfers} transfer(s) auto-ignored, {Posted} posted ({Replaced} under a new id), {Dropped} dropped, {Superseded} superseded, {Errors} bridge error(s)",
+                link.Id, newRows.Count, updatedAccounts, autoMatched, run.Engine, autoIgnored, stats.Posted, stats.Replaced, stats.Dropped, stats.Superseded, set.Errors.Count);
 
             return new SyncResultDto(link.Id, newRows.Count, updatedAccounts, autoMatched, set.Errors, now);
         }

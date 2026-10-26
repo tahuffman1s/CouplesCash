@@ -22,13 +22,12 @@ public sealed record SuggestResult(IReadOnlyDictionary<Guid, Suggestion> Suggest
 public sealed record Reversal(bool HadExpense, bool HadPayment, Guid? PeerId, bool WasTransfer);
 
 /// <summary>
-/// The review inbox: runs the <see cref="TransactionMatcher"/> on new rows, auto-matches high-confidence recurring hits,
-/// auto-ignores transfers (v5), and applies the confirm / ignore / restore / match / transfer / unmatch semantics of PLAN-V3 and
+/// The review inbox: auto-ignores transfers (v5; suggestions and automatic matches come from <c>MatchingService</c>, v6), learns from
+/// confirmed matches (payee rules, v6 learned bank names), and applies the confirm / ignore / restore / match / transfer / unmatch semantics of PLAN-V3 and
 /// PLAN-V5 inside the caller's <see cref="UnitOfWork"/>.
 /// </summary>
 public sealed class InboxService(
     ImportRepository imports,
-    BankRepository banks,
     RecurringRepository items,
     OccurrenceService occurrences,
     CategoryRepository categories,
@@ -44,117 +43,20 @@ public sealed class InboxService(
     public const int MaxCandidates = 20;
 
     // ---------------------------------------------------------------------------------------------
-    // Suggestions
+    // Automatic actions (suggestions themselves are computed by MatchingService, v6)
     // ---------------------------------------------------------------------------------------------
 
-    /// <summary>Computes and stores suggestions for freshly inserted rows; also flags already-pending rows that turn out to be the other leg of a transfer.</summary>
-    public async Task<SuggestResult> SuggestAsync(NpgsqlConnection conn, Guid householdId, IReadOnlyList<ImportedTransactionRow> rows, CancellationToken ct)
-    {
-        if (rows.Count == 0)
-        {
-            return SuggestResult.Empty;
-        }
-
-        // The window is the wider one-off window; FindOccurrence applies the per-item window (±5 recurring, ±7 once).
-        var from = rows.Min(r => r.PostedOn).AddDays(-TransactionMatcher.OnceWindowDays);
-        var to = rows.Max(r => r.PostedOn).AddDays(TransactionMatcher.OnceWindowDays);
-
-        var itemRows = await items.ListAsync(householdId, null, ct);
-        var onceItems = itemRows.Where(i => i.Frequency == Frequency.Once).Select(i => i.Id).ToHashSet();
-        var unpaid = (await occurrences.ListAsync(householdId, itemRows, from, to, ct))
-            .Where(o => o.Paid is null)
-            .Select(o => new MatchableOccurrence(o.ItemId, o.Name, o.Kind, o.AmountCents, o.DueDate, onceItems.Contains(o.ItemId)))
-            .ToList();
-        var rules = (await imports.ListRulesAsync(conn, householdId, ct)).Select(ToRule).ToList();
-        var categoriesByName = CategoriesByName(await categories.ListAsync(householdId, ct));
-
-        var newIds = rows.Select(r => r.Id).ToHashSet();
-        var otherPending = (await imports.ListPendingInWindowAsync(conn, householdId, from, to, ct)).Where(r => !newIds.Contains(r.Id)).ToList();
-        var mapped = new HashSet<Guid>(await banks.MappedAccountIdsAsync(conn, householdId, ct));
-        foreach (var accountId in rows.Concat(otherPending).Select(r => r.AccountId).OfType<Guid>())
-        {
-            mapped.Add(accountId);
-        }
-
-        var matches = rows.Select(ToMatch).ToList();
-        var otherMatches = otherPending.Select(ToMatch).ToList();
-        var suggestions = TransactionMatcher.SuggestAll(matches, unpaid, rules, categoriesByName, mapped, otherMatches);
-
-        foreach (var (id, suggestion) in suggestions)
-        {
-            await imports.SetSuggestionAsync(conn, householdId, id, suggestion, ct);
-        }
-
-        // An older pending row that pairs with a new one becomes a transfer too (unless it already has a stronger suggestion).
-        var pairs = TransactionMatcher.DetectTransferPairs(matches.Concat(otherMatches), mapped);
-        var transfers = pairs.SelectMany(p => new[] { p.A, p.B }).ToHashSet();
-        foreach (var other in otherPending.Where(o => transfers.Contains(o.Id) && !o.SuggestedTransfer && o.Confidence < TransactionMatcher.TransferConfidence))
-        {
-            await imports.SetSuggestionAsync(conn, householdId, other.Id, Suggestion.Transfer, ct);
-        }
-
-        // Only pairs that involve a new row count as "detected now" (an older pair the user un-matched stays un-matched).
-        return new SuggestResult(suggestions, pairs.Where(p => newIds.Contains(p.A) || newIds.Contains(p.B)).ToList());
-    }
-
     /// <summary>
-    /// Scheduler auto-mark: a recurring match with confidence ≥ 90 whose item has a learned payee rule for this payee is paid
-    /// without a human (<c>paid_by NULL, auto true</c>); the row is confirmed with <c>auto</c>. Returns how many were matched.
-    /// </summary>
-    public async Task<int> AutoMatchAsync(UnitOfWork uow, Guid householdId, string currency, IReadOnlyList<ImportedTransactionRow> rows, IReadOnlyDictionary<Guid, Suggestion> suggestions, CancellationToken ct)
-    {
-        var candidates = rows
-            .Where(r => suggestions.TryGetValue(r.Id, out var s) && s.Kind == SuggestionKind.Occurrence && s.Confidence >= TransactionMatcher.AutoMatchConfidence)
-            .ToList();
-        if (candidates.Count == 0)
-        {
-            return 0;
-        }
-
-        var rulesByNorm = (await imports.ListRulesAsync(uow.Connection, householdId, ct)).Select(ToRule).ToDictionary(r => r.PayeeNorm, StringComparer.Ordinal);
-        var now = time.Now();
-        var matched = 0;
-
-        foreach (var row in candidates)
-        {
-            var suggestion = suggestions[row.Id];
-            var itemId = suggestion.ItemId!.Value;
-            var dueDate = suggestion.DueDate!.Value;
-            if (!TransactionMatcher.RuleMatchesItem(ToMatch(row), itemId, rulesByNorm))
-            {
-                continue;
-            }
-
-            var item = await items.GetAsync(uow.Connection, householdId, itemId, ct);
-            if (item is null || !TransactionMatcher.SignMatchesKind(item.Kind, row.IsOutflow))
-            {
-                continue;
-            }
-
-            var payment = await items.InsertPaymentIfUnpaidAsync(uow.Connection, item.Id, dueDate, row.Magnitude, now, ct);
-            if (payment is null)
-            {
-                continue;
-            }
-
-            await imports.ConfirmOccurrenceAsync(uow.Connection, householdId, row.Id, item.Id, dueDate, reviewer: null, auto: true, now, ct);
-            await activity.RecordAsync(uow, householdId, null, "transaction.automatched", "transaction", row.Id,
-                ActivitySummaries.TransactionAutomatched(item.Name, row.Magnitude, currency),
-                new { transactionId = row.Id, itemId = item.Id, dueDate, amountCents = row.Magnitude, auto = true }, ct);
-            matched++;
-        }
-
-        return matched;
-    }
-
-    /// <summary>
-    /// v5: with <c>autoIgnoreTransfers</c> on, every detected pair (both rows still to review, neither matched to a bill/income) becomes
-    /// <c>ignored / transfer</c> with peers set and <c>transfer_auto</c>; rows suggested by a learned transfer payee (85) are ignored as
-    /// one-sided transfers. One <c>transfer.auto</c> event per batch carries the count. Returns how many rows were ignored.
+    /// v5: with <c>autoIgnoreTransfers</c> on (v6: and the auto-match level not <c>off</c>), every detected pair (both rows still to review,
+    /// neither matched to a bill/income) becomes <c>ignored / transfer</c> with peers set and <c>transfer_auto</c>; rows suggested by a
+    /// learned transfer payee (85) are ignored as one-sided transfers. One <c>transfer.auto</c> event per batch carries the count. Returns
+    /// how many rows were ignored.
     /// </summary>
     public async Task<int> AutoIgnoreTransfersAsync(UnitOfWork uow, Guid householdId, IReadOnlyList<ImportedTransactionRow> rows, SuggestResult result, CancellationToken ct)
     {
-        if (rows.Count == 0 || await households.GetRowAsync(uow.Connection, householdId, ct) is not { AutoIgnoreTransfers: true })
+        if (rows.Count == 0
+            || await households.GetRowAsync(uow.Connection, householdId, ct) is not { } household
+            || !MatchingRules.AutoIgnoresTransfers(household.AutoMatchLevel, household.AutoIgnoreTransfers))
         {
             return 0;
         }
@@ -233,11 +135,7 @@ public sealed class InboxService(
         }
 
         Guid? accountId = row.AccountId is { } a && await accounts.ExistsAsync(uow.Connection, householdId, a, ct) ? a : null;
-        var expenseName = Truncate((string.IsNullOrWhiteSpace(name) ? row.Payee ?? row.Description : name).Trim(), MaxExpenseNameLength);
-        if (expenseName.Length == 0)
-        {
-            expenseName = "Bank transaction";
-        }
+        var expenseName = ExpenseName(row, name);
 
         var now = time.Now();
         var expense = await expenses.CreateAsync(uow.Connection, householdId, userId,
@@ -447,6 +345,7 @@ public sealed class InboxService(
 
         var reversal = await ReverseAsync(uow, householdId, userId, row, ct);
         await imports.RestoreAsync(uow.Connection, householdId, row.Id, ct);
+        await imports.BlockAutoAsync(uow.Connection, householdId, row.Id, ct);
         await activity.RecordAsync(uow, householdId, userId, "transaction.restored", "transaction", row.Id,
             ActivitySummaries.TransactionRestored(DisplayName(row), row.AmountCents, currency),
             new { transactionId = row.Id, amountCents = row.AmountCents, hadExpense = reversal.HadExpense, hadPayment = reversal.HadPayment, peerId = reversal.PeerId }, ct, actorName);
@@ -466,6 +365,7 @@ public sealed class InboxService(
 
         var reversal = await ReverseAsync(uow, householdId, userId, row, ct);
         await imports.RestoreAsync(uow.Connection, householdId, row.Id, ct);
+        await imports.BlockAutoAsync(uow.Connection, householdId, row.Id, ct);
         var data = new { transactionId = row.Id, previousStatus = row.Status, ignoreReason = row.IgnoreReason, hadExpense = reversal.HadExpense, hadPayment = reversal.HadPayment, peerId = reversal.PeerId };
         if (reversal.WasTransfer)
         {
@@ -491,6 +391,7 @@ public sealed class InboxService(
         }
 
         await imports.RestoreAsync(conn, householdId, row.Id, ct);
+        await imports.BlockAutoAsync(conn, householdId, row.Id, ct);
         return row;
     }
 
@@ -683,7 +584,24 @@ public sealed class InboxService(
         var now = time.Now();
         await items.UpsertPaymentAsync(uow.Connection, item.Id, dueDate, userId, row.Magnitude, now, auto: false, PaymentSource.Bank, ct);
         await imports.ConfirmOccurrenceAsync(uow.Connection, householdId, row.Id, item.Id, dueDate, userId, auto: false, now, ct);
-        await LearnRuleAsync(uow.Connection, householdId, row, null, item.Id, now, ct);
+        await LearnFromMatchAsync(uow.Connection, householdId, row, item, now, ct);
+    }
+
+    /// <summary>
+    /// A confirmed occurrence match (by a person or automatically) teaches two things: the payee rule payee → item (v3) and, v6, the
+    /// transaction's normalised payee as a learned bank name of the item (deduped against both lists, ≤ 10, oldest learned evicted).
+    /// </summary>
+    public async Task LearnFromMatchAsync(NpgsqlConnection conn, Guid householdId, ImportedTransactionRow row, RecurringItemRow item, DateTime now, CancellationToken ct)
+    {
+        await LearnRuleAsync(conn, householdId, row, null, item.Id, now, ct);
+
+        // Re-read: an earlier match in the same batch may already have taught this item a name.
+        var current = await items.GetAsync(conn, householdId, item.Id, ct) ?? item;
+        var learned = BankNames.Learn(current.BankNames, current.BankNamesLearned, BankNames.LearnedForm(row.Payee, row.Description));
+        if (learned is not null)
+        {
+            await items.SetLearnedNamesAsync(conn, householdId, item.Id, learned, now, ct);
+        }
     }
 
     private async Task<Dictionary<string, PayeeRule>> RulesByNormAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct) =>
@@ -730,6 +648,13 @@ public sealed class InboxService(
         }
 
         return dict;
+    }
+
+    /// <summary>The expense a confirmed row becomes is named <paramref name="name"/> when given, else payee ?? description (≤ 80 characters).</summary>
+    public static string ExpenseName(ImportedTransactionRow row, string? name)
+    {
+        var expenseName = Truncate((string.IsNullOrWhiteSpace(name) ? row.Payee ?? row.Description : name).Trim(), MaxExpenseNameLength);
+        return expenseName.Length == 0 ? "Bank transaction" : expenseName;
     }
 
     public static string DisplayName(ImportedTransactionRow row) => string.IsNullOrWhiteSpace(row.Payee) ? row.Description : row.Payee;

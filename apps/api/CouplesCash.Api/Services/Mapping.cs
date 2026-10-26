@@ -29,11 +29,14 @@ public static class Mapping
         i.AutoPay,
         i.Notes,
         i.Url,
-        i.PayeeHint,
+        i.BankNames.FirstOrDefault(),
         RecurrenceEngine.MonthlyEquivalent(i.AmountCents, i.Frequency),
         RecurrenceEngine.NextDue(i.Rule, today),
         i.CreatedAt,
-        i.UpdatedAt);
+        i.UpdatedAt,
+        i.BankNames,
+        i.BankNamesLearned,
+        i.AmountVaries);
 
     /// <summary><paramref name="today"/> decides planned vs. overdue (v4 <c>status</c>); <c>varianceCents = paid − planned</c> when paid.</summary>
     public static OccurrenceDto ToOccurrence(this RecurringItemRow i, DateOnly dueDate, PaymentRow? paid, DateOnly today) => new(
@@ -113,7 +116,9 @@ public static class MappingV3
         IgnoreReason(t),
         Transfer(t),
         Match(t),
-        Expense(t));
+        Expense(t),
+        t.MatchScore,
+        Detail(t));
 
     public static AccountTransactionDto ToAccountTransaction(this ImportedTransactionRow t) => new(
         t.Id,
@@ -134,7 +139,35 @@ public static class MappingV3
         Transfer(t),
         Match(t),
         Expense(t),
+        t.MatchScore,
+        Detail(t),
         t.Kind);
+
+    private static readonly JsonSerializerOptions DetailJson = new(JsonSerializerDefaults.Web);
+
+    /// <summary>Serialises a <see cref="MatchDetail"/> for the <c>match_detail jsonb</c> column (camelCase).</summary>
+    public static string SerializeDetail(MatchDetail detail) =>
+        JsonSerializer.Serialize(new MatchDetailDto(detail.Name, detail.Amount, detail.Date, detail.Reason, detail.Engine), DetailJson);
+
+    /// <summary>The stored detail, or null when absent or unreadable (never fails a list).</summary>
+    public static MatchDetailDto? ParseDetail(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<MatchDetailDto>(json, DetailJson);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static MatchDetailDto? Detail(ImportedTransactionRow t) => ParseDetail(t.MatchDetail);
 
     private static InboxConfirmedDto? Confirmed(ImportedTransactionRow t) =>
         t.Status == "pending"

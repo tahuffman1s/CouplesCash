@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CouplesCash.Api.Contracts;
+using CouplesCash.Api.Domain;
 using CouplesCash.Api.Endpoints;
 using CouplesCash.Api.Services;
 using FluentValidation;
@@ -90,6 +91,8 @@ public sealed class HouseholdSettingsRequestValidator : AbstractValidator<Househ
             .When(x => x.WeeklySpendCents is { HasValue: true, Value: not null }).OverridePropertyName("WeeklySpendCents");
         RuleFor(x => x.AutoIgnoreTransfers.Value).NotNull().When(x => x.AutoIgnoreTransfers.HasValue).OverridePropertyName("AutoIgnoreTransfers")
             .WithMessage("Must be true or false.");
+        RuleFor(x => x.AutoMatchLevel.Value).NotNull().IsInEnum().When(x => x.AutoMatchLevel.HasValue).OverridePropertyName("AutoMatchLevel")
+            .WithMessage("Must be one of: off, bills, all.");
     }
 
     public static bool IsKnownTimeZone(string? id) => !string.IsNullOrWhiteSpace(id) && TimeZoneInfo.TryFindSystemTimeZoneById(id, out _);
@@ -141,6 +144,8 @@ public sealed class RecurringRequestValidator : AbstractValidator<RecurringReque
         RuleFor(x => x.Notes).MaximumLength(1000);
         RuleFor(x => x.Url).MaximumLength(2048).Must(Rules.IsHttpUrl).WithMessage("Must be an absolute http(s) URL.");
         RuleFor(x => x.PayeeHint).MaximumLength(MaxPayeeHintLength);
+        RuleFor(x => x.BankNames).Must(names => BankNames.Validate(names) is null)
+            .WithMessage(x => BankNames.Validate(x.BankNames) ?? "Invalid bank names.");
     }
 
     /// <summary>v4 "Bank shows it as" hint length.</summary>
@@ -376,4 +381,19 @@ public sealed class LinkTransactionRequestValidator : AbstractValidator<LinkTran
 {
     public LinkTransactionRequestValidator() =>
         RuleFor(x => x.TransactionId).NotNull().NotEqual(Guid.Empty).WithMessage("transactionId is required.");
+}
+
+// ---------------------------------------------------------------------------------------------
+// v6
+// ---------------------------------------------------------------------------------------------
+
+public sealed class BillSuggestionAcceptRequestValidator : AbstractValidator<BillSuggestionAcceptRequest>
+{
+    public BillSuggestionAcceptRequestValidator()
+    {
+        RuleFor(x => x.Name).NotEmpty().MaximumLength(80).When(x => x.Name is not null);
+        RuleFor(x => x.Kind).IsInEnum().When(x => x.Kind is not null);
+        RuleFor(x => x.AmountCents).GreaterThan(0).LessThanOrEqualTo(Rules.MaxCents).When(x => x.AmountCents is not null);
+        RuleFor(x => x.Frequency).IsInEnum().When(x => x.Frequency is not null);
+    }
 }

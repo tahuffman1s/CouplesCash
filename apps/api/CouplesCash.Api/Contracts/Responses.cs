@@ -20,7 +20,8 @@ public sealed record HouseholdDto(
     PayPeriod PayPeriod,
     DateOnly? PayAnchorDate,
     long? WeeklySpendCents,
-    bool AutoIgnoreTransfers);
+    bool AutoIgnoreTransfers,
+    AutoMatchLevel AutoMatchLevel);
 
 public sealed record AuthResult(
     UserDto User,
@@ -70,7 +71,10 @@ public sealed record RecurringItemDto(
     long MonthlyEquivalentCents,
     DateOnly? NextDueDate,
     DateTime CreatedAt,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    IReadOnlyList<string> BankNames,
+    IReadOnlyList<string> BankNamesLearned,
+    bool AmountVaries);
 
 /// <summary><paramref name="Source"/>: manual (user tap) | autopay (scheduler) | bank (inbox confirm or auto-match). <paramref name="Auto"/> stays true for autopay and auto-match.</summary>
 public sealed record PaidInfo(DateTime PaidAt, Guid? PaidBy, long AmountCents, bool Auto, string Source);
@@ -310,7 +314,12 @@ public record InboxItemDto(
     string? IgnoreReason,
     InboxTransferDto? Transfer,
     InboxMatchDto? Match,
-    InboxExpenseDto? Expense);
+    InboxExpenseDto? Expense,
+    int? MatchScore,
+    MatchDetailDto? MatchDetail);
+
+/// <summary>v6: how the stored suggestion (or automatic match) was reached. <paramref name="Engine"/>: fuzzy | builtin.</summary>
+public sealed record MatchDetailDto(int Name, int Amount, int Date, string Reason, string Engine);
 
 public sealed record InboxPage(IReadOnlyList<InboxItemDto> Items, string? NextBefore);
 
@@ -375,7 +384,8 @@ public sealed record WeekViewDto(
     bool Projected,
     IReadOnlyList<WeekDayDto> Days,
     IReadOnlyList<OccurrenceDto> Overdue,
-    WeekBudgetDto Budget);
+    WeekBudgetDto Budget,
+    long PendingOutCents);
 
 // ---------------------------------------------------------------------------------------------
 // v5
@@ -401,8 +411,10 @@ public sealed record AccountTransactionDto(
     InboxTransferDto? Transfer,
     InboxMatchDto? Match,
     InboxExpenseDto? Expense,
+    int? MatchScore,
+    MatchDetailDto? MatchDetail,
     string Kind)
-    : InboxItemDto(Id, Source, AccountId, AccountName, PostedOn, AmountCents, Description, Payee, Memo, Pending, Status, Suggestion, Confirmed, CreatedAt, IgnoreReason, Transfer, Match, Expense);
+    : InboxItemDto(Id, Source, AccountId, AccountName, PostedOn, AmountCents, Description, Payee, Memo, Pending, Status, Suggestion, Confirmed, CreatedAt, IgnoreReason, Transfer, Match, Expense, MatchScore, MatchDetail);
 
 public sealed record AccountTransactionTotalsDto(long InCents, long OutCents, long PendingOutCents, int Count);
 
@@ -433,3 +445,60 @@ public sealed record TransferReportDto(
     IReadOnlyList<TransferNetDto> NetByAccount,
     IReadOnlyList<TransferPairDto> Pairs,
     IReadOnlyList<InboxItemDto> OneSided);
+
+// ---------------------------------------------------------------------------------------------
+// v6
+// ---------------------------------------------------------------------------------------------
+
+/// <summary>
+/// <c>GET /v1/matcher/status</c>. <paramref name="Engine"/> is what the next run uses (fuzzy when the matcher is configured and reachable,
+/// else builtin). <paramref name="Configured"/>, <paramref name="FoundBills"/> and <paramref name="Note"/> are additions to the contract shape.
+/// </summary>
+public sealed record MatcherStatusDto(
+    string Engine,
+    bool Reachable,
+    string? Version,
+    DateTime? LastRunAt,
+    int LastAutoMatched,
+    bool Configured,
+    string? LastRunEngine,
+    bool FoundBills,
+    string? Note);
+
+public sealed record RematchQueuedDto(bool Queued);
+
+/// <summary>Pending transactions of one account. <paramref name="AccountId"/> is null for a bank account that is not mapped yet (or "Other").</summary>
+public sealed record PendingGroupDto(
+    Guid? AccountId,
+    string AccountName,
+    string Institution,
+    long BalanceCents,
+    long? AvailableCents,
+    int PendingCount,
+    long PendingOutCents,
+    long PendingInCents,
+    IReadOnlyList<InboxItemDto> Items);
+
+public sealed record PendingViewDto(long TotalOutCents, long TotalInCents, int Count, IReadOnlyList<PendingGroupDto> Groups);
+
+/// <summary><c>GET /v1/transactions</c>: <paramref name="Pending"/> complete on the first page (empty on later pages), <paramref name="Items"/> posted rows + manual expenses newest first.</summary>
+public sealed record TransactionFeedDto(
+    IReadOnlyList<AccountTransactionDto> Pending,
+    IReadOnlyList<AccountTransactionDto> Items,
+    string? NextBefore,
+    int ToReviewCount);
+
+public sealed record BillSuggestionDto(
+    Guid Id,
+    string Name,
+    Kind Kind,
+    long AmountCents,
+    bool AmountVaries,
+    Frequency Frequency,
+    DateOnly NextDue,
+    string BankName,
+    int Score,
+    int SampleCount,
+    DateOnly LastSeen);
+
+public sealed record BillSuggestionAcceptedDto(RecurringItemDto Item, int Matched);

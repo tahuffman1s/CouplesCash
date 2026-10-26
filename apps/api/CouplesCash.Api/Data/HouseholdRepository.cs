@@ -16,11 +16,12 @@ public sealed record HouseholdSettingsUpdate(
     PayPeriod? PayPeriod,
     Optional<DateOnly?> PayAnchorDate,
     Optional<long?> WeeklySpendCents = default,
-    bool? AutoIgnoreTransfers = null);
+    bool? AutoIgnoreTransfers = null,
+    AutoMatchLevel? AutoMatchLevel = null);
 
 public sealed class HouseholdRepository(NpgsqlDataSource db)
 {
-    private const string Columns = "id, name, created_at, currency, week_start, timezone, default_account_id, pay_period, pay_anchor_date, weekly_spend_cents, auto_ignore_transfers";
+    private const string Columns = "id, name, created_at, currency, week_start, timezone, default_account_id, pay_period, pay_anchor_date, weekly_spend_cents, auto_ignore_transfers, auto_match_level";
 
     private const string SelectHousehold = $"SELECT {Columns} FROM households WHERE id = @Id";
 
@@ -83,6 +84,12 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
         var rows = await conn.QueryAsync<HouseholdRow>(Cmd($"SELECT {Columns} FROM households ORDER BY id", null, ct));
         return rows.ToList();
     }
+
+    /// <summary>v6: the member that system actions are recorded under where a user id is required (expenses.created_by): the first to join.</summary>
+    public Task<Guid?> FirstMemberAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct) =>
+        conn.QueryFirstOrDefaultAsync<Guid?>(Cmd(
+            "SELECT user_id FROM household_members WHERE household_id = @Id ORDER BY joined_at, user_id LIMIT 1",
+            new { Id = householdId }, ct));
 
     /// <summary>Member user ids of a household.</summary>
     public async Task<IReadOnlyList<Guid>> MemberIdsAsync(Guid householdId, CancellationToken ct)
@@ -160,7 +167,8 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
                 default_account_id = CASE WHEN @SetDefaultAccount THEN @DefaultAccountId ELSE default_account_id END,
                 pay_anchor_date    = CASE WHEN @SetPayAnchor THEN @PayAnchorDate ELSE pay_anchor_date END,
                 weekly_spend_cents = CASE WHEN @SetWeeklySpend THEN @WeeklySpendCents ELSE weekly_spend_cents END,
-                auto_ignore_transfers = COALESCE(@AutoIgnoreTransfers, auto_ignore_transfers)
+                auto_ignore_transfers = COALESCE(@AutoIgnoreTransfers, auto_ignore_transfers),
+                auto_match_level   = COALESCE(@AutoMatchLevel, auto_match_level)
             WHERE id = @Id
             """,
             new
@@ -178,6 +186,7 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
                 SetWeeklySpend = update.WeeklySpendCents.HasValue,
                 WeeklySpendCents = update.WeeklySpendCents.Value,
                 update.AutoIgnoreTransfers,
+                AutoMatchLevel = update.AutoMatchLevel?.ToDb(),
             }, ct));
         return rows > 0;
     }
@@ -222,6 +231,7 @@ public sealed class HouseholdRepository(NpgsqlDataSource db)
             household.PayPeriod,
             household.PayAnchorDate,
             household.WeeklySpendCents,
-            household.AutoIgnoreTransfers);
+            household.AutoIgnoreTransfers,
+            household.AutoMatchLevel);
     }
 }

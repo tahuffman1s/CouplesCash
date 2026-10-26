@@ -5,6 +5,7 @@ using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Endpoints;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Matching;
 using CouplesCash.Api.Push;
 using CouplesCash.Api.Scheduler;
 using CouplesCash.Api.Security;
@@ -90,6 +91,7 @@ var webAuthn = WebAuthnOptions.Resolve(configuration);
 var security = SecurityOptions.Read(configuration);
 var simpleFin = SimpleFinOptions.Read(configuration);
 var sync = configuration.GetSection(SyncOptions.SectionName).Get<SyncOptions>() ?? new SyncOptions();
+var matcherOptions = MatcherOptions.Read(configuration);
 var dataProtector = new DataProtector(security); // throws on a malformed key: refuse to start rather than store credentials unencrypted
 
 builder.Services.AddSingleton(Options.Create(jwt));
@@ -100,6 +102,7 @@ builder.Services.AddSingleton(webAuthn);
 builder.Services.AddSingleton(sync);
 builder.Services.AddSingleton(simpleFin);
 builder.Services.AddSingleton(dataProtector);
+builder.Services.AddSingleton(matcherOptions);
 builder.Services.AddSingleton(TimeProvider.System);
 
 // ---------------------------------------------------------------------------------------------
@@ -134,6 +137,17 @@ builder.Services.AddSingleton<InboxService>();
 builder.Services.AddSingleton<BankSyncService>();
 builder.Services.AddHttpClient(SimpleFinClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddSingleton<ISimpleFinClient, SimpleFinClient>();
+
+// v6: the Python matcher (typed client, X-Matcher-Key, 30 s), matching with the built-in fallback, found bills, and the
+// debounced background worker for "rematch now" / "found bills after a sync".
+// Internal service: never through an outbound proxy; connections are recycled so a re-created container's address is picked up.
+builder.Services.AddHttpClient<IMatcherClient, MatcherClient>(client => client.Timeout = matcherOptions.Timeout)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { UseProxy = false, PooledConnectionLifetime = TimeSpan.FromMinutes(2) });
+builder.Services.AddSingleton<MatcherStatusTracker>();
+builder.Services.AddSingleton<MatchingQueue>();
+builder.Services.AddSingleton<MatchingService>();
+builder.Services.AddSingleton<BillSuggestionService>();
+builder.Services.AddHostedService<MatchingWorker>();
 builder.Services.AddCouplesCashValidators();
 
 // Web Push: a bounded queue drained by a hosted service so requests never wait on the push service.
@@ -195,6 +209,9 @@ app.Logger.LogInformation("Web Push {State}", push.Enabled ? "enabled" : "disabl
 app.Logger.LogInformation("Bank sync {State}", dataProtector.IsConfigured
     ? $"enabled (every {sync.IntervalHours}h, manual cooldown {sync.ManualCooldownMinutes} min{(simpleFin.BaseUrl is null ? "" : $", Bridge override {simpleFin.BaseUrl}")})"
     : "disabled (set Security__DataKey, base64 of 32 random bytes)");
+app.Logger.LogInformation("Matcher {State}", matcherOptions.Enabled
+    ? $"enabled at {matcherOptions.BaseUri} (timeout {matcherOptions.Timeout.TotalSeconds:0}s, sweep every {matcherOptions.RematchMinutes:0.##} min)"
+    : "disabled (set Matcher__BaseUrl and Matcher__Key): the built-in matcher is used and found bills are paused");
 app.Logger.LogInformation("Passkeys {State}", webAuthn.Enabled ? $"enabled for rpId {webAuthn.RelyingPartyId} (origin {webAuthn.Origin})" : $"disabled ({webAuthn.DisabledReason})");
 
 // ---------------------------------------------------------------------------------------------

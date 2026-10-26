@@ -7,12 +7,20 @@
 # then v3: inbox/CSV validation → (with SMOKE_SIMPLEFIN_PORT) fake SimpleFIN Bridge: claim → map → inbox → confirm/ignore/
 # restore → CSV import → bulk → (v4) the Bridge clears the one-off at a different amount → cleared + variance + weekly budgets →
 # sync/cooldown → scheduler auto-match → undo → unlink, then v4 cleanup (DELETE weekly budgets, clear the target).
+# v6 (always): bank names / legacy payeeHint, amountVaries, auto-match level, matcher status, rematch 202/429, /pending,
+# /transactions, found-bill routes; with SMOKE_MATCHER_URL the fuzzy-matcher flow (see below).
 # Requires: curl, jq. Usage: scripts/smoke.sh [base-url]
 #   SMOKE_SCHEDULER_WAIT=<seconds>  also create an autopay bill due today and wait for the scheduler
 #                                   to mark it (set to > Scheduler__IntervalSeconds); default 0 = skip.
 #   SMOKE_SIMPLEFIN_PORT=<port>     start scripts/fake-simplefin.py and run the bank-sync flow (API needs Security__DataKey
 #                                   and SimpleFin__BaseUrl=http://127.0.0.1:<port>; add Sync__IntervalHours=0 +
 #                                   Scheduler__IntervalSeconds=5 + SMOKE_SCHEDULER_WAIT for auto-match).
+#   SMOKE_MATCHER_URL=<url>         v6: the API runs with Matcher__BaseUrl=<url> + Matcher__Key=$SMOKE_MATCHER_KEY. Replaces the v3–v5
+#   SMOKE_MATCHER_KEY=<key>         bank flows (which assert built-in scores) with the fuzzy-matcher flow: auto-match with a reason,
+#                                   learned names, rematch after a bank name, auto level off/bills, found bills accept/dismiss,
+#                                   /pending, /transactions, and — when the smoke started the matcher itself (it does when <url> is
+#                                   down and uv is installed) — the built-in fallback after stopping it. Needs SMOKE_SIMPLEFIN_PORT
+#                                   and SMOKE_SCHEDULER_WAIT.
 # Push and passkey checks adapt to the server: 503 problems when unconfigured, real flows when configured.
 set -euo pipefail
 
@@ -452,6 +460,224 @@ request GET "/v1/budgets/week?start=$FUTURE_START" "$A_TOKEN"; expect 200 "weekl
 pass "week view: current/past/future, weekly budgets"
 
 # ---------------------------------------------------------------------------------------------
+# v6 (always on, any engine): bank names + legacy payeeHint, amountVaries, auto-match level, matcher status, rematch rate limit,
+# pending view, transactions feed, found-bill routes, WeekView.pendingOutCents.
+# ---------------------------------------------------------------------------------------------
+echo "--- v6: bank names, auto-match level, matcher status, pending, transactions, found bills"
+v6check() { # v6check LABEL JQ-FILTER — on the last $BODY
+  if echo "$BODY" | jq -e "$2" >/dev/null 2>&1; then pass "$1"; else echo "$BODY" | head -c 1200; echo; fail "$1"; fi
+}
+request GET /v1/couple "$A_TOKEN"; expect 200 "household carries autoMatchLevel"
+v6check "autoMatchLevel defaults to all" '.autoMatchLevel=="all"'
+request PATCH /v1/couple "$A_TOKEN" '{"autoMatchLevel":"sometimes"}'; expect 400 "unknown autoMatchLevel → 400"
+request PATCH /v1/couple "$A_TOKEN" '{"autoMatchLevel":"bills"}'; expect 200 "autoMatchLevel → bills"
+v6check "Household.autoMatchLevel bills" '.autoMatchLevel=="bills"'
+request PATCH /v1/couple "$A_TOKEN" '{"autoMatchLevel":"all"}'; expect 200 "autoMatchLevel back to all"
+
+ELEVEN="$(jq -nc '[range(11) | "Bank name \(.)"]')"
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg d "$TODAY_UTC" --argjson n "$ELEVEN" '{name:"Power",kind:"bill",amountCents:9000,accountId:$a,frequency:"monthly",anchorDate:$d,bankNames:$n}')"
+expect 400 "11 bank names → 400"
+v6check "errors name bankNames" '.errors | has("bankNames")'
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg d "$TODAY_UTC" '{name:"Power",kind:"bill",amountCents:9000,frequency:"monthly",anchorDate:$d,bankNames:["x"]}')"
+expect 400 "a 1-character bank name → 400"
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg d "$TODAY_UTC" '{name:"Power",kind:"bill",amountCents:9000,accountId:$a,frequency:"monthly",anchorDate:$d,bankNames:["  City Power ","CITY POWER","PWR CO"],amountVaries:true}')"
+expect 201 "bill with bank names (trimmed, case-insensitive dupes dropped) and amountVaries"
+POWER="$(echo "$BODY" | jq -r .id)"
+v6check "bankNames, payeeHint = first, no learned names, amountVaries" '.bankNames==["City Power","PWR CO"] and .payeeHint=="City Power" and .bankNamesLearned==[] and .amountVaries==true'
+request PUT "/v1/recurring/$POWER" "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg d "$TODAY_UTC" '{name:"Power",kind:"bill",amountCents:9000,accountId:$a,frequency:"monthly",anchorDate:$d,payeeHint:"Power Co"}')"
+expect 200 "legacy PUT with payeeHint only"
+v6check "payeeHint maps into bankNames; amountVaries defaults to false" '.bankNames==["Power Co"] and .payeeHint=="Power Co" and .amountVaries==false'
+request DELETE "/v1/recurring/$POWER/bank-names/learned/0" "$A_TOKEN"; expect 404 "forget a learned name that does not exist → 404"
+request DELETE "/v1/recurring/$POWER" "$A_TOKEN"; expect 204 "archive Power"
+
+request GET /v1/matcher/status "$A_TOKEN"; expect 200 "matcher status"
+v6check "MatcherStatus shape" 'has("engine") and has("reachable") and has("version") and has("lastRunAt") and (.lastAutoMatched|type=="number") and (.engine=="fuzzy" or .engine=="builtin")'
+if [[ -z "${SMOKE_MATCHER_URL:-}" ]]; then
+  v6check "no matcher configured → engine builtin, unreachable" '.engine=="builtin" and .reachable==false and .version==null'
+fi
+request POST /v1/inbox/rematch "$A_TOKEN"; expect 202 "rematch queued"
+v6check "202 { queued: true }" '.queued==true'
+request POST /v1/inbox/rematch "$A_TOKEN"; expect 429 "second rematch within a minute → 429"
+REMATCH_RETRY="$(curl -s -o /dev/null -D - -X POST "$BASE/v1/inbox/rematch" -H "Authorization: Bearer $A_TOKEN" | tr -d '\r' | awk 'tolower($1)=="retry-after:" {print $2}')"
+[[ "$REMATCH_RETRY" =~ ^[0-9]+$ && "$REMATCH_RETRY" -ge 1 && "$REMATCH_RETRY" -le 60 ]] || fail "rematch Retry-After header: '$REMATCH_RETRY'"
+pass "rematch Retry-After: ${REMATCH_RETRY}s"
+
+request GET /v1/pending "$A_TOKEN"; expect 200 "pending view"
+v6check "PendingView shape" '(.totalOutCents|type=="number") and (.totalInCents|type=="number") and (.count|type=="number") and (.groups|type=="array")'
+request GET /v1/transactions "$A_TOKEN"; expect 200 "transactions feed"
+v6check "TransactionFeed shape" '(.pending|type=="array") and (.items|type=="array") and has("nextBefore") and (.toReviewCount|type=="number")'
+request GET "/v1/transactions?accountId=00000000-0000-7000-8000-000000000000" "$A_TOKEN"; expect 400 "feed with a foreign accountId → 400"
+request GET "/v1/transactions?before=yesterday" "$A_TOKEN"; expect 400 "feed with a bad cursor → 400"
+request GET /v1/bill-suggestions "$A_TOKEN"; expect 200 "found bills (none yet)"
+v6check "empty list" 'type=="array" and length==0'
+request POST /v1/bill-suggestions/00000000-0000-7000-8000-000000000000/accept "$A_TOKEN" '{}'; expect 404 "accept an unknown suggestion → 404"
+request POST /v1/bill-suggestions/00000000-0000-7000-8000-000000000000/dismiss "$A_TOKEN"; expect 404 "dismiss an unknown suggestion → 404"
+request GET "/v1/week?start=$TODAY_UTC" "$A_TOKEN"; expect 200 "week view"
+v6check "WeekView.pendingOutCents" '.pendingOutCents|type=="number"'
+
+# v6 matcher flow (SMOKE_MATCHER_URL + SMOKE_SIMPLEFIN_PORT + SMOKE_SCHEDULER_WAIT): a fresh household against the real matcher
+# and the fake Bridge's v6 dataset. Defined here, run inside the SimpleFIN block below.
+v6_matcher_flow() {
+  local C_EMAIL="casey+$RUN@example.com" C_TOKEN C_ACC RENT6 OIL6 WATER6 GYM6 LINK6 EXT6 TX_RENT6 TX_JIFFY6 TX_WATER6 NETFLIX6 SPOTIFY6 NETFLIX_ITEM
+  local MURL="${SMOKE_MATCHER_URL%/}" MATCHER_STARTED=""
+  v6wait() { # v6wait LABEL PATH JQ-FILTER [SECONDS]
+    local label="$1" path="$2" filter="$3" seconds="${4:-$SMOKE_SCHEDULER_WAIT}"
+    for _ in $(seq 1 "$seconds"); do
+      request GET "$path" "$C_TOKEN"
+      if [[ "$STATUS" == "200" ]] && echo "$BODY" | jq -e "$filter" >/dev/null 2>&1; then pass "$label"; return 0; fi
+      sleep 1
+    done
+    echo "$BODY" | head -c 1500; echo; fail "$label: not observed within ${seconds}s"
+  }
+
+  echo "--- v6: fuzzy matcher at $MURL (fake Bridge v6 dataset)"
+  if ! curl -fs "$MURL/health" >/dev/null 2>&1; then
+    local mport="${MURL##*:}" mdir
+    mdir="$(cd "$SCRIPT_DIR/../../matcher" 2>/dev/null && pwd)" || fail "matcher not reachable at $MURL and apps/matcher not found"
+    command -v uv >/dev/null || fail "matcher not reachable at $MURL and uv is not installed to start it"
+    (cd "$mdir" && MATCHER_KEY="${SMOKE_MATCHER_KEY:?SMOKE_MATCHER_KEY is required}" exec uv run --frozen uvicorn matcher.app:app --host 127.0.0.1 --port "$mport" >/dev/null 2>&1) &
+    MATCHER_STARTED="$mport"
+    for _ in $(seq 1 100); do curl -fs "$MURL/health" >/dev/null 2>&1 && break; sleep 0.2; done
+  fi
+  curl -fs "$MURL/health" | jq -e '.status=="ok"' >/dev/null || fail "matcher /health"
+  pass "matcher up ($(curl -fs "$MURL/health" | jq -r .version))"
+  if [[ -n "${SMOKE_MATCHER_KEY:-}" ]]; then
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$MURL/v1/match" -H 'Content-Type: application/json' -d '{}')" == "401" ]] || fail "matcher without X-Matcher-Key → 401"
+    pass "matcher refuses requests without X-Matcher-Key (401)"
+  fi
+
+  request POST /v1/auth/register '' "$(jq -nc --arg e "$C_EMAIL" --arg p "$PASSWORD" '{email:$e,password:$p,displayName:"Casey"}')"; expect 201 "register Casey"
+  C_TOKEN="$(echo "$BODY" | jq -r .accessToken)"; local C_REFRESH; C_REFRESH="$(echo "$BODY" | jq -r .refreshToken)"
+  request POST /v1/couple/code "$C_TOKEN" '{"name":"Casey household"}'; expect 201 "Casey creates a household"
+  request POST /v1/auth/refresh '' "$(jq -nc --arg r "$C_REFRESH" '{refreshToken:$r}')"; expect 200 "refresh Casey"
+  C_TOKEN="$(echo "$BODY" | jq -r .accessToken)"
+  request POST /v1/accounts "$C_TOKEN" '{"name":"Casey checking","institution":"Demo Bank","type":"checking","balanceCents":300000}'; expect 201 "Casey checking"
+  C_ACC="$(echo "$BODY" | jq -r .id)"
+  v6wait "matcher status: configured → engine fuzzy, reachable, version (an 'unreachable' probe is cached 3 s)" /v1/matcher/status \
+    '.engine=="fuzzy" and .reachable==true and .configured==true and (.version|type=="string") and .lastRunAt==null' 15
+
+  request POST /v1/recurring "$C_TOKEN" "$(jq -nc --arg a "$C_ACC" --arg d "$TODAY_UTC" '{name:"Rent",kind:"bill",amountCents:185000,accountId:$a,frequency:"monthly",anchorDate:$d,bankNames:["Oakwood"]}')"
+  expect 201 "Rent 1850.00 monthly, bank shows it as Oakwood"
+  RENT6="$(echo "$BODY" | jq -r .id)"
+  request POST /v1/recurring "$C_TOKEN" "$(jq -nc --arg a "$C_ACC" --arg d "$TODAY_UTC" '{name:"Oil change",kind:"bill",amountCents:6000,accountId:$a,frequency:"once",anchorDate:$d}')"
+  expect 201 "one-off Oil change 60.00 today, no bank name"
+  OIL6="$(echo "$BODY" | jq -r .id)"
+
+  local V6TOKEN; V6TOKEN="$(printf 'http://127.0.0.1:%s/simplefin/claim/v6' "$SMOKE_SIMPLEFIN_PORT" | base64 -w0)"
+  request POST /v1/banks/simplefin/claim "$C_TOKEN" "$(jq -nc --arg t "$V6TOKEN" '{setupToken:$t,name:"Casey bank"}')"; expect 201 "claim the v6 Bridge (first sync inline, fuzzy matcher)"
+  LINK6="$(echo "$BODY" | jq -r .id)"; EXT6="$(echo "$BODY" | jq -r '.accounts[0].id')"
+  request PUT "/v1/banks/accounts/$EXT6" "$C_TOKEN" "$(jq -nc --arg a "$C_ACC" '{accountId:$a}')"; expect 200 "map Everyday Checking → Casey checking"
+
+  request GET "/v1/inbox?limit=200" "$C_TOKEN"; expect 200 "inbox after the first sync"
+  TX_RENT6="$(echo "$BODY" | jq -r '.items[] | select(.description|startswith("ACH DEBIT OAKWOOD")) | .id')"
+  TX_JIFFY6="$(echo "$BODY" | jq -r '.items[] | select(.description=="JIFFY LUBE #42") | .id')"
+  v6check "Rent row auto-matched by the fuzzy matcher (confirmed auto, no reviewer, engine fuzzy, reason, score ≥ 85)" \
+    ".items[] | select(.id==\"$TX_RENT6\") | .status==\"confirmed\" and .confirmed.auto==true and .confirmed.by==null and .match.itemId==\"$RENT6\" and .matchDetail.engine==\"fuzzy\" and (.matchDetail.reason|length>0) and .matchScore>=85 and .matchDetail.name>=90"
+  echo "$BODY" | jq -r ".items[] | select(.id==\"$TX_RENT6\") | \"       Rent: \\(.matchScore) · \\(.matchDetail.reason)\""
+  echo "$BODY" | jq -r ".items[] | select(.id==\"$TX_JIFFY6\") | \"       Jiffy Lube: \\(.status) \\(.matchScore) · \\(.matchDetail.reason // \"-\")\""
+  v6check "JIFFY LUBE −54.20 is only a suggestion for Oil change (name too different to auto-apply)" \
+    ".items[] | select(.id==\"$TX_JIFFY6\") | .status==\"pending\" and .suggestion.kind==\"occurrence\" and .suggestion.itemId==\"$OIL6\" and .matchScore<85 and .matchDetail.engine==\"fuzzy\""
+  request GET "/v1/calendar?from=$TODAY_UTC&to=$TODAY_UTC" "$C_TOKEN"
+  v6check "Rent occurrence paid by the bank automatically (paidBy null, auto, source bank, 1850.00)" \
+    ".occurrences[] | select(.itemId==\"$RENT6\") | .paid.auto==true and .paid.paidBy==null and .paid.source==\"bank\" and .paid.amountCents==185000"
+  request GET "/v1/recurring/$RENT6" "$C_TOKEN"
+  v6check "learned bank name appended (user names untouched)" '.bankNames==["Oakwood"] and (.bankNamesLearned|index("OAKWOOD PROPERTY MGMT RENT"))!=null'
+  request GET "/v1/activity?limit=50" "$C_TOKEN"
+  v6check "transaction.automatched carries data.reason (and engine fuzzy)" '[.events[] | select(.kind=="transaction.automatched" and (.data.reason|length>0) and .data.engine=="fuzzy")] | length>=1'
+  request GET /v1/matcher/status "$C_TOKEN"
+  v6check "status: last run recorded with its auto-matched count" '.lastRunAt!=null and .lastAutoMatched>=1 and .lastRunEngine=="fuzzy"'
+
+  echo "--- v6: pending per account, transactions feed"
+  request GET /v1/pending "$C_TOKEN"; expect 200 "pending view"
+  v6check "pending grouped by account: Casey checking first with STARBUCKS −5.25, balance → available" \
+    ".count==1 and .totalOutCents==525 and .groups[0].accountId==\"$C_ACC\" and .groups[0].pendingCount==1 and .groups[0].pendingOutCents==525 and .groups[0].pendingInCents==0 and .groups[0].availableCents==319475 and .groups[0].balanceCents==320000 and .groups[0].items[0].pending==true"
+  request GET /v1/transactions "$C_TOKEN"; expect 200 "transactions feed"
+  v6check "feed: pending pinned (STARBUCKS), items posted only (newest first), toReviewCount" \
+    '(.pending|length==1) and .pending[0].description=="STARBUCKS STORE 1234" and (.items|length>=9) and ([.items[] | select(.pending)] | length==0) and (.items[0].postedOn >= .items[-1].postedOn) and .toReviewCount>=8'
+  request GET "/v1/transactions?limit=3" "$C_TOKEN"; expect 200 "feed page 1 (limit 3)"
+  local NEXT6; NEXT6="$(echo "$BODY" | jq -r .nextBefore)"
+  [[ "$NEXT6" != "null" && "$(echo "$BODY" | jq '.items|length')" == "3" ]] || fail "feed page 1 should have a cursor"
+  request GET "/v1/transactions?limit=3&before=$NEXT6" "$C_TOKEN"; expect 200 "feed page 2"
+  v6check "page 2 carries no pending list (first page only)" '(.pending|length==0) and (.items|length==3)'
+  request GET "/v1/transactions?q=netflix&accountId=$C_ACC" "$C_TOKEN"; expect 200 "feed search + account filter"
+  v6check "4 NETFLIX rows" '(.items|length==4) and all(.items[]; .description|test("NETFLIX"))'
+  request GET "/v1/week?start=$TODAY_UTC" "$C_TOKEN"
+  v6check "WeekView.pendingOutCents = 525" '.pendingOutCents==525'
+
+  echo "--- v6: add a bank name → immediate rematch → auto"
+  request PUT "/v1/recurring/$OIL6" "$C_TOKEN" "$(jq -nc --arg a "$C_ACC" --arg d "$TODAY_UTC" '{name:"Oil change",kind:"bill",amountCents:6000,accountId:$a,frequency:"once",anchorDate:$d,bankNames:["Jiffy Lube"]}')"
+  expect 200 "Oil change: bank shows it as Jiffy Lube"
+  v6wait "rematch (debounced) auto-matches JIFFY LUBE to Oil change at 54.20" "/v1/inbox?limit=200" \
+    ".items[] | select(.id==\"$TX_JIFFY6\") | .status==\"confirmed\" and .confirmed.auto==true and .match.itemId==\"$OIL6\" and .matchDetail.engine==\"fuzzy\" and .matchScore>=85" 40
+  request GET "/v1/calendar?from=$TODAY_UTC&to=$TODAY_UTC" "$C_TOKEN"
+  v6check "one-off paid at the bank amount (variance −5.80)" ".occurrences[] | select(.itemId==\"$OIL6\") | .paid.amountCents==5420 and .varianceCents==-580 and .paid.auto==true"
+
+  echo "--- v6: found bills"
+  v6wait "found bills: Netflix monthly 15.49 and Spotify suggested" "/v1/bill-suggestions" \
+    '([.[] | select(.name=="Netflix" and .frequency=="monthly" and .amountCents==1549 and .kind=="subscription" and .sampleCount==4)] | length==1) and ([.[] | select(.bankName|test("SPOTIFY"))] | length==1)' 40
+  NETFLIX6="$(echo "$BODY" | jq -r '.[] | select(.name=="Netflix") | .id')"
+  SPOTIFY6="$(echo "$BODY" | jq -r '.[] | select(.bankName|test("SPOTIFY")) | .id')"
+  echo "$BODY" | jq -r '.[] | "       \(.name) · \(.amountCents) \(.frequency) · next \(.nextDue) · bank \(.bankName) · score \(.score) · last \(.lastSeen)"'
+  request POST "/v1/bill-suggestions/$NETFLIX6/accept" "$C_TOKEN" '{"kind":"income"}'; expect 400 "accept as income (money out) → 400"
+  request POST "/v1/bill-suggestions/$NETFLIX6/accept" "$C_TOKEN" '{}'; expect 201 "accept Netflix"
+  NETFLIX_ITEM="$(echo "$BODY" | jq -r .item.id)"
+  v6check "item created with the detected bank name; the 4 past payments matched" \
+    '.matched==4 and .item.name=="Netflix" and .item.kind=="subscription" and .item.frequency=="monthly" and .item.amountCents==1549 and (.item.bankNames|length==1) and (.item.bankNames[0]|test("NETFLIX"))'
+  request POST "/v1/bill-suggestions/$NETFLIX6/accept" "$C_TOKEN" '{}'; expect 409 "accept twice → 409"
+  request GET "/v1/recurring/$NETFLIX_ITEM/payments?limit=6" "$C_TOKEN"; expect 200 "Netflix payments"
+  v6check "4 payments linked to their bank transactions" '[.[] | select(.transaction!=null and .paid.source=="bank")] | length==4'
+  request POST "/v1/bill-suggestions/$SPOTIFY6/dismiss" "$C_TOKEN"; expect 204 "Spotify: not a bill"
+  request POST "/v1/bill-suggestions/$SPOTIFY6/dismiss" "$C_TOKEN"; expect 204 "dismiss twice is a no-op"
+  request GET /v1/bill-suggestions "$C_TOKEN"
+  v6check "neither Netflix nor Spotify is listed any more" "[.[] | select(.id==\"$NETFLIX6\" or .id==\"$SPOTIFY6\")] | length==0"
+
+  echo "--- v6: auto-match level off → suggestions only; bills → auto"
+  request PATCH /v1/couple "$C_TOKEN" '{"autoMatchLevel":"off"}'; expect 200 "auto-match level off"
+  request POST /v1/recurring "$C_TOKEN" "$(jq -nc --arg a "$C_ACC" --arg d "$TODAY_UTC" '{name:"Water",kind:"bill",amountCents:4500,accountId:$a,frequency:"monthly",anchorDate:$d,bankNames:["City Water"],amountVaries:true}')"
+  expect 201 "Water ~45.00 monthly (amount varies), bank shows it as City Water"
+  WATER6="$(echo "$BODY" | jq -r .id)"
+  curl -fs -X POST "$FAKE/__phase/v6/2" >/dev/null || fail "could not enable v6 phase 2"
+  v6wait "CITY WATER UTIL synced as a suggestion only (level off)" "/v1/inbox?limit=200" \
+    ".items[] | select(.description==\"CITY WATER UTIL\") | .status==\"pending\" and .suggestion.kind==\"occurrence\" and .suggestion.itemId==\"$WATER6\" and .matchScore>=85 and .confirmed==null"
+  TX_WATER6="$(echo "$BODY" | jq -r '.items[] | select(.description=="CITY WATER UTIL") | .id')"
+  sleep 14 # the sync queued found bills again (10 s debounce): Spotify must stay dismissed, Netflix is now a known bill
+  request GET /v1/bill-suggestions "$C_TOKEN"
+  v6check "dismissed Spotify never returns; Netflix not suggested again" '[.[] | select((.bankName|test("SPOTIFY|NETFLIX")) or .name=="Netflix")] | length==0'
+  request GET "/v1/inbox?limit=200" "$C_TOKEN"
+  v6check "still a suggestion after the rematches (level off)" ".items[] | select(.id==\"$TX_WATER6\") | .status==\"pending\""
+  request PATCH /v1/couple "$C_TOKEN" '{"autoMatchLevel":"bills"}'; expect 200 "auto-match level bills (queues a rematch)"
+  v6wait "rematch auto-matches CITY WATER UTIL to Water" "/v1/inbox?limit=200" \
+    ".items[] | select(.id==\"$TX_WATER6\") | .status==\"confirmed\" and .confirmed.auto==true and .match.itemId==\"$WATER6\"" 40
+
+  echo "--- v6: the matcher goes away → built-in fallback"
+  if [[ -n "$MATCHER_STARTED" ]]; then
+    pkill -f "uvicorn matcher.app:app --host 127.0.0.1 --port $MATCHER_STARTED" 2>/dev/null || true
+    for _ in $(seq 1 50); do curl -fs "$MURL/health" >/dev/null 2>&1 || break; sleep 0.2; done
+    ! curl -fs "$MURL/health" >/dev/null 2>&1 || fail "matcher still running"
+    pass "matcher stopped"
+    v6wait "status: unreachable, engine builtin, found bills paused" /v1/matcher/status '.reachable==false and .engine=="builtin" and .foundBills==false' 30
+    request POST /v1/recurring "$C_TOKEN" "$(jq -nc --arg a "$C_ACC" --arg d "$TODAY_UTC" '{name:"Gym",kind:"bill",amountCents:2999,accountId:$a,frequency:"weekly",anchorDate:$d,bankNames:["Planet Fitness"]}')"
+    expect 201 "Gym 29.99 weekly, bank shows it as Planet Fitness"
+    GYM6="$(echo "$BODY" | jq -r .id)"
+    curl -fs -X POST "$FAKE/__phase/v6/3" >/dev/null || fail "could not enable v6 phase 3"
+    v6wait "sync still works: PLANET FITNESS auto-matched by the built-in engine (bank-name rule)" "/v1/inbox?limit=200" \
+      ".items[] | select(.description==\"PLANET FITNESS\") | .status==\"confirmed\" and .confirmed.auto==true and .match.itemId==\"$GYM6\" and .matchDetail.engine==\"builtin\""
+    request GET /v1/banks "$C_TOKEN"
+    v6check "bank link healthy" '.[0].lastError==null'
+    request GET /v1/matcher/status "$C_TOKEN"
+    v6check "last run engine builtin" '.lastRunEngine=="builtin" and .engine=="builtin"'
+  else
+    echo "       (matcher was already running when the smoke started: stop-the-matcher fallback checks skipped)"
+  fi
+
+  request GET "/v1/activity?limit=100" "$C_TOKEN"
+  v6check "v6 activity: dismissed found bill, found bill added, auto-match level setting" \
+    '[.events[].kind] as $k | ($k | index("bill_suggestion.dismissed")) != null and ([.events[] | select(.kind=="recurring.created" and .data.fromSuggestion==true)] | length==1) and ([.events[] | select(.kind=="couple.settings" and .data.autoMatchLevel=="off")] | length==1)'
+  request DELETE "/v1/banks/$LINK6" "$C_TOKEN"; expect 204 "unlink Casey's bank"
+  request POST /v1/couple/leave "$C_TOKEN"; expect 200 "Casey leaves (household deleted)"
+}
+
+# ---------------------------------------------------------------------------------------------
 # v3: bank sync, review inbox, CSV import
 #   SMOKE_SIMPLEFIN_PORT=<port>  start scripts/fake-simplefin.py on that port and run the full SimpleFIN flow.
 #                                The API must have been started with Security__DataKey set and
@@ -485,6 +711,10 @@ if [[ -n "${SMOKE_SIMPLEFIN_PORT:-}" ]]; then
   for _ in $(seq 1 50); do curl -fs "$FAKE/__health" >/dev/null 2>&1 && break; sleep 0.1; done
   curl -fs "$FAKE/__health" >/dev/null || fail "fake SimpleFIN server did not start"
   pass "fake SimpleFIN server up"
+
+  if [[ -n "${SMOKE_MATCHER_URL:-}" ]]; then
+    echo "--- v3–v5 bank flows skipped: SMOKE_MATCHER_URL is set and they assert the built-in engine's scores (run them without it)"
+  else
 
   # A weekly "Rent" anchored 7 days ago: occurrences on $RENT_ANCHOR and $TODAY_UTC, both unpaid.
   request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg c "$HOUSING" --arg a "$ACC" --arg d "$RENT_ANCHOR" '{name:"Rent (weekly test)",kind:"bill",amountCents:185000,categoryId:$c,accountId:$a,frequency:"weekly",anchorDate:$d}')"; expect 201 "create weekly Rent due $RENT_ANCHOR and $TODAY_UTC"
@@ -878,6 +1108,12 @@ if [[ -n "${SMOKE_SIMPLEFIN_PORT:-}" ]]; then
   request GET "/v1/accounts/$VISA_ACC" "$A_TOKEN"; expect 200 "mapped account survives unlinking"
   request DELETE "/v1/banks/$LINK" "$A_TOKEN"; expect 404 "deleted link → 404"
   request DELETE "/v1/recurring/$RENT_V3" "$A_TOKEN"; expect 204 "archive the test Rent"
+  fi # end of the built-in-engine bank flows
+
+  if [[ -n "${SMOKE_MATCHER_URL:-}" ]]; then
+    [[ "${SMOKE_SCHEDULER_WAIT:-0}" -gt 0 ]] || fail "the v6 matcher flow needs SMOKE_SCHEDULER_WAIT > 0 (and Sync__IntervalHours=0, Scheduler__IntervalSeconds=5)"
+    v6_matcher_flow
+  fi
   kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null || true
   trap 'rm -f "$TMP_BODY" "$TMP_REQ"' EXIT
 else

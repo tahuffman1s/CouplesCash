@@ -2,7 +2,9 @@ using System.Security.Claims;
 using CouplesCash.Api.Auth;
 using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
+using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Matching;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -25,7 +27,7 @@ public static class CoupleEndpoints
         group.MapPost("/leave", Leave)
             .WithSummary("Leave the household (deleted when empty)");
         group.MapPatch("", UpdateSettings).RequireHousehold().WithValidation<HouseholdSettingsRequest>()
-            .WithSummary("Update household name and settings (currency, week start, time zone, default account, pay period, weekly spending target)");
+            .WithSummary("Update household name and settings (currency, week start, time zone, default account, pay period, weekly spending target, auto-ignore transfers, auto-match level)");
 
         return group;
     }
@@ -166,6 +168,7 @@ public static class CoupleEndpoints
         HouseholdRepository households,
         AccountRepository accounts,
         ActivityService activity,
+        MatchingQueue matching,
         CancellationToken ct)
     {
         var householdId = principal.GetHouseholdId();
@@ -185,7 +188,8 @@ public static class CoupleEndpoints
             PayPeriod: request.PayPeriod.HasValue ? request.PayPeriod.Value : null,
             PayAnchorDate: request.PayAnchorDate,
             WeeklySpendCents: request.WeeklySpendCents,
-            AutoIgnoreTransfers: request.AutoIgnoreTransfers.HasValue ? request.AutoIgnoreTransfers.Value : null);
+            AutoIgnoreTransfers: request.AutoIgnoreTransfers.HasValue ? request.AutoIgnoreTransfers.Value : null,
+            AutoMatchLevel: request.AutoMatchLevel.HasValue ? request.AutoMatchLevel.Value : null);
 
         var changed = new List<string>();
         if (update.Currency is not null)
@@ -223,6 +227,11 @@ public static class CoupleEndpoints
             changed.Add("auto-ignore transfers");
         }
 
+        if (update.AutoMatchLevel is not null)
+        {
+            changed.Add("auto-match level");
+        }
+
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         if (!await households.UpdateSettingsAsync(uow.Connection, householdId, update, ct))
         {
@@ -249,8 +258,15 @@ public static class CoupleEndpoints
             payAnchorDate = update.PayAnchorDate.HasValue ? update.PayAnchorDate.Value : null,
             weeklySpendCents = update.WeeklySpendCents.HasValue ? update.WeeklySpendCents.Value : null,
             autoIgnoreTransfers = update.AutoIgnoreTransfers,
+            autoMatchLevel = update.AutoMatchLevel?.ToDb(),
         };
         await activity.RecordAsync(uow, householdId, userId, "couple.settings", "household", householdId, summary, data, ct, principal.GetDisplayName());
+        if (update.AutoMatchLevel is not null)
+        {
+            // A higher level may now auto-apply rows that are waiting for review.
+            uow.AfterCommit(() => matching.Enqueue(householdId, MatchingJobKind.Rematch));
+        }
+
         await uow.CommitAsync(ct);
 
         return TypedResults.Ok(household);

@@ -8,11 +8,14 @@ public sealed record MatchTransaction(Guid Id, Guid? AccountId, DateOnly PostedO
     public long Magnitude => Math.Abs(AmountCents);
 }
 
-/// <summary>An unpaid occurrence of an active recurring item. <paramref name="Once"/> (v4) = a planned one-off, matched with the wider window and tolerance.</summary>
-public sealed record MatchableOccurrence(Guid ItemId, string ItemName, Kind Kind, long AmountCents, DateOnly DueDate, bool Once = false)
+/// <summary>
+/// An unpaid occurrence of an active recurring item. <paramref name="Once"/> (v4) = a planned one-off, matched with the wider window and
+/// tolerance; <paramref name="AmountVaries"/> (v6) = utilities / card payments, the widest window and tolerance.
+/// </summary>
+public sealed record MatchableOccurrence(Guid ItemId, string ItemName, Kind Kind, long AmountCents, DateOnly DueDate, bool Once = false, bool AmountVaries = false)
 {
-    /// <summary>±5 days for recurring items, ±7 for one-offs.</summary>
-    public int WindowDays => Once ? TransactionMatcher.OnceWindowDays : TransactionMatcher.RecurringWindowDays;
+    /// <summary>±5 days for recurring items, ±7 for one-offs, ±10 when the amount varies (v6).</summary>
+    public int WindowDays => AmountVaries ? TransactionMatcher.VariesWindowDays : Once ? TransactionMatcher.OnceWindowDays : TransactionMatcher.RecurringWindowDays;
 }
 
 /// <summary>A learned <c>payee_rules</c> row. <paramref name="IsTransfer"/> (v5): the payee was marked as a one-sided transfer.</summary>
@@ -69,6 +72,9 @@ public static class TransactionMatcher
 
     /// <summary>v4: a planned one-off (<c>frequency = once</c>) may post up to a week either side of its planned date.</summary>
     public const int OnceWindowDays = 7;
+
+    /// <summary>v6: an item whose amount varies may post up to 10 days either side, within max(35 %, $15.00) (MATCHER-CONTRACT tolerances).</summary>
+    public const int VariesWindowDays = 10;
 
     /// <summary>Confidence at which the scheduler may mark the occurrence paid without a human (plus a learned rule).</summary>
     public const int AutoMatchConfidence = 90;
@@ -214,13 +220,17 @@ public static class TransactionMatcher
         return Math.Clamp((int)Math.Round(score, MidpointRounding.AwayFromZero), 0, 100);
     }
 
-    /// <summary>Recurring: max(2 % of the expected amount, $1.00). One-off (<paramref name="once"/>, v4): max(15 %, $10.00). In cents.</summary>
-    public static long Tolerance(long expectedCents, bool once = false) => once
-        ? Math.Max(1000, (long)Math.Round(Math.Abs(expectedCents) * 0.15, MidpointRounding.AwayFromZero))
+    /// <summary>
+    /// Recurring: max(2 % of the expected amount, $1.00). One-off (<paramref name="once"/>, v4): max(15 %, $10.00). Amount varies
+    /// (<paramref name="varies"/>, v6): max(35 %, $15.00). In cents.
+    /// </summary>
+    public static long Tolerance(long expectedCents, bool once = false, bool varies = false) =>
+        varies ? Math.Max(1500, (long)Math.Round(Math.Abs(expectedCents) * 0.35, MidpointRounding.AwayFromZero))
+        : once ? Math.Max(1000, (long)Math.Round(Math.Abs(expectedCents) * 0.15, MidpointRounding.AwayFromZero))
         : Math.Max(100, (long)Math.Round(Math.Abs(expectedCents) * 0.02, MidpointRounding.AwayFromZero));
 
-    public static bool AmountMatches(long expectedCents, long actualMagnitude, bool once = false) =>
-        Math.Abs(Math.Abs(expectedCents) - actualMagnitude) <= Tolerance(expectedCents, once);
+    public static bool AmountMatches(long expectedCents, long actualMagnitude, bool once = false, bool varies = false) =>
+        Math.Abs(Math.Abs(expectedCents) - actualMagnitude) <= Tolerance(expectedCents, once, varies);
 
     public static bool SignMatchesKind(Kind kind, bool isOutflow) => kind.IsOutflow() == isOutflow;
 
@@ -303,7 +313,7 @@ public static class TransactionMatcher
         unpaid
             .Where(o => SignMatchesKind(o.Kind, tx.IsOutflow))
             .Where(o => Math.Abs(o.DueDate.DayNumber - tx.PostedOn.DayNumber) <= o.WindowDays)
-            .Where(o => AmountMatches(o.AmountCents, tx.Magnitude, o.Once))
+            .Where(o => AmountMatches(o.AmountCents, tx.Magnitude, o.Once, o.AmountVaries))
             .OrderBy(o => Math.Abs(o.DueDate.DayNumber - tx.PostedOn.DayNumber))
             .ThenBy(o => Math.Abs(Math.Abs(o.AmountCents) - tx.Magnitude))
             .ThenBy(o => o.ItemName, StringComparer.OrdinalIgnoreCase)
@@ -373,6 +383,16 @@ public static class TransactionMatcher
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// v6: what the built-in engine suggests when there is no occurrence match (the fuzzy matcher found none, or only categories are
+    /// wanted): learned transfer payee (85) → learned category (70 + hits) → transfer keyword (60) → category keyword (40) → none.
+    /// </summary>
+    public static Suggestion SuggestWithoutOccurrence(MatchTransaction tx, IReadOnlyDictionary<string, PayeeRule> rulesByNorm, IReadOnlyDictionary<string, Guid> categoriesByName)
+    {
+        rulesByNorm.TryGetValue(NormalisePayee(tx.Payee, tx.Description), out var rule);
+        return SuggestCategory(tx, rule, categoriesByName);
     }
 
     /// <summary>

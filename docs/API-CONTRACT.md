@@ -708,3 +708,105 @@ type TransactionFeed = { pending: InboxItem[] /* all in-progress, every account 
 | POST | `/v1/bill-suggestions/{id}/accept` | `{ name?, kind?, amountCents?, frequency?, nextDue? }` (overrides) | `201 { item: RecurringItem; matched: number }` — creates the item with `bankNames=[bankName]` and matches the sample transactions |
 | POST | `/v1/bill-suggestions/{id}/dismiss` | — | `204` (never suggested again) |
 `POST /v1/recurring` is what the quick-add sheet calls (the parser is client-side); it already accepts every field the preview produces.
+
+## v6 implementation notes (API)
+
+Deviations and clarifications from the "# v6 additions" tables, as built in `apps/api`:
+
+- **Migration 0006** (`0006_matcher.sql`): `recurring_items.bank_names text[]` (backfilled with the trimmed `payee_hint`),
+  `bank_names_learned text[]`, `amount_varies`; `households.auto_match_level` (CHECK off|bills|all, default `all`);
+  `imported_transactions.match_score smallint`, `match_detail jsonb`, plus **`auto_blocked boolean`** (see below); `bill_suggestions`
+  as in PLAN-V6 plus **`last_seen date`** (newest sample, for `BillSuggestion.lastSeen`) and **`item_id`** (the item an accepted
+  suggestion became), `UNIQUE (household_id, fingerprint)`.
+- **Bank names.** `POST/PUT /v1/recurring` store `bankNames` trimmed with case-insensitive duplicates dropped (first spelling wins);
+  more than 10 (after dedupe) or any name outside 2–80 characters → `400 errors.bankNames`. When `bankNames` is absent the legacy v4
+  `payeeHint` becomes the only name (blank or absent → none, so a v4 `PUT` without a hint still clears it; its 80-character limit stays
+  `errors.payeeHint`); an explicit `bankNames` (even `[]`) wins over `payeeHint`. PUT replaces the list (and `amountVaries`, default
+  false). `payeeHint` in `RecurringItem` = `bankNames[0] ?? null`; the `payee_hint` column is no longer written. Every user bank name
+  seeds `payee_rules(payee_norm(name), item)` like the v4 hint did (removed names drop their rule unless a remaining user or learned name
+  normalises the same), so the built-in fallback can still auto-apply them. `/recurring/from-transaction` sets `bankNames = [payee ??
+  description]`.
+- **Learning.** Every confirmed occurrence match — confirm, match, link, from-transaction, found-bill accept, auto-match — upserts the
+  payee rule payee → item (v3) and appends the transaction's normalised payee (TransactionMatcher's normaliser on `payee ?? description`,
+  upper-cased, ≤ 80 chars, e.g. "ACH DEBIT OAKWOOD PROPERTY MGMT RENT" → "OAKWOOD PROPERTY MGMT RENT") to `bankNamesLearned` unless a
+  name with the same normalised form is already in either list; at most 10 learned names, the oldest evicted first; user names are never
+  changed. `DELETE /recurring/{id}/bank-names/learned/{index}` (0-based) → `404` when the item or index does not exist; it also drops
+  that name's item payee rule unless a remaining name normalises the same, writes `recurring.updated` (`data.forgotLearnedName`) and
+  queues a rematch.
+- **Matching pipeline** (`Matching/MatchingService.cs`). Runs on the rows a SimpleFIN sync or a **CSV import** inserted (v6: CSV imports
+  now auto-apply too), on every To-review row in the scheduler sweep, and on the immediate rematch. Built-in pass first (it is the
+  fallback, detects transfer pairs and fills category gaps); rows whose built-in suggestion is a detected pair (80) or a learned transfer
+  payee (85) are **never sent** to the matcher and keep the v5 transfer semantics (auto-ignored only for pairs involving a new row, only
+  when `autoIgnoreTransfers` is on **and** the level is not `off`). The `/v1/match` request: `today` = household-local date,
+  `options = { autoLevel, autoThreshold: 85, suggestThreshold: 55 }`, transactions (description / payee / memo cut to 256 chars), every
+  occurrence of an active item due within [earliest − 10, latest + 10] days — paid ones included with `paid: true` (the matcher's
+  "only candidate with that exact amount" rule counts them) — with `names = [item name, ...bankNames, ...bankNamesLearned]` (deduped)
+  and `amountVaries`, and `categoryRules` from `payee_rules` with a category that are not transfer rules (`payee` = `payee_norm`).
+  Requests are split into chunks of ≤ 1000 transactions carrying only the candidates within ±10 days of one of their transactions
+  (≤ 2000; a chunk over that is halved) and merged back (one match per transaction and per occurrence, best score wins).
+- **What is stored.** A matcher occurrence match → occurrence suggestion with `confidence = matchScore = score` and `matchDetail =
+  { name: nameScore, amount: amountScore, date: dateScore, reason, engine: 'fuzzy' }`; a category match → category suggestion with
+  `confidence = matchScore = score`, `matchDetail = { name: score, amount: 0, date: 0, reason, engine: 'fuzzy' }`; neither → the built-in
+  non-occurrence suggestion (transfer keyword 60, learned category 70 + hits, keyword 40; categories carry an `engine: 'builtin'` detail,
+  transfers / none have `matchScore` and `matchDetail` null). With the built-in engine the v5 suggestions are kept and occurrence /
+  category ones get a built-in detail computed with the contract's formulas (amount and date scores; name = 100 when a learned rule or
+  bank name names the item, else significant-token overlap; reason like "name 100% · amount exact · 2 days early · learned payee").
+  A sweep does not rewrite rows whose suggestion, score and detail are unchanged. Detail and score are kept after confirmation (the UI
+  shows them on auto rows).
+- **Automatic actions.** Occurrence: the matcher's `auto` (fuzzy) or, with the built-in engine, the v3 rule (confidence ≥ 90 and a
+  learned rule / bank name naming the item), only at level `bills|all`: the occurrence is paid with the bank amount (`paid_by NULL`,
+  `auto true`, `source bank`; skipped when already paid), the row is confirmed with `auto`, learning applies, and
+  `transaction.automatched` is written with `data: { transactionId, itemId, dueDate, amountCents, auto, reason, score, engine }`.
+  Category: the matcher's `auto` at level `all` for money out only: an expense with `deduct = false` (created by the link's creator on a
+  sync, the importer on a CSV import, the household's first member on a sweep), the row confirmed with `confirmed.auto = true` and no
+  reviewer, `transaction.autocategorized` (`data: { transactionId, expenseId, categoryId, amountCents, reason, score, engine }`). The
+  built-in engine never auto-categorises. `SyncResult.autoMatched` counts both; `bank.synced` data gains `autoMatchedOccurrences`,
+  `autoCategorized`, `engine`; `import.csv` data gains `autoMatched`, `autoCategorized`, `autoIgnoredTransfers`, `engine`. The "N to
+  review" push links `/transactions`.
+- **`auto_blocked`.** A row a person sends back to review — `restore`, `unmatch`, or marking its occurrence unpaid — is never
+  auto-applied again (its suggestion still refreshes), so a sweep cannot undo an Undo.
+- **Fallback.** Not configured (empty `Matcher__BaseUrl` / `Matcher__Key`), 401/403, 413, 400/422, 5xx, timeouts
+  (`Matcher__TimeoutSeconds`, 30), connection errors and bodies that are not the contract's JSON all mean "use the built-in engine"; a
+  sync or import never fails because of the matcher. The warning (category `CouplesCash.Api.Matching.MatchingService`) is logged at most
+  once a minute and names only the failure kind and household id — never descriptions or names.
+- **Rematch.** Scheduler phase `rematch` re-scores every household with To-review rows whose last sweep in this process is at least
+  `Matcher__RematchMinutes` (30) old (a fresh process sweeps on its first tick). Immediate rematch (background `MatchingWorker`,
+  `Matcher__DebounceSeconds` = 10 s after the last trigger, at most 60 s after the first) after `POST/PUT /recurring`, forgetting a
+  learned name, `PATCH /couple { autoMatchLevel }`, accepting a found bill and `POST /inbox/rematch`; runs of one household are
+  serialised. `POST /v1/inbox/rematch` → `202 { queued: true }` (Location `/v1/matcher/status`); a second request within a minute (per
+  household, in memory) → `429` problem with `Retry-After` and a `retryAfter` extension.
+- **`GET /v1/matcher/status`** adds `configured`, `lastRunEngine`, `foundBills` (found bills are running) and `note` (why the built-in
+  engine is used). `engine` is `fuzzy` only when the matcher is configured, `/health` answers and the last real call did not fail (a
+  401 is only cleared by a successful call; a network failure also by a good probe). The probe (3 s timeout) is cached 15 s, an
+  "unreachable" result 3 s. `lastRunAt` / `lastAutoMatched` (occurrences + categories of the household's last run: sync, import or
+  sweep) are kept in memory and reset on restart.
+- **Found bills.** Input: the household's imported rows of the last 180 days (household-local), without transfers and dropped /
+  superseded rows, newest 3000; `knownNames` = names, bank names and learned names of active items. Runs (debounced) after a sync or CSV
+  import that inserted rows, and daily (scheduler phase `found-bills`). Fingerprint = `sha256(payee_norm(bankName) + '|' + frequency)`;
+  open suggestions are inserted / refreshed, accepted and dismissed fingerprints are never touched again, open suggestions the latest
+  run no longer reports are removed. Without the matcher detection is skipped (no built-in detector) and `/matcher/status.foundBills` is
+  false. Detection itself writes no activity. `GET /bill-suggestions` lists open ones by score, then `lastSeen` (newest sample).
+- **Accept.** `404` unknown id; `409` ("Suggestion already handled") when already accepted or dismissed; overrides are validated (name
+  1–80, positive amount, enums) and a `kind` that flips the direction of the payments → `400 errors.kind`. The item gets the detected (or
+  overridden) name / kind / amount / frequency, `amountVaries` from detection, `bankNames = [bankName]`, the samples' most common account
+  and (money out) most common confirmed/suggested category, and `anchorDate` = `nextDue` stepped back whole periods until it is on or
+  before the earliest sample (month steps keep the day of month). Each sample still to review or confirmed as an expense is then matched
+  (v5 match semantics: an expense is reversed) to the item's nearest occurrence within half a period (weekly 3, biweekly 6, monthly 10,
+  quarterly 15 days); `matched` counts them. Activity `recurring.created` with `data: { itemId, suggestionId, matched, fromSuggestion:
+  true }`; a rematch is queued. **Dismiss** → `204` (again → `204`), accepted → `409`; activity `bill_suggestion.dismissed`.
+- **`GET /v1/pending`**: bank rows with `pending = true` and status pending|confirmed (the same rows as `Account.pendingOutCents`), not
+  hidden, newest first. Groups: every active linked account (also without pending rows) and every account with pending rows; rows of a
+  bank account that is not mapped form a group with **`accountId: null`** (name, institution and raw balances of the external account);
+  rows whose account is archived go to an `"Other"` group (`accountId: null`). Groups with pending rows first, by `pendingOutCents`
+  descending, then by name.
+- **`GET /v1/transactions`**: `accountId` (unknown / foreign → `400 errors.accountId`), `q` (≤ 100, parameterised ILIKE as v5), `before`
+  (inbox cursor), `limit` ≤ 200. `pending` = every visible bank row still pending at the bank (any status), only when `before` is absent
+  (≤ 1000); `items` = rows no longer pending (any status, dropped / superseded hidden) ∪ manual expenses not created from a bank row, as
+  `AccountTransaction` (InboxItem + `kind`); `toReviewCount` = household-wide rows to review.
+- **`WeekView.pendingOutCents`** = Σ `Account.pendingOutCents` over the active checking + cash accounts (the accounts Spendable counts).
+- **`PATCH /v1/couple { autoMatchLevel }`**: off|bills|all (`null` or anything else → `400 errors.autoMatchLevel`); `couple.settings`
+  lists "auto-match level" with `data.autoMatchLevel`; a rematch is queued.
+- The built-in `TransactionMatcher` honours `amountVaries` (±10 days, max(35 %, $15)). OpenAPI tags: `Matching` (status, rematch),
+  `Transactions` (`/transactions`, `/pending`), `Bill suggestions`. Env: `Matcher__BaseUrl`, `Matcher__Key`, `Matcher__TimeoutSeconds`
+  (30), `Matcher__RematchMinutes` (30), `Matcher__DebounceSeconds` (10), `Matcher__ChunkSize` (1000), `Matcher__MaxCandidates` (2000).
+  The matcher `HttpClient` never uses an outbound proxy and recycles connections every 2 minutes.

@@ -53,6 +53,7 @@ Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` 
 | **v5** pending reconciliation, transfers, matching | API `Domain/PendingReconciler.cs`, `GET /accounts/{id}/transactions`, `/inbox/{id}/candidates|match|transfer|unmatch`, `/recurring/from-transaction`, `/recurring/{id}/payments`, `/transfers`; web `TransactionSheet.svelte` (the one place a transaction is acted on), account Transactions tab, `(app)/transfers`, bill Payments |
 | **v4 routes** (week view) | `(app)/week` (+ `WeekCard` on the dashboard, "Plan a one-off" in the quick-add sheet, weekly budgets on `/week` and Insights) |
 | **v3 routes** (linked banks, review inbox, CSV import) | `(app)/settings/banks`, `(app)/inbox`, `(app)/imports/csv`; client-side CSV parsing/mapping in `src/lib/utils/csv.ts` |
+| **API ↔ matcher** (client, fallback, rematch queue, found bills) | `apps/api/CouplesCash.Api/Matching/`, `Scheduler/MatchingWorker.cs`, `Services/BillSuggestionService.cs`, `Domain/BankNames.cs` + `MatchingRules.cs`; endpoints `MatchingEndpoints`, `TransactionEndpoints`, `BillSuggestionEndpoints`; migration `0006_matcher.sql` |
 | **Matcher service** (scoring, found bills, normalisation) | `apps/matcher/src/matcher/scoring.py`, `recurring.py`, `normalize.py`; tests `apps/matcher/tests/` |
 | Service worker (push display + click → `url`) | `apps/web/src/service-worker/index.ts` |
 | Components | `apps/web/src/lib/components/` |
@@ -141,6 +142,9 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   already includes it); confirm-as-occurrence marks it paid with the bank amount; auto-match
   writes `paid_by NULL, auto true` and unpaying restores the inbox row. Bulk confirm only takes
   confidence ≥ 70. `credit`/`loan` balances from the Bridge are stored as positive owed.
+- **Auto-match**: `households.auto_match_level` off|bills|all (default all); every auto action writes `match_detail.reason`
+  and is undoable; a row a person sends back to review is `auto_blocked` and never auto-applied again. Confirmed matches
+  learn the normalised description into `bank_names_learned` (max 10, user `bank_names` never evicted).
 - **Matcher**: every call except `/health` sends `X-Matcher-Key`; it never logs descriptions; the API treats 401/413/422/5xx/
   timeouts as "use the built-in matcher" and never fails a sync because of it.
 - Containers: non-root, read-only FS, listen on 8080 (api) / 3000 (web) / 8090 (matcher, internal). Don't add `ports:` to api/db.

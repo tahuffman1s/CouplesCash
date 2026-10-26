@@ -4,6 +4,7 @@ using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Matching;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -27,7 +28,7 @@ public static class ImportEndpoints
         group.MapPost("/csv", ImportCsv)
             .WithMetadata(new RequestSizeLimitAttribute(MaxBodyBytes))
             .WithValidation<CsvImportRequest>()
-            .WithSummary("Import normalised CSV rows into the inbox (fingerprint dedupe; runs the matcher)");
+            .WithSummary("Import normalised CSV rows into the inbox (fingerprint dedupe; runs the matcher, incl. automatic matches)");
         group.MapGet("/csv", History).WithSummary("Last 20 CSV imports");
 
         return group;
@@ -39,7 +40,8 @@ public static class ImportEndpoints
         NpgsqlDataSource db,
         ImportRepository imports,
         AccountRepository accounts,
-        InboxService inbox,
+        MatchingService matching,
+        MatchingQueue matchingQueue,
         ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
@@ -81,16 +83,33 @@ public static class ImportEndpoints
             }
         }
 
+        // v6: CSV rows are matched like synced ones (fuzzy matcher, built-in fallback), including automatic matches.
         var newRows = await imports.ListByIdsAsync(uow.Connection, householdId, newIds, ct);
-        var suggested = await inbox.SuggestAsync(uow.Connection, householdId, newRows, ct);
-        await inbox.AutoIgnoreTransfersAsync(uow, householdId, newRows, suggested, ct);
+        var run = await matching.RunAsync(uow, householdId, newRows, MatchRunMode.NewRows, userId, ct);
 
         var record = await imports.InsertCsvImportAsync(uow.Connection, householdId, userId, accountId, filename, request.Rows.Length, imported, duplicates, now, ct);
         await activity.RecordAsync(uow, householdId, userId, "import.csv", "import", record.Id,
             ActivitySummaries.ImportCsv(filename, imported, duplicates),
-            new { importId = record.Id, accountId, rowCount = request.Rows.Length, imported, duplicates, skipped }, ct, principal.GetDisplayName());
+            new
+            {
+                importId = record.Id,
+                accountId,
+                rowCount = request.Rows.Length,
+                imported,
+                duplicates,
+                skipped,
+                autoMatched = run.AutoMatched,
+                autoCategorized = run.AutoCategorized,
+                autoIgnoredTransfers = run.AutoIgnored,
+                engine = run.Engine,
+            }, ct, principal.GetDisplayName());
 
         var pending = await imports.CountPendingAsync(uow.Connection, householdId, ct);
+        if (imported > 0)
+        {
+            uow.AfterCommit(() => matchingQueue.Enqueue(householdId, MatchingJobKind.FoundBills));
+        }
+
         await uow.CommitAsync(ct);
 
         return TypedResults.Created("/v1/imports/csv", new CsvImportResultDto(record.Id, request.Rows.Length, imported, duplicates, skipped, pending));

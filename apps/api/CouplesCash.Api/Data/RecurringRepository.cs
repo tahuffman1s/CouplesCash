@@ -17,14 +17,15 @@ public sealed record RecurringFields(
     bool AutoPay,
     string? Notes,
     string? Url,
-    string? PayeeHint = null);
+    IReadOnlyList<string>? BankNames = null,
+    bool AmountVaries = false);
 
 public sealed class RecurringRepository(NpgsqlDataSource db)
 {
     private const string Select =
         """
         SELECT i.id, i.household_id, i.name, i.kind, i.amount_cents, i.category_id, i.account_id, i.frequency,
-               i.anchor_date, i.end_date, i.auto_pay, i.notes, i.url, i.payee_hint, i.created_by, i.created_at, i.updated_at, i.archived_at,
+               i.anchor_date, i.end_date, i.auto_pay, i.notes, i.url, i.payee_hint, i.bank_names, i.bank_names_learned, i.amount_varies, i.created_by, i.created_at, i.updated_at, i.archived_at,
                c.name AS category_name, c.color AS category_color, a.name AS account_name
         FROM recurring_items i
         LEFT JOIN categories c ON c.id = i.category_id
@@ -36,6 +37,12 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
     public async Task<IReadOnlyList<RecurringItemRow>> ListAsync(Guid householdId, Kind? kind, CancellationToken ct)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
+        return await ListAsync(conn, householdId, kind, ct);
+    }
+
+    /// <summary>Active items on the caller's connection (sees items created earlier in the same transaction).</summary>
+    public async Task<IReadOnlyList<RecurringItemRow>> ListAsync(NpgsqlConnection conn, Guid householdId, Kind? kind, CancellationToken ct)
+    {
         var rows = await conn.QueryAsync<RecurringItemRow>(Cmd(
             $"""
             {Select}
@@ -72,9 +79,9 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
         await conn.ExecuteAsync(Cmd(
             """
             INSERT INTO recurring_items (id, household_id, name, kind, amount_cents, category_id, account_id, frequency,
-                                         anchor_date, end_date, auto_pay, notes, url, payee_hint, created_by, created_at, updated_at)
+                                         anchor_date, end_date, auto_pay, notes, url, bank_names, amount_varies, created_by, created_at, updated_at)
             VALUES (@Id, @HouseholdId, @Name, @Kind, @AmountCents, @CategoryId, @AccountId, @Frequency,
-                    @AnchorDate, @EndDate, @AutoPay, @Notes, @Url, @PayeeHint, @UserId, @Now, @Now)
+                    @AnchorDate, @EndDate, @AutoPay, @Notes, @Url, @BankNames, @AmountVaries, @UserId, @Now, @Now)
             """,
             new
             {
@@ -91,7 +98,8 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
                 f.AutoPay,
                 f.Notes,
                 f.Url,
-                f.PayeeHint,
+                BankNames = (f.BankNames ?? []).ToArray(),
+                f.AmountVaries,
                 UserId = userId,
                 Now = now,
             }, ct));
@@ -106,7 +114,7 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
             UPDATE recurring_items
             SET name = @Name, kind = @Kind, amount_cents = @AmountCents, category_id = @CategoryId, account_id = @AccountId,
                 frequency = @Frequency, anchor_date = @AnchorDate, end_date = @EndDate, auto_pay = @AutoPay,
-                notes = @Notes, url = @Url, payee_hint = @PayeeHint, updated_at = @Now
+                notes = @Notes, url = @Url, bank_names = @BankNames, amount_varies = @AmountVaries, updated_at = @Now
             WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL
             """,
             new
@@ -124,7 +132,8 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
                 f.AutoPay,
                 f.Notes,
                 f.Url,
-                f.PayeeHint,
+                BankNames = (f.BankNames ?? []).ToArray(),
+                f.AmountVaries,
                 Now = now,
             }, ct));
 
@@ -139,10 +148,22 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
         return rows > 0;
     }
 
+    /// <summary>v6: replaces the learned bank names (the caller computed the new list with <c>BankNames.Learn</c>).</summary>
+    public Task<int> SetLearnedNamesAsync(NpgsqlConnection conn, Guid householdId, Guid id, IReadOnlyList<string> learned, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            "UPDATE recurring_items SET bank_names_learned = @Learned, updated_at = @Now WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL",
+            new { Id = id, HouseholdId = householdId, Learned = learned.ToArray(), Now = now }, ct));
+
     /// <summary>Payments of the household's items due within [from, to].</summary>
     public async Task<IReadOnlyList<PaymentRow>> ListPaymentsAsync(Guid householdId, DateOnly from, DateOnly to, CancellationToken ct)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
+        return await ListPaymentsAsync(conn, householdId, from, to, ct);
+    }
+
+    /// <summary>Payments due within [from, to] on the caller's connection (sees payments written earlier in the same transaction).</summary>
+    public async Task<IReadOnlyList<PaymentRow>> ListPaymentsAsync(NpgsqlConnection conn, Guid householdId, DateOnly from, DateOnly to, CancellationToken ct)
+    {
         var rows = await conn.QueryAsync<PaymentRow>(Cmd(
             """
             SELECT p.recurring_item_id, p.due_date, p.paid_at, p.paid_by, p.amount_cents, p.auto, p.source
