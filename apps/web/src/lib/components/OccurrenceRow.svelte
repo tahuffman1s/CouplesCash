@@ -64,7 +64,7 @@
 	<span class="h-10 w-1.5 shrink-0 rounded-full" style:background={colour} aria-hidden="true"
 	></span>
 	<a href="/bills/{occ.itemId}" class="min-w-0 flex-1 rounded-lg">
-		<p class="flex items-center gap-1.5">
+		<p class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
 			<span
 				class="min-w-[3.5rem] truncate font-medium {occ.paid
 					? 'text-base-content/50 line-through'
@@ -102,7 +102,7 @@
 			{#if autoPaid}
 				<span class="inline-flex items-center gap-1 font-medium text-secondary">
 					<Icon name="bot" size={12} />
-					{fromBank ? 'Matched from bank' : 'Auto-paid'}
+					{fromBank ? 'Matched' : 'Auto-paid'}
 				</span>
 				{#if showDate}<span aria-hidden="true"> · </span><span>{formatDate(occ.dueDate)}</span>{/if}
 			{:else if showDate}
@@ -148,12 +148,13 @@
 		{#if autoPaid}
 			<button
 				type="button"
-				class="btn min-h-11 rounded-full border border-base-300 btn-ghost px-3 btn-sm"
+				class="btn min-h-11 w-11 shrink-0 rounded-full border border-base-300 btn-ghost p-0 btn-sm"
 				aria-label="{fromBank ? 'Undo bank match for' : 'Undo auto-pay for'} {occ.name}"
+				title="Undo"
 				disabled={busy}
 				onclick={() => onToggle(occ)}
 			>
-				<Icon name="undo-2" size={16} /> Undo
+				<Icon name="undo-2" size={16} />
 			</button>
 		{:else}
 			<button
