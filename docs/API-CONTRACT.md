@@ -810,3 +810,44 @@ Deviations and clarifications from the "# v6 additions" tables, as built in `app
   `Transactions` (`/transactions`, `/pending`), `Bill suggestions`. Env: `Matcher__BaseUrl`, `Matcher__Key`, `Matcher__TimeoutSeconds`
   (30), `Matcher__RematchMinutes` (30), `Matcher__DebounceSeconds` (10), `Matcher__ChunkSize` (1000), `Matcher__MaxCandidates` (2000).
   The matcher `HttpClient` never uses an outbound proxy and recycles connections every 2 minutes.
+
+---
+
+# v7 additions (Friday plan)
+
+```ts
+type AccountRole = 'bills' | 'savings' | 'fun' | 'other';
+// Account gains: role: AccountRole; ownerUserId: string | null; ownerName: string | null
+// Household gains: paydayWeekday: 0..6   (weekStart is derived = paydayWeekday; kept for compatibility)
+// Kind gains 'transfer'; RecurringItem gains: fromAccountId, toAccountId (string | null), fromAccountName, toAccountName
+type PlanLine = { kind: 'bill' | 'subscription' | 'income' | 'transfer' | 'oneoff'; occurrence: Occurrence };
+type ChecklistItem = { key: 'paycheck' | 'fun' | 'sweep'; label: string; amountCents: number; done: boolean;
+  auto: boolean; transactionId: string | null; itemId: string | null; dueDate: string | null };
+type Sweep = { weekStart: string; plannedCents: number; actualCents: number | null; doneAt: string | null; auto: boolean };
+type FeedStats = { pending: number; posted: number; availableReported: boolean; at: string } | null;
+type Plan = {
+  start: string; end: string; nextPayday: string; isCurrent: boolean; isPayday: boolean; today: string;
+  billsAccount: { id: string; name: string; availableCents: number; balanceCents: number; availableFromBank: boolean;
+                  pending: InboxItem[]; pendingOutCents: number; feed: FeedStats } | null;   // null → setup needed
+  accounts: { id: string; name: string; role: AccountRole; ownerName: string | null; balanceCents: number; availableCents: number | null }[];
+  bills: PlanLine[]; funMoney: PlanLine[]; oneOffs: PlanLine[]; income: PlanLine[];
+  billsOutCents: number; funOutCents: number; oneOffOutCents: number; incomeInCents: number;  // unpaid remainders
+  leftAtEndCents: number;        // availableCents − bills − fun − one-offs (+ unpaid income only when it lands before end)
+  savingsBills: PlanLine[];      // e.g. student loans from savings — shown, not in the math
+  checklist: ChecklistItem[];    // payday only (empty otherwise); sweep amount = previous week's left-at-end, frozen
+  sweep: Sweep | null; toReviewCount: number; setup: { banksLinked: boolean; rolesSet: boolean; paycheckKnown: boolean; billsAdded: boolean; partnerJoined: boolean } };
+```
+
+| Method | Route | Body / Query | Response |
+|---|---|---|---|
+| GET | `/v1/plan` | `?date=YYYY-MM-DD` (any day of the pay week; default today) | `200 Plan` |
+| POST | `/v1/plan/sweep/done` | `{ weekStart, actualCents? }` | `200 Sweep` (manual tick; auto-detection may later attach the transaction) |
+| DELETE | `/v1/plan/sweep/done` | `{ weekStart }` | `200 Sweep` |
+| PUT | `/v1/accounts/{id}/role` | `{ role, ownerUserId? }` (setting `bills` moves the role off the previous bills account) | `200 Account` |
+| PATCH | `/v1/couple` | `{ paydayWeekday? }` | `200 Household` |
+| POST | `/v1/recurring/bulk` | `{ items: RecurringRequest[] }` (≤ 100; all-or-nothing validation, per-index errors `items[3].amountCents`) | `201 { items: RecurringItem[] }` |
+| POST/PUT | `/v1/recurring` | `kind: 'transfer'` requires `fromAccountId` and `toAccountId` (different, both in household) | `RecurringItem` |
+| GET | `/v1/banks` | — | `BankLink.accounts[].lastFeed: FeedStats` |
+Transactions on `fun` accounts never enter To review (status confirmed, `ignoreReason` null, no suggestion) but appear in
+the account's transaction list. Activity kinds added: `sweep.done`, `sweep.auto`, `transfer.planned_paid`. Push tag
+`payday`. Week endpoints (`/v1/week`) use the pay week (payday-anchored) from v7 on.
