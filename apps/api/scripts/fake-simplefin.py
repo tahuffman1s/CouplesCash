@@ -21,6 +21,14 @@ v6 dataset (a second, independent Bridge user for the matcher smoke; claim token
     pending "STARBUCKS STORE 1234" -5.25 today;
   2 "CITY WATER UTIL" -45.00 today;  3 "PLANET FITNESS" -29.99 today
 
+v7 dataset (their real shape; claim token "v7"; phases via POST /__phase/v7/<n>[?cents=N]):
+  1 (always) US Bank checking (balance 2408.07, available 2345.67): "ACME CORP PAYROLL" +1500.00 today, pending ×3 = −62.40
+    ("WALMART SUPERCENTER" −25.00, "SHELL OIL 5741" −30.00 in the v2 shape posted=0 + transacted_at, "STARBUCKS 0091" −7.40);
+    Ally High Yield Savings (balance 10000.00, no available-balance): "NELNET STUDENT LOAN" −250.00 today;
+    two Ally checking fun accounts: "TARGET 0042" −15.00 today, "SEPHORA 118" −22.00 yesterday;
+  2 the Friday fun money: US Bank −20.00 ×2 "ONLINE TRANSFER TO ALLY BANK" + +20.00 on each fun account (balances follow);
+  3 the sweep: US Bank −<cents> "ONLINE TRANSFER TO ALLY SAVINGS" + savings +<cents> (balances follow)
+
 Usage: fake-simplefin.py --port 8765 --rent-date YYYY-MM-DD --rent2-date YYYY-MM-DD [--today YYYY-MM-DD]
 """
 import argparse
@@ -33,7 +41,8 @@ from urllib.parse import parse_qs, urlparse
 
 USER, PASSWORD = "demo-user", "demo-pass"
 V6_USER, V6_PASSWORD = "v6-user", "v6-pass"
-STATE = {"phases": {1}, "v6": {1}}
+V7_USER, V7_PASSWORD = "v7-user", "v7-pass"
+STATE = {"phases": {1}, "v6": {1}, "v7": {1}, "v7_sweep_cents": 0}
 
 
 def noon(date_str):
@@ -145,6 +154,56 @@ def v6_accounts(args):
     ]
 
 
+def money(cents):
+    sign = "-" if cents < 0 else ""
+    cents = abs(cents)
+    return f"{sign}{cents // 100}.{cents % 100:02d}"
+
+
+def v7_accounts(args):
+    today = noon(args.today)
+    yesterday = days_ago(args, 1)
+    phases = STATE["v7"]
+    ally = {"domain": "ally.com", "name": "Ally Bank", "url": "https://ally.com"}
+    usbank = {"domain": "usbank.com", "name": "U.S. Bank", "url": "https://usbank.com"}
+    usb_balance, usb_available, sav_balance, fun1_balance, fun2_balance = 240807, 234567, 1000000, 11000, 9500
+    usb = [
+        {"id": "v7-payroll-1", "posted": today, "amount": "1500.00", "description": "ACME CORP PAYROLL"},
+        {"id": "v7-walmart-p1", "posted": today, "amount": "-25.00", "description": "WALMART SUPERCENTER", "pending": True},
+        {"id": "v7-shell-p1", "posted": 0, "transacted_at": yesterday, "amount": "-30.00", "description": "SHELL OIL 5741"},
+        {"id": "v7-sbux-p1", "posted": today, "amount": "-7.40", "description": "STARBUCKS 0091", "pending": True},
+    ]
+    sav = [{"id": "v7-nelnet-1", "posted": today, "amount": "-250.00", "description": "NELNET STUDENT LOAN"}]
+    fun1 = [{"id": "v7-target-1", "posted": today, "amount": "-15.00", "description": "TARGET 0042"}]
+    fun2 = [{"id": "v7-sephora-1", "posted": yesterday, "amount": "-22.00", "description": "SEPHORA 118"}]
+    if 2 in phases:
+        usb.append({"id": "v7-fun-out-1", "posted": today, "amount": "-20.00", "description": "ONLINE TRANSFER TO ALLY BANK"})
+        usb.append({"id": "v7-fun-out-2", "posted": today, "amount": "-20.00", "description": "ONLINE TRANSFER TO ALLY BANK"})
+        fun1.append({"id": "v7-fun-in-1", "posted": today, "amount": "20.00", "description": "TRANSFER FROM US BANK"})
+        fun2.append({"id": "v7-fun-in-2", "posted": today, "amount": "20.00", "description": "TRANSFER FROM US BANK"})
+        usb_balance -= 4000
+        usb_available -= 4000
+        fun1_balance += 2000
+        fun2_balance += 2000
+    if 3 in phases and STATE["v7_sweep_cents"] > 0:
+        cents = STATE["v7_sweep_cents"]
+        usb.append({"id": "v7-sweep-out-1", "posted": today, "amount": money(-cents), "description": "ONLINE TRANSFER TO ALLY SAVINGS"})
+        sav.append({"id": "v7-sweep-in-1", "posted": today, "amount": money(cents), "description": "TRANSFER FROM US BANK"})
+        usb_balance -= cents
+        usb_available -= cents
+        sav_balance += cents
+    return [
+        {"org": usbank, "id": "ACT-V7-USB", "name": "US Bank Checking", "currency": "USD", "balance": money(usb_balance),
+         "available-balance": money(usb_available), "balance-date": today, "transactions": usb},
+        {"org": ally, "id": "ACT-V7-SAV", "name": "Ally High Yield Savings", "currency": "USD", "balance": money(sav_balance),
+         "balance-date": today, "transactions": sav},
+        {"org": ally, "id": "ACT-V7-FUN1", "name": "Ally Spending 1", "currency": "USD", "balance": money(fun1_balance),
+         "available-balance": money(fun1_balance), "balance-date": today, "transactions": fun1},
+        {"org": ally, "id": "ACT-V7-FUN2", "name": "Ally Spending 2", "currency": "USD", "balance": money(fun2_balance),
+         "available-balance": money(fun2_balance), "balance-date": today, "transactions": fun2},
+    ]
+
+
 class Handler(BaseHTTPRequestHandler):
     args = None
 
@@ -170,9 +229,10 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         expected = "Basic " + base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
         expected_v6 = "Basic " + base64.b64encode(f"{V6_USER}:{V6_PASSWORD}".encode()).decode()
-        if auth not in (expected, expected_v6):
+        expected_v7 = "Basic " + base64.b64encode(f"{V7_USER}:{V7_PASSWORD}".encode()).decode()
+        if auth not in (expected, expected_v6, expected_v7):
             return self._send(403, "forbidden")
-        dataset = v6_accounts if auth == expected_v6 else accounts
+        dataset = v6_accounts if auth == expected_v6 else v7_accounts if auth == expected_v7 else accounts
 
         q = parse_qs(url.query)
         start = int(q.get("start-date", ["0"])[0])
@@ -181,7 +241,10 @@ class Handler(BaseHTTPRequestHandler):
 
         result = []
         for acct in dataset(self.args):
-            txs = [t for t in acct["transactions"] if start <= t["posted"] < end and (pending or not t.get("pending", False))]
+            # v2-style pending rows carry posted = 0 and are dated by transacted_at
+            txs = [t for t in acct["transactions"]
+                   if start <= (t.get("posted") or t.get("transacted_at", 0)) < end
+                   and (pending or not (t.get("pending", False) or t.get("posted") == 0))]
             result.append({**acct, "transactions": txs})
         return self._send(200, json.dumps({"errors": [], "accounts": result}), "application/json")
 
@@ -190,6 +253,13 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length:
             self.rfile.read(length)
+
+        if url.path.startswith("/__phase/v7/"):
+            q = parse_qs(url.query)
+            if "cents" in q:
+                STATE["v7_sweep_cents"] = int(q["cents"][0])
+            STATE["v7"].add(int(url.path.rsplit("/", 1)[1]))
+            return self._send(200, "v7 phases " + ",".join(str(p) for p in sorted(STATE["v7"])))
 
         if url.path.startswith("/__phase/v6/"):
             STATE["v6"].add(int(url.path.rsplit("/", 1)[1]))
@@ -204,7 +274,7 @@ class Handler(BaseHTTPRequestHandler):
             if token == "expired":
                 return self._send(403, "forbidden")
             host = self.headers.get("Host") or f"127.0.0.1:{self.args.port}"
-            user, password = (V6_USER, V6_PASSWORD) if token == "v6" else (USER, PASSWORD)
+            user, password = (V6_USER, V6_PASSWORD) if token == "v6" else (V7_USER, V7_PASSWORD) if token == "v7" else (USER, PASSWORD)
             return self._send(200, f"http://{user}:{password}@{host}/simplefin")
 
         return self._send(404, "not found")

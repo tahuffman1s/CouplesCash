@@ -37,6 +37,7 @@ public sealed class MatchingService(
     AccountRepository accounts,
     HouseholdRepository households,
     InboxService inbox,
+    FridayService friday,
     ActivityService activity,
     IMatcherClient matcher,
     MatcherStatusTracker status,
@@ -72,7 +73,8 @@ public sealed class MatchingService(
         var today = DateOnly.FromDateTime(SchedulerRules.ToLocal(now, household.Timezone));
         var (from, to) = MatchingRules.CandidateRange(batch.Select(r => r.PostedOn));
 
-        var itemRows = await items.ListAsync(conn, householdId, null, ct);
+        // v7: planned transfers are matched by FridayService (pairs / bills-account outflows), never by the matcher or as bills.
+        var itemRows = (await items.ListAsync(conn, householdId, null, ct)).Where(i => i.Kind != Kind.Transfer).ToList();
         var itemsById = itemRows.ToDictionary(i => i.Id);
         var paid = (await items.ListPaymentsAsync(conn, householdId, from, to, ct)).Select(p => (p.RecurringItemId, p.DueDate)).ToHashSet();
         var occurrences = itemRows
@@ -197,9 +199,17 @@ public sealed class MatchingService(
         {
             _lastSweep[householdId] = time.Now();
             await using var uow = await db.BeginUnitOfWorkAsync(ct);
+
+            // v7: a new planned transfer / role may claim rows before they are scored (the scheduler's friday phase does the same).
+            var claimed = await friday.RunAsync(uow, householdId, ct);
             var rows = await imports.ListPendingAsync(uow.Connection, householdId, ct);
             if (rows.Count == 0)
             {
+                if (claimed.Total > 0)
+                {
+                    await uow.CommitAsync(ct);
+                }
+
                 return MatchRunResult.Empty;
             }
 

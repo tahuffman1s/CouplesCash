@@ -36,7 +36,7 @@ public sealed class WeekService(
         }
 
         var today = TodayFor(household);
-        var week = WeekEngine.WeekBounds(start ?? today, household.WeekStart);
+        var week = WeekEngine.WeekBounds(start ?? today, household.PaydayWeekday);
         return await BuildAsync(household, week, today, ct);
     }
 
@@ -66,7 +66,7 @@ public sealed class WeekService(
             startingBalance = await accounts.SpendableBalanceBeforeAsync(householdId, SchedulerRules.LocalMidnightUtc(week.Start, household.Timezone), ct);
         }
 
-        var spendableNow = WeekEngine.Spendable(accountRows.Select(a => new SpendableAccount(a.Type, a.BalanceCents, a.AvailableCents)));
+        var spendableNow = WeekEngine.Spendable(accountRows.Select(ToSpendable));
         var weekOccurrences = occurrenceDtos.Select(ToWeekOccurrence).ToList();
         var weekExpenses = expenseRows.Select(e => new WeekExpense(e.SpentOn, e.AmountCents, e.CategoryId)).ToList();
 
@@ -83,7 +83,7 @@ public sealed class WeekService(
                 planned,
                 dayExpenses,
                 planned.Where(o => o.Kind.IsOutflow()).Sum(o => o.AmountCents),
-                planned.Where(o => !o.Kind.IsOutflow()).Sum(o => o.AmountCents),
+                planned.Where(o => o.Kind == Kind.Income).Sum(o => o.AmountCents),
                 dayExpenses.Sum(e => e.AmountCents)));
         }
 
@@ -97,7 +97,7 @@ public sealed class WeekService(
         return new WeekViewDto(
             Start: week.Start,
             End: week.End,
-            WeekStart: household.WeekStart,
+            WeekStart: household.PaydayWeekday,
             IsCurrent: WeekEngine.IsCurrent(week, today),
             IsPast: isPast,
             Today: today,
@@ -142,9 +142,20 @@ public sealed class WeekService(
             WeekEngine.History(week, targetCents, budgeted, weekOccurrences, weekExpenses));
     }
 
-    /// <summary>v6 "Pending $X" beside Spendable: still-pending bank outflows on the same accounts Spendable counts (active checking + cash).</summary>
-    public static long PendingOut(IEnumerable<AccountRow> accounts) =>
-        accounts.Where(a => a.Type.IsSpendable() && a.ArchivedAt is null).Sum(a => a.PendingOutCents);
+    /// <summary>
+    /// v6 "Pending $X" beside Spendable: still-pending bank outflows on the same accounts Spendable counts — v7: only the bills account
+    /// when there is one, else the active checking + cash accounts.
+    /// </summary>
+    public static long PendingOut(IEnumerable<AccountRow> accounts)
+    {
+        var active = accounts.Where(a => a.ArchivedAt is null).ToList();
+        return active.FirstOrDefault(a => a.Role == AccountRole.Bills) is { } bills
+            ? bills.PendingOutCents
+            : active.Where(a => a.Type.IsSpendable()).Sum(a => a.PendingOutCents);
+    }
+
+    /// <summary>An account row as the spendable math sees it (v7: role + still-pending outflows for the bills-account rule).</summary>
+    public static SpendableAccount ToSpendable(AccountRow a) => new(a.Type, a.BalanceCents, a.AvailableCents, a.Role, a.PendingOutCents);
 
     public static WeekOccurrence ToWeekOccurrence(OccurrenceDto o) =>
         new(o.ItemId, o.Kind, o.AmountCents, o.DueDate, o.Paid?.AmountCents, o.CategoryId);

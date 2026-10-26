@@ -42,6 +42,7 @@ public static class ImportEndpoints
         AccountRepository accounts,
         MatchingService matching,
         MatchingQueue matchingQueue,
+        FridayService friday,
         ActivityService activity,
         TimeProvider time,
         CancellationToken ct)
@@ -49,10 +50,13 @@ public static class ImportEndpoints
         var householdId = principal.GetHouseholdId();
         var userId = principal.GetUserId();
         var accountId = request.AccountId!.Value;
-        if (!await accounts.ExistsAsync(householdId, accountId, ct))
+        if (await accounts.GetAsync(householdId, accountId, ct) is not { } account)
         {
             return Problems.Validation("accountId", "Unknown account.");
         }
+
+        // v7: a statement of a fun-money account is stored without review.
+        var status = account.Role == AccountRole.Fun ? "confirmed" : "pending";
 
         var filename = request.Filename.Trim();
         var now = time.Now();
@@ -71,7 +75,7 @@ public static class ImportEndpoints
             var description = row.Description.Trim();
             var fingerprint = Fingerprint.ForRow(accountId, postedOn, row.AmountCents, description);
             var candidate = new NewImportedTransaction(Source, null, accountId, null, fingerprint, postedOn, row.AmountCents, description,
-                Blank(row.Payee), Blank(row.Memo), Pending: false);
+                Blank(row.Payee), Blank(row.Memo), Pending: false, status);
             if (await imports.InsertAsync(uow.Connection, householdId, candidate, now, ct) is { } id)
             {
                 newIds.Add(id);
@@ -83,7 +87,8 @@ public static class ImportEndpoints
             }
         }
 
-        // v6: CSV rows are matched like synced ones (fuzzy matcher, built-in fallback), including automatic matches.
+        // v7: planned transfers / the sweep first; v6: CSV rows are matched like synced ones (fuzzy matcher, built-in fallback).
+        await friday.RunAsync(uow, householdId, ct);
         var newRows = await imports.ListByIdsAsync(uow.Connection, householdId, newIds, ct);
         var run = await matching.RunAsync(uow, householdId, newRows, MatchRunMode.NewRows, userId, ct);
 

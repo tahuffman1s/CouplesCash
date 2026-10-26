@@ -20,7 +20,9 @@ public static class RecurringEndpoints
 
         group.MapGet("", List).WithSummary("Recurring items, optionally filtered by kind");
         group.MapPost("", Create).WithValidation<RecurringRequest>()
-            .WithSummary("Create a bill, subscription or income (frequency 'once' = a planned one-off; bankNames ≤ 10 — legacy payeeHint maps to one — and amountVaries feed the matcher)");
+            .WithSummary("Create a bill, subscription, income or (v7) transfer (frequency 'once' = a planned one-off; bankNames ≤ 10 — legacy payeeHint maps to one — and amountVaries feed the matcher; kind 'transfer' needs fromAccountId + toAccountId)");
+        group.MapPost("/bulk", Bulk).WithValidation<RecurringBulkRequest>()
+            .WithSummary("v7: create up to 100 items at once (Paste from notes) — all validated first (errors items[3].amountCents), one transaction, one activity row, one rematch");
         group.MapGet("/{id:guid}", Get).WithSummary("Get a recurring item");
         group.MapPut("/{id:guid}", Update).WithValidation<RecurringRequest>().WithSummary("Replace a recurring item");
         group.MapDelete("/{id:guid}", Archive).WithSummary("Archive (soft delete) a recurring item");
@@ -59,7 +61,7 @@ public static class RecurringEndpoints
         {
             if (!Enum.TryParse<Kind>(kind, ignoreCase: true, out var parsed) || !Enum.IsDefined(parsed))
             {
-                return Problems.Validation("kind", "Must be one of: bill, subscription, income.");
+                return Problems.Validation("kind", "Must be one of: bill, subscription, income, transfer.");
             }
 
             filter = parsed;
@@ -222,6 +224,7 @@ public static class RecurringEndpoints
         ClaimsPrincipal principal,
         NpgsqlDataSource db,
         RecurringRepository items,
+        ImportRepository imports,
         InboxService inbox,
         ActivityService activity,
         TimeProvider time,
@@ -242,15 +245,18 @@ public static class RecurringEndpoints
             // v3: a payment that came from the inbox (confirmed or auto-matched) puts its transaction back to pending.
             var restored = await inbox.RestoreForOccurrenceAsync(uow.Connection, householdId, item.Id, date, ct);
 
+            // v7: a planned transfer paid from the bank keeps its rows as transfers but drops the link (and never re-links automatically).
+            var unlinked = restored is null ? await imports.UnlinkPlannedAsync(uow.Connection, householdId, item.Id, date, ct) : [];
+
             // Undo guard: once a user un-marks an autopay occurrence the scheduler must leave it alone. An auto-matched
             // (bank) payment is not autopay, so it only needs the skip when the item itself is autoPay.
-            if (item.AutoPay || (removed.Auto && restored is null))
+            if (item.AutoPay || (removed.Auto && restored is null && unlinked.Count == 0))
             {
                 await items.InsertAutopaySkipAsync(uow.Connection, item.Id, date, userId, time.Now(), ct);
             }
 
             await activity.RecordAsync(uow, householdId, userId, "occurrence.unpaid", "occurrence", item.Id,
-                ActivitySummaries.OccurrenceUnpaid(item.Name), new { itemId = item.Id, dueDate = date, wasAuto = removed.Auto, restoredTransactionId = restored?.Id }, ct, principal.GetDisplayName());
+                ActivitySummaries.OccurrenceUnpaid(item.Name), new { itemId = item.Id, dueDate = date, wasAuto = removed.Auto, restoredTransactionId = restored?.Id, unlinkedTransactionIds = unlinked.Count > 0 ? unlinked : null }, ct, principal.GetDisplayName());
         }
 
         await uow.CommitAsync(ct);
@@ -298,6 +304,11 @@ public static class RecurringEndpoints
         }
 
         var kind = request.Kind ?? (row.IsOutflow ? Kind.Bill : Kind.Income);
+        if (kind == Kind.Transfer)
+        {
+            return Problems.Validation("kind", "A recurring transfer needs a from and a to account; create it with POST /v1/recurring.");
+        }
+
         if (!TransactionMatcher.SignMatchesKind(kind, row.IsOutflow))
         {
             return Problems.Validation("kind", row.IsOutflow ? "Money out makes a bill or subscription." : "Money in makes an income item.");
@@ -470,20 +481,40 @@ public static class RecurringEndpoints
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max].TrimEnd();
 
-    /// <summary>categoryId / accountId must belong to the caller's household; otherwise a field-level 400 (not a 404, which is reserved for the route id).</summary>
-    private static async Task<ValidationProblem?> CheckReferencesAsync(Guid householdId, RecurringRequest request, CategoryRepository categories, AccountRepository accounts, CancellationToken ct)
+    /// <summary>categoryId / accountId (v7: fromAccountId / toAccountId) must belong to the caller's household; otherwise a field-level 400 (not a 404, which is reserved for the route id).</summary>
+    private static async Task<ValidationProblem?> CheckReferencesAsync(Guid householdId, RecurringRequest request, CategoryRepository categories, AccountRepository accounts, CancellationToken ct) =>
+        await ReferenceErrorsAsync(householdId, request, categories, accounts, ct) is { Count: > 0 } errors
+            ? TypedResults.ValidationProblem(errors.ToDictionary(e => e.Key, e => new[] { e.Value }))
+            : null;
+
+    /// <summary>The reference errors of one request, keyed by field (camelCase), empty when every id is the household's.</summary>
+    private static async Task<Dictionary<string, string>> ReferenceErrorsAsync(Guid householdId, RecurringRequest request, CategoryRepository categories, AccountRepository accounts, CancellationToken ct)
     {
+        var errors = new Dictionary<string, string>();
         if (request.CategoryId is { } categoryId && !await categories.ExistsAsync(householdId, categoryId, ct))
         {
-            return Problems.Validation("categoryId", "Unknown category.");
+            errors["categoryId"] = "Unknown category.";
         }
 
         if (request.AccountId is { } accountId && !await accounts.ExistsAsync(householdId, accountId, ct))
         {
-            return Problems.Validation("accountId", "Unknown account.");
+            errors["accountId"] = "Unknown account.";
         }
 
-        return null;
+        if (request.Kind == Kind.Transfer)
+        {
+            if (request.FromAccountId is { } fromId && !await accounts.ExistsAsync(householdId, fromId, ct))
+            {
+                errors["fromAccountId"] = "Unknown account.";
+            }
+
+            if (request.ToAccountId is { } toId && !await accounts.ExistsAsync(householdId, toId, ct))
+            {
+                errors["toAccountId"] = "Unknown account.";
+            }
+        }
+
+        return errors;
     }
 
     /// <summary>
@@ -562,18 +593,92 @@ public static class RecurringEndpoints
         return TypedResults.Ok(fresh.ToDto(time.Today()));
     }
 
-    private static RecurringFields ToFields(RecurringRequest r) => new(
-        r.Name.Trim(),
-        r.Kind!.Value,
-        r.AmountCents,
-        r.CategoryId,
-        r.AccountId,
-        r.Frequency!.Value,
-        r.AnchorDate!.Value,
-        r.EndDate,
-        r.AutoPay ?? false,
-        string.IsNullOrWhiteSpace(r.Notes) ? null : r.Notes.Trim(),
-        string.IsNullOrWhiteSpace(r.Url) ? null : r.Url.Trim(),
-        BankNames.FromRequest(r.BankNames, r.PayeeHint),
-        r.AmountVaries ?? false);
+    /// <summary>
+    /// v7: a transfer's <c>accountId</c> is its from-account (the money leaves it) and it carries from / to; other kinds never store them.
+    /// </summary>
+    internal static RecurringFields ToFields(RecurringRequest r)
+    {
+        var kind = r.Kind!.Value;
+        var transfer = kind == Kind.Transfer;
+        return new RecurringFields(
+            r.Name.Trim(),
+            kind,
+            r.AmountCents,
+            r.CategoryId,
+            transfer ? r.FromAccountId : r.AccountId,
+            r.Frequency!.Value,
+            r.AnchorDate!.Value,
+            r.EndDate,
+            r.AutoPay ?? false,
+            string.IsNullOrWhiteSpace(r.Notes) ? null : r.Notes.Trim(),
+            string.IsNullOrWhiteSpace(r.Url) ? null : r.Url.Trim(),
+            BankNames.FromRequest(r.BankNames, r.PayeeHint),
+            r.AmountVaries ?? false,
+            transfer ? r.FromAccountId : null,
+            transfer ? r.ToAccountId : null);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // v7: bulk create (Paste from notes)
+    // ---------------------------------------------------------------------------------------------
+
+    public const int MaxBulkItems = 100;
+
+    private static async Task<Results<Created<RecurringBulkResponse>, ValidationProblem>> Bulk(
+        RecurringBulkRequest request,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        RecurringRepository items,
+        ImportRepository imports,
+        CategoryRepository categories,
+        AccountRepository accounts,
+        ActivityService activity,
+        MatchingQueue matching,
+        TimeProvider time,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+        var list = request.Items!;
+
+        // All-or-nothing: every reference is checked before anything is written.
+        var errors = new Dictionary<string, string[]>();
+        for (var i = 0; i < list.Length; i++)
+        {
+            foreach (var (field, message) in await ReferenceErrorsAsync(householdId, list[i], categories, accounts, ct))
+            {
+                errors[$"items[{i}].{field}"] = [message];
+            }
+        }
+
+        if (errors.Count > 0)
+        {
+            return TypedResults.ValidationProblem(errors);
+        }
+
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var now = time.Now();
+        var created = new List<RecurringItemRow>(list.Length);
+        foreach (var item in list)
+        {
+            var row = await items.CreateAsync(uow.Connection, householdId, userId, ToFields(item), now, ct);
+            await SyncBankNameRulesAsync(imports, uow.Connection, householdId, row.Id, [], row.BankNames, row.BankNamesLearned, now, ct);
+            created.Add(row);
+        }
+
+        await activity.RecordAsync(uow, householdId, userId, "recurring.created", "recurring", null,
+            ActivitySummaries.RecurringBulkCreated(created.Count),
+            new
+            {
+                bulk = true,
+                count = created.Count,
+                itemIds = created.Select(r => r.Id).ToList(),
+                totalCents = created.Sum(r => r.AmountCents),
+            }, ct, principal.GetDisplayName());
+        uow.AfterCommit(() => matching.Enqueue(householdId, MatchingJobKind.Rematch));
+        await uow.CommitAsync(ct);
+
+        var today = time.Today();
+        return TypedResults.Created("/v1/recurring", new RecurringBulkResponse(created.Select(r => r.ToDto(today)).ToList()));
+    }
 }

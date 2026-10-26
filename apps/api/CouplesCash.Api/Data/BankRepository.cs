@@ -13,7 +13,7 @@ public sealed class BankRepository(NpgsqlDataSource db)
     private const string ExternalSelect =
         """
         SELECT e.id, e.bank_link_id, e.household_id, e.external_id, e.org_name, e.name, e.currency, e.balance_cents, e.available_cents,
-               e.balance_at, e.account_id, e.created_at, e.updated_at, a.name AS account_name
+               e.balance_at, e.account_id, e.created_at, e.updated_at, a.name AS account_name, e.last_feed::text AS last_feed
         FROM external_accounts e
         LEFT JOIN accounts a ON a.id = e.account_id AND a.archived_at IS NULL
         """;
@@ -151,7 +151,7 @@ public sealed class BankRepository(NpgsqlDataSource db)
                 RETURNING *
             )
             SELECT e.id, e.bank_link_id, e.household_id, e.external_id, e.org_name, e.name, e.currency, e.balance_cents, e.available_cents,
-                   e.balance_at, e.account_id, e.created_at, e.updated_at, a.name AS account_name
+                   e.balance_at, e.account_id, e.created_at, e.updated_at, a.name AS account_name, e.last_feed::text AS last_feed
             FROM upserted e
             LEFT JOIN accounts a ON a.id = e.account_id AND a.archived_at IS NULL
             """,
@@ -179,11 +179,17 @@ public sealed class BankRepository(NpgsqlDataSource db)
                 RETURNING *
             )
             SELECT e.id, e.bank_link_id, e.household_id, e.external_id, e.org_name, e.name, e.currency, e.balance_cents, e.available_cents,
-                   e.balance_at, e.account_id, e.created_at, e.updated_at, a.name AS account_name
+                   e.balance_at, e.account_id, e.created_at, e.updated_at, a.name AS account_name, e.last_feed::text AS last_feed
             FROM updated e
             LEFT JOIN accounts a ON a.id = e.account_id AND a.archived_at IS NULL
             """,
             new { Id = id, HouseholdId = householdId, AccountId = accountId, Now = now }, ct));
+
+    /// <summary>v7 feed diagnostics: stores what this Bridge response contained for the external account (camelCase JSON).</summary>
+    public Task<int> SetLastFeedAsync(NpgsqlConnection conn, Guid householdId, Guid externalAccountId, string feedJson, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            "UPDATE external_accounts SET last_feed = @Feed::jsonb WHERE id = @Id AND household_id = @HouseholdId",
+            new { Id = externalAccountId, HouseholdId = householdId, Feed = feedJson }, ct));
 
     /// <summary>Accounts that receive bank data (for transfer detection).</summary>
     public async Task<IReadOnlySet<Guid>> MappedAccountIdsAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct)

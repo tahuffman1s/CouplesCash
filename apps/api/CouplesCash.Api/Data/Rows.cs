@@ -43,6 +43,9 @@ public sealed class HouseholdRow
 
     /// <summary>v6: off | bills | all (default all).</summary>
     public AutoMatchLevel AutoMatchLevel { get; init; } = AutoMatchLevel.All;
+
+    /// <summary>v7: payday weekday (0 Sunday … 6 Saturday, default 5 Friday) — the pay week runs payday → the day before the next payday.</summary>
+    public int PaydayWeekday { get; init; } = 5;
 }
 
 public sealed class MemberRow
@@ -105,6 +108,16 @@ public sealed class AccountRow
 
     /// <summary>Mapped to an external (bank) account.</summary>
     public bool Linked { get; init; }
+
+    // v7
+
+    /// <summary>bills | savings | fun | other.</summary>
+    public AccountRole Role { get; init; } = AccountRole.Other;
+
+    /// <summary>Whose fun money this is (any role may carry an owner).</summary>
+    public Guid? OwnerUserId { get; init; }
+
+    public string? OwnerName { get; init; }
 }
 
 public sealed class SnapshotRow
@@ -187,6 +200,15 @@ public sealed class RecurringItemRow
     public string? CategoryColor { get; init; }
 
     public string? AccountName { get; init; }
+
+    // v7: kind transfer moves money from one account to another.
+    public Guid? FromAccountId { get; init; }
+
+    public Guid? ToAccountId { get; init; }
+
+    public string? FromAccountName { get; init; }
+
+    public string? ToAccountName { get; init; }
 
     public Recurrence Rule => new(Frequency, AnchorDate, EndDate);
 }
@@ -431,6 +453,9 @@ public sealed class ReminderUserRow
     /// <summary>Household week start (0 Sunday / 1 Monday) for the v4 week summaries.</summary>
     public int WeekStart { get; init; }
 
+    /// <summary>v7: the household's payday weekday (the payday push).</summary>
+    public int PaydayWeekday { get; init; } = 5;
+
     public bool WeekSummaryEnabled { get; init; } = true;
 }
 
@@ -541,6 +566,9 @@ public sealed class ExternalAccountRow
 
     // Joined from accounts.
     public string? AccountName { get; init; }
+
+    /// <summary>v7: JSON <c>{ pending, posted, availableReported, at }</c> of the last Bridge response (null = never synced since v7).</summary>
+    public string? LastFeed { get; init; }
 }
 
 public sealed class ImportedTransactionRow
@@ -750,4 +778,40 @@ public sealed class DetectionRow
     public string Description { get; init; } = "";
 
     public string? Payee { get; init; }
+}
+
+// ---------------------------------------------------------------------------------------------
+// v7
+// ---------------------------------------------------------------------------------------------
+
+/// <summary>One savings sweep per pay week (<c>sweeps</c>). <see cref="DoneBy"/> null with <see cref="DoneAt"/> set = auto-detected.</summary>
+public sealed class SweepRow
+{
+    public Guid Id { get; init; }
+
+    public Guid HouseholdId { get; init; }
+
+    public DateOnly WeekStart { get; init; }
+
+    public long PlannedCents { get; init; }
+
+    /// <summary>The raw left-at-end it was frozen from (negative = nothing to move).</summary>
+    public long LeftCents { get; init; }
+
+    public long? ActualCents { get; init; }
+
+    public DateTime? DoneAt { get; init; }
+
+    public Guid? DoneBy { get; init; }
+
+    public Guid? TransactionId { get; init; }
+
+    /// <summary>A person unticked it: the bank-feed detection never ticks it again.</summary>
+    public bool AutoBlocked { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+
+    public bool IsDone => DoneAt is not null;
+
+    public bool IsAuto => DoneAt is not null && DoneBy is null;
 }

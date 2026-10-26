@@ -21,7 +21,8 @@ public sealed record HouseholdDto(
     DateOnly? PayAnchorDate,
     long? WeeklySpendCents,
     bool AutoIgnoreTransfers,
-    AutoMatchLevel AutoMatchLevel);
+    AutoMatchLevel AutoMatchLevel,
+    int PaydayWeekday);
 
 public sealed record AuthResult(
     UserDto User,
@@ -48,7 +49,10 @@ public sealed record AccountDto(
     DateTime UpdatedAt,
     long? AvailableCents,
     long PendingOutCents,
-    bool Linked);
+    bool Linked,
+    AccountRole Role,
+    Guid? OwnerUserId,
+    string? OwnerName);
 
 public sealed record BalanceSnapshotDto(long BalanceCents, DateTime RecordedAt, Guid RecordedBy);
 
@@ -74,7 +78,11 @@ public sealed record RecurringItemDto(
     DateTime UpdatedAt,
     IReadOnlyList<string> BankNames,
     IReadOnlyList<string> BankNamesLearned,
-    bool AmountVaries);
+    bool AmountVaries,
+    Guid? FromAccountId,
+    Guid? ToAccountId,
+    string? FromAccountName,
+    string? ToAccountName);
 
 /// <summary><paramref name="Source"/>: manual (user tap) | autopay (scheduler) | bank (inbox confirm or auto-match). <paramref name="Auto"/> stays true for autopay and auto-match.</summary>
 public sealed record PaidInfo(DateTime PaidAt, Guid? PaidBy, long AmountCents, bool Auto, string Source);
@@ -257,7 +265,11 @@ public sealed record ExternalAccountDto(
     DateTime BalanceAt,
     Guid? AccountId,
     string? AccountName,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    FeedStatsDto? LastFeed);
+
+/// <summary>v7 feed diagnostics: what the last Bridge response contained for one external account.</summary>
+public sealed record FeedStatsDto(int Pending, int Posted, bool AvailableReported, DateTime At);
 
 public sealed record BankLinkDto(
     Guid Id,
@@ -502,3 +514,59 @@ public sealed record BillSuggestionDto(
     DateOnly LastSeen);
 
 public sealed record BillSuggestionAcceptedDto(RecurringItemDto Item, int Matched);
+
+// ---------------------------------------------------------------------------------------------
+// v7
+// ---------------------------------------------------------------------------------------------
+
+/// <summary>One line of the Friday plan. <paramref name="Kind"/>: bill | subscription | income | transfer | oneoff.</summary>
+public sealed record PlanLineDto(string Kind, OccurrenceDto Occurrence);
+
+/// <summary>A payday checklist item. <paramref name="Key"/>: paycheck | fun | sweep.</summary>
+public sealed record ChecklistItemDto(string Key, string Label, long AmountCents, bool Done, bool Auto, Guid? TransactionId, Guid? ItemId, DateOnly? DueDate);
+
+/// <summary>
+/// The savings sweep of a pay week. <paramref name="LeftCents"/> (addition) is the raw left-at-end it was frozen from (negative = nothing to
+/// move); <paramref name="TransactionId"/> (addition) is the bank row that moved it.
+/// </summary>
+public sealed record SweepDto(DateOnly WeekStart, long PlannedCents, long? ActualCents, DateTime? DoneAt, bool Auto, long LeftCents, Guid? TransactionId);
+
+public sealed record PlanBillsAccountDto(
+    Guid Id,
+    string Name,
+    long AvailableCents,
+    long BalanceCents,
+    bool AvailableFromBank,
+    IReadOnlyList<InboxItemDto> Pending,
+    long PendingOutCents,
+    FeedStatsDto? Feed);
+
+public sealed record PlanAccountDto(Guid Id, string Name, AccountRole Role, string? OwnerName, long BalanceCents, long? AvailableCents);
+
+public sealed record PlanSetupDto(bool BanksLinked, bool RolesSet, bool PaycheckKnown, bool BillsAdded, bool PartnerJoined);
+
+public sealed record PlanDto(
+    DateOnly Start,
+    DateOnly End,
+    DateOnly NextPayday,
+    bool IsCurrent,
+    bool IsPayday,
+    DateOnly Today,
+    PlanBillsAccountDto? BillsAccount,
+    IReadOnlyList<PlanAccountDto> Accounts,
+    IReadOnlyList<PlanLineDto> Bills,
+    IReadOnlyList<PlanLineDto> FunMoney,
+    IReadOnlyList<PlanLineDto> OneOffs,
+    IReadOnlyList<PlanLineDto> Income,
+    long BillsOutCents,
+    long FunOutCents,
+    long OneOffOutCents,
+    long IncomeInCents,
+    long LeftAtEndCents,
+    IReadOnlyList<PlanLineDto> SavingsBills,
+    IReadOnlyList<ChecklistItemDto> Checklist,
+    SweepDto? Sweep,
+    int ToReviewCount,
+    PlanSetupDto Setup);
+
+public sealed record RecurringBulkResponse(IReadOnlyList<RecurringItemDto> Items);

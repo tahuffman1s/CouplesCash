@@ -25,6 +25,7 @@ public sealed class BankSyncService(
     HouseholdRepository households,
     InboxService inbox,
     MatchingService matching,
+    FridayService friday,
     MatchingQueue matchingQueue,
     ISimpleFinClient client,
     DataProtector protector,
@@ -140,8 +141,17 @@ public sealed class BankSyncService(
                     }
                 }
 
-                newIds.AddRange(await ReconcileAccountAsync(uow, link, account, external, start, today, judgeAbsence, currency, now, stats, ct));
+                // v7 feed diagnostics: what the bank sent for this account, before any dedupe or reconciliation.
+                var feed = new FeedStatsDto(account.Transactions.Count(t => t.Pending), account.Transactions.Count(t => !t.Pending), account.AvailableCents is not null, now);
+                await banks.SetLastFeedAsync(uow.Connection, householdId, external.Id, MappingV3.SerializeFeed(feed), ct);
+
+                var funAccount = external.AccountId is { } target
+                    && (await accounts.GetAsync(uow.Connection, householdId, target, ct))?.Role == AccountRole.Fun;
+                newIds.AddRange(await ReconcileAccountAsync(uow, link, account, external, start, today, judgeAbsence, currency, now, stats, ct, funAccount));
             }
+
+            // v7: planned transfers (fun money) and the savings sweep are claimed from the bank rows first, so the matcher never scores them.
+            var plannedPass = await friday.RunAsync(uow, householdId, ct);
 
             // v6: the fuzzy matcher (built-in fallback) scores the new rows; transfers are auto-ignored first, then bills / income /
             // one-offs auto-match and (level all) expenses auto-categorise.
@@ -150,10 +160,12 @@ public sealed class BankSyncService(
             var autoMatched = run.AutoMatched + run.AutoCategorized;
             var autoIgnored = run.AutoIgnored;
 
+            // Rows a person still has to look at (fun-account rows are stored confirmed; claimed / matched / ignored rows are not pending).
+            var toReview = (await imports.ListByIdsAsync(uow.Connection, householdId, newIds, ct)).Count(r => r.IsPending);
+
             var nameOverride = link.Name == DefaultLinkName && firstOrg is not null ? firstOrg : null;
             var updated = await banks.MarkSyncedAsync(uow.Connection, householdId, link.Id, now, manual, set.Errors, nameOverride, ct) ?? link;
 
-            var toReview = Math.Max(0, newRows.Count - autoMatched - autoIgnored);
             await activity.RecordAsync(uow.Connection, uow.Transaction, householdId, actorId, "bank.synced", "bank", link.Id,
                 ActivitySummaries.BankSynced(updated.Name, newRows.Count, autoMatched),
                 new
@@ -170,6 +182,9 @@ public sealed class BankSyncService(
                     replaced = stats.Replaced,
                     dropped = stats.Dropped,
                     superseded = stats.Superseded,
+                    plannedTransfersPaid = plannedPass.PlannedTransfersPaid,
+                    sweepsDone = plannedPass.SweepsDone,
+                    toReview,
                     errors = set.Errors,
                     manual,
                 }, ct);
@@ -274,7 +289,8 @@ public sealed class BankSyncService(
         string currency,
         DateTime now,
         ReconcileStats stats,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool funAccount = false)
     {
         var householdId = link.HouseholdId;
         var conn = uow.Connection;
@@ -373,8 +389,9 @@ public sealed class BankSyncService(
         foreach (var fresh in result.New)
         {
             var tx = byExternalId[fresh.ExternalId];
+            // v7: personal fun money never enters To review — stored confirmed with nothing attached (still listed on the account).
             var row = new NewImportedTransaction(Source, external.Id, external.AccountId, tx.Id, fingerprints[tx.Id], tx.PostedOn, tx.AmountCents,
-                fresh.Description, tx.Payee, tx.Memo, tx.Pending);
+                fresh.Description, tx.Payee, tx.Memo, tx.Pending, funAccount ? "confirmed" : "pending");
             if (await imports.InsertAsync(conn, householdId, row, now, ct) is { } id)
             {
                 newIds.Add(id);
@@ -445,6 +462,11 @@ public sealed class BankSyncService(
         var balance = BankSyncRules.ToAccountBalance(account.Type, external.BalanceCents);
         var changed = await banks.ApplyBalanceAsync(conn, householdId, account.Id, balance, recordedBy, now, ct);
         await imports.SetAccountForExternalAsync(conn, householdId, external.Id, account.Id, ct);
+        if (account.Role == AccountRole.Fun)
+        {
+            await imports.ConfirmFunPendingAsync(conn, householdId, account.Id, ct);
+        }
+
         return changed;
     }
 

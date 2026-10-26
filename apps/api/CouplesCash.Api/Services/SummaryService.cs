@@ -67,7 +67,9 @@ public sealed class SummaryService(
         var active = data.ActiveItems;
         long MonthlyFor(Kind kind) => active.Where(i => i.Kind == kind).Sum(i => RecurrenceEngine.MonthlyEquivalent(i.AmountCents, i.Frequency));
 
+        // v7 transfers are not bills, subscriptions or income: byKind keeps its three v1 entries.
         var byKind = Enum.GetValues<Kind>()
+            .Where(kind => kind != Kind.Transfer)
             .Select(kind => new KindBreakdown(kind, MonthlyFor(kind), active.Count(i => i.Kind == kind)))
             .ToList();
 

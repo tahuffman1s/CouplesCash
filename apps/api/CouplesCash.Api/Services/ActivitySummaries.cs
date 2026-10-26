@@ -151,6 +151,31 @@ public static class ActivitySummaries
     public static string RecurringFromTransaction(RecurringItemRow i, string currency) =>
         $"created {KindName(i.Kind)} {Bold(i.Name)} · {Money(i.AmountCents, currency)} {FrequencyName(i.Frequency)} from a bank transaction";
 
+    // v7: the Friday routine
+    public static string AccountRoleSet(AccountRow a, AccountRole role, string? ownerName) =>
+        $"set {Bold(a.Name)} as {RoleName(role)}{(ownerName is null ? "" : $" ({Bold(ownerName)})")}";
+
+    public static string RoleName(AccountRole role) => role switch
+    {
+        AccountRole.Bills => "the bills account",
+        AccountRole.Savings => "savings",
+        AccountRole.Fun => "fun money",
+        _ => "another account",
+    };
+
+    public static string RecurringBulkCreated(int count) => $"added {Plural(count, "bill")}";
+
+    public static string TransferPlannedPaid(string name, long amountCents, string currency) => $"{Bold(name)} sent · {Money(amountCents, currency)} (matched from the bank)";
+
+    public static string SweepPlanned(long plannedCents, long leftCents, string currency) =>
+        plannedCents > 0 ? $"planned to move {Money(plannedCents, currency)} to savings" : $"nothing to move to savings this week ({Money(leftCents, currency)})";
+
+    public static string SweepDone(long cents, string currency) => $"moved {Money(cents, currency)} to savings";
+
+    public static string SweepUndone() => "unticked the savings move";
+
+    public static string SweepAuto(long cents, string currency) => $"{Money(cents, currency)} moved to savings (seen in the bank)";
+
     public static string Plural(int count, string noun) => $"{count} {noun}{(count == 1 ? "" : "s")}";
 
     // Users
@@ -161,6 +186,7 @@ public static class ActivitySummaries
         Kind.Bill => "bill",
         Kind.Subscription => "subscription",
         Kind.Income => "income",
+        Kind.Transfer => "transfer",
         _ => "item",
     };
 

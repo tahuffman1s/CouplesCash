@@ -82,7 +82,9 @@ public static class TransactionEndpoints
         var householdId = principal.GetHouseholdId();
         var accountRows = await accounts.ListAsync(householdId, ct);
         var externals = await banks.ListExternalAccountsAsync(householdId, ct);
-        var rows = await imports.ListBankPendingAsync(householdId, null, null, reviewOrConfirmedOnly: true, ct);
+        // v7: every visible pending row, whatever its review status — an auto-ignored pending transfer still leaves the account
+        // (v6 listed pending|confirmed only, which is how "only one pending" could show while the bank sent three).
+        var rows = await imports.ListBankPendingAsync(householdId, null, null, reviewOrConfirmedOnly: false, ct);
 
         var places = accountRows
             .Select(a => new PendingAccount(a.Id, null, a.Name, a.Institution, a.BalanceCents, a.AvailableCents, a.Linked))

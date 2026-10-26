@@ -17,7 +17,8 @@ public sealed record NewImportedTransaction(
     string Description,
     string? Payee,
     string? Memo,
-    bool Pending);
+    bool Pending,
+    string Status = "pending");
 
 /// <summary>
 /// v5 per-account transaction list. <paramref name="Filter"/>: all | pending | review | matched | transfers (validated by the endpoint).
@@ -80,6 +81,9 @@ public sealed class ImportRepository(NpgsqlDataSource db)
         LEFT JOIN categories cc ON cc.id = e.category_id
         """;
 
+    /// <summary>v7: a row that pays an occurrence — confirmed against it, or a transfer row linked to a planned transfer.</summary>
+    private const string PaysOccurrence = "(t.status = 'confirmed' OR (t.status = 'ignored' AND t.ignore_reason = 'transfer'))";
+
     /// <summary>Rows hidden from the inbox and account lists unless asked for (v5).</summary>
     private const string NotHidden = "(t.ignore_reason IS NULL OR t.ignore_reason NOT IN ('dropped', 'superseded'))";
 
@@ -97,7 +101,7 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             INSERT INTO imported_transactions (id, household_id, source, external_account_id, account_id, external_id, fingerprint, posted_on,
                                                amount_cents, description, payee, memo, pending, status, created_at)
             VALUES (@Id, @HouseholdId, @Source, @ExternalAccountId, @AccountId, @ExternalId, @Fingerprint, @PostedOn,
-                    @AmountCents, @Description, @Payee, @Memo, @Pending, 'pending', @Now)
+                    @AmountCents, @Description, @Payee, @Memo, @Pending, @Status, @Now)
             ON CONFLICT (household_id, fingerprint) DO UPDATE
             SET pending = EXCLUDED.pending, posted_on = EXCLUDED.posted_on, amount_cents = EXCLUDED.amount_cents,
                 description = EXCLUDED.description, payee = EXCLUDED.payee, memo = EXCLUDED.memo
@@ -119,6 +123,7 @@ public sealed class ImportRepository(NpgsqlDataSource db)
                 t.Payee,
                 t.Memo,
                 t.Pending,
+                t.Status,
                 Now = now,
             }, ct));
 
@@ -322,11 +327,17 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             """,
             new { Id = id, HouseholdId = householdId, PeerId = peerId, Auto = auto, Reviewer = reviewer, Now = now }, ct));
 
+    /// <summary>
+    /// Back to review with every confirmation cleared. v7: a row on a <c>fun</c> account never goes to To review — it returns to
+    /// <c>confirmed</c> (nothing attached) instead, so every restore / unmatch / unpair path keeps personal fun money out of the inbox.
+    /// </summary>
     public Task<int> RestoreAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct) =>
         conn.ExecuteAsync(Cmd(
             """
             UPDATE imported_transactions
-            SET status = 'pending', confirmed_expense_id = NULL, confirmed_item_id = NULL, confirmed_due_date = NULL, confirmed_auto = false,
+            SET status = CASE WHEN EXISTS (SELECT 1 FROM accounts fa WHERE fa.id = imported_transactions.account_id AND fa.role = 'fun')
+                              THEN 'confirmed' ELSE 'pending' END,
+                confirmed_expense_id = NULL, confirmed_item_id = NULL, confirmed_due_date = NULL, confirmed_auto = false,
                 reviewed_by = NULL, reviewed_at = NULL, ignore_reason = NULL, transfer_peer_id = NULL, transfer_auto = false
             WHERE id = @Id AND household_id = @HouseholdId
             """,
@@ -409,7 +420,7 @@ public sealed class ImportRepository(NpgsqlDataSource db)
     public async Task<IReadOnlyList<ImportedTransactionRow>> ListConfirmedForItemAsync(NpgsqlConnection conn, Guid householdId, Guid itemId, CancellationToken ct)
     {
         var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
-            $"{Select} WHERE t.household_id = @HouseholdId AND t.status = 'confirmed' AND t.confirmed_item_id = @ItemId ORDER BY t.confirmed_due_date DESC, t.id DESC",
+            $"{Select} WHERE t.household_id = @HouseholdId AND {PaysOccurrence} AND t.confirmed_item_id = @ItemId ORDER BY t.confirmed_due_date DESC, t.id DESC",
             new { HouseholdId = householdId, ItemId = itemId }, ct));
         return rows.ToList();
     }
@@ -464,7 +475,7 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             $"""
             SELECT COALESCE(sum(u.amount_cents) FILTER (WHERE u.amount_cents > 0), 0)::bigint AS in_cents,
                    COALESCE(sum(-u.amount_cents) FILTER (WHERE u.amount_cents < 0), 0)::bigint AS out_cents,
-                   COALESCE(sum(-u.amount_cents) FILTER (WHERE u.amount_cents < 0 AND u.pending AND u.status IN ('pending', 'confirmed')), 0)::bigint AS pending_out_cents,
+                   COALESCE(sum(-u.amount_cents) FILTER (WHERE u.amount_cents < 0 AND u.pending AND (u.ignore_reason IS NULL OR u.ignore_reason NOT IN ('dropped', 'superseded'))), 0)::bigint AS pending_out_cents,
                    count(*)::int AS count
             FROM ({AccountUnion(query)}) u
             """,
@@ -602,6 +613,67 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             new { HouseholdId = householdId, Since = since, Limit = limit }, ct));
         return rows.ToList();
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // v7: fun accounts, planned transfers
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// v7: an account became <c>fun</c> (or a bank account was mapped onto one): its rows still to review become <c>confirmed</c> with no
+    /// suggestion, so personal fun money never waits in To review. Returns how many moved.
+    /// </summary>
+    public Task<int> ConfirmFunPendingAsync(NpgsqlConnection conn, Guid householdId, Guid accountId, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE imported_transactions
+            SET status = 'confirmed', suggested_category_id = NULL, suggested_item_id = NULL, suggested_due_date = NULL,
+                suggested_transfer = false, confidence = 0, match_score = NULL, match_detail = NULL
+            WHERE household_id = @HouseholdId AND account_id = @AccountId AND status = 'pending'
+            """,
+            new { HouseholdId = householdId, AccountId = accountId }, ct));
+
+    /// <summary>v7: a transfer row (ignored / transfer) records the planned-transfer occurrence it paid.</summary>
+    public Task<int> SetPlannedLinkAsync(NpgsqlConnection conn, Guid householdId, Guid id, Guid itemId, DateOnly dueDate, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE imported_transactions SET confirmed_item_id = @ItemId, confirmed_due_date = @DueDate, confirmed_auto = true
+            WHERE id = @Id AND household_id = @HouseholdId
+            """,
+            new { Id = id, HouseholdId = householdId, ItemId = itemId, DueDate = dueDate }, ct));
+
+    /// <summary>
+    /// v7: the planned transfer occurrence was marked unpaid by hand — the transfer rows that paid it stay transfers but lose the link and
+    /// are blocked from automatic matching (an Undo must stick). Returns the unlinked row ids.
+    /// </summary>
+    public async Task<IReadOnlyList<Guid>> UnlinkPlannedAsync(NpgsqlConnection conn, Guid householdId, Guid itemId, DateOnly dueDate, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<Guid>(Cmd(
+            """
+            UPDATE imported_transactions SET confirmed_item_id = NULL, confirmed_due_date = NULL, confirmed_auto = false, auto_blocked = true
+            WHERE household_id = @HouseholdId AND status = 'ignored' AND ignore_reason = 'transfer'
+              AND confirmed_item_id = @ItemId AND confirmed_due_date = @DueDate
+            RETURNING id
+            """,
+            new { HouseholdId = householdId, ItemId = itemId, DueDate = dueDate }, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>v7: a one-sided transfer gets its other leg (the inflow arrived after the outflow was matched).</summary>
+    public Task<int> SetTransferPeerAsync(NpgsqlConnection conn, Guid householdId, Guid id, Guid peerId, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            "UPDATE imported_transactions SET transfer_peer_id = @PeerId WHERE id = @Id AND household_id = @HouseholdId AND status = 'ignored' AND ignore_reason = 'transfer'",
+            new { Id = id, HouseholdId = householdId, PeerId = peerId }, ct));
+
+    /// <summary>The row that pays an occurrence: confirmed against it or (v7) a transfer linked to it. Null when none.</summary>
+    public Task<ImportedTransactionRow?> FindPayingRowAsync(NpgsqlConnection conn, Guid householdId, Guid itemId, DateOnly dueDate, CancellationToken ct) =>
+        conn.QueryFirstOrDefaultAsync<ImportedTransactionRow>(Cmd(
+            $"""
+            {Select}
+            WHERE t.household_id = @HouseholdId AND {PaysOccurrence} AND t.confirmed_item_id = @ItemId AND t.confirmed_due_date = @DueDate
+            ORDER BY (t.amount_cents < 0) DESC, t.reviewed_at DESC NULLS LAST, t.id DESC
+            LIMIT 1
+            """,
+            new { HouseholdId = householdId, ItemId = itemId, DueDate = dueDate }, ct));
 
     // ---------------------------------------------------------------------------------------------
     // Payee rules

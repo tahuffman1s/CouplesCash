@@ -10,7 +10,8 @@ public static class Mapping
     public static UserDto ToDto(this UserRow u) => new(u.Id, u.Email, u.DisplayName, u.CreatedAt);
 
     public static AccountDto ToDto(this AccountRow a) =>
-        new(a.Id, a.Name, a.Institution, a.Type, a.BalanceCents, a.Color, a.Icon, a.Note, a.CreatedAt, a.UpdatedAt, a.AvailableCents, a.PendingOutCents, a.Linked);
+        new(a.Id, a.Name, a.Institution, a.Type, a.BalanceCents, a.Color, a.Icon, a.Note, a.CreatedAt, a.UpdatedAt, a.AvailableCents, a.PendingOutCents, a.Linked,
+            a.Role, a.OwnerUserId, a.OwnerName);
 
     public static BalanceSnapshotDto ToDto(this SnapshotRow s) => new(s.BalanceCents, s.RecordedAt, s.RecordedBy);
 
@@ -36,7 +37,11 @@ public static class Mapping
         i.UpdatedAt,
         i.BankNames,
         i.BankNamesLearned,
-        i.AmountVaries);
+        i.AmountVaries,
+        i.FromAccountId,
+        i.ToAccountId,
+        i.FromAccountName,
+        i.ToAccountName);
 
     /// <summary><paramref name="today"/> decides planned vs. overdue (v4 <c>status</c>); <c>varianceCents = paid − planned</c> when paid.</summary>
     public static OccurrenceDto ToOccurrence(this RecurringItemRow i, DateOnly dueDate, PaymentRow? paid, DateOnly today) => new(
@@ -93,7 +98,29 @@ public static class Mapping
 public static class MappingV3
 {
     public static ExternalAccountDto ToDto(this ExternalAccountRow e) =>
-        new(e.Id, e.ExternalId, e.OrgName, e.Name, e.Currency, e.BalanceCents, e.AvailableCents, e.BalanceAt, e.AccountId, e.AccountName, e.UpdatedAt);
+        new(e.Id, e.ExternalId, e.OrgName, e.Name, e.Currency, e.BalanceCents, e.AvailableCents, e.BalanceAt, e.AccountId, e.AccountName, e.UpdatedAt, ParseFeed(e.LastFeed));
+
+    private static readonly JsonSerializerOptions FeedJson = new(JsonSerializerDefaults.Web);
+
+    /// <summary>v7: the stored <c>last_feed</c> (camelCase JSON), or null when absent or unreadable.</summary>
+    public static FeedStatsDto? ParseFeed(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<FeedStatsDto>(json, FeedJson);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    public static string SerializeFeed(FeedStatsDto feed) => JsonSerializer.Serialize(feed, FeedJson);
 
     public static CsvImportHistoryDto ToDto(this CsvImportRow c) =>
         new(c.Id, c.Filename, c.RowCount, c.ImportedCount, c.DuplicateCount, c.CreatedAt, c.CreatedByName ?? "");
@@ -179,8 +206,9 @@ public static class MappingV3
     private static InboxTransferDto? Transfer(ImportedTransactionRow t) =>
         t.IsTransfer ? new InboxTransferDto(t.TransferPeerId, t.TransferPeerId is null ? null : t.PeerAccountId, t.TransferPeerId is null ? null : t.PeerAccountName, t.TransferAuto) : null;
 
+    /// <summary>Confirmed against an occurrence, or (v7) a transfer row that paid a planned transfer.</summary>
     private static InboxMatchDto? Match(ImportedTransactionRow t) =>
-        t is { Status: "confirmed", ConfirmedItemId: { } itemId, ConfirmedDueDate: { } dueDate }
+        t is { ConfirmedItemId: { } itemId, ConfirmedDueDate: { } dueDate } && (t.Status == "confirmed" || t.IsTransfer)
             ? new InboxMatchDto(itemId, t.ConfirmedItemName ?? "", Enum.TryParse<Kind>(t.ConfirmedItemKind, ignoreCase: true, out var kind) ? kind : Kind.Bill, dueDate)
             : null;
 

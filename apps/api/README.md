@@ -16,7 +16,13 @@ bill from a transaction, bill payments, link). v6 hands scoring to the Python **
 [`docs/MATCHER-CONTRACT.md`](../../docs/MATCHER-CONTRACT.md)) with the built-in C# matcher as fallback: bank names per item
 (user + learned), `amountVaries`, a household auto-match level (`off | bills | all`), automatic matching on every sync, CSV import,
 item change and a scheduler sweep, found bills (`/v1/bill-suggestions`), the pending view (`/v1/pending`), the all-accounts
-Transactions feed (`/v1/transactions`) and `/v1/matcher/status`.
+Transactions feed (`/v1/transactions`) and `/v1/matcher/status`. v7 automates one household's Friday routine
+([`docs/PLAN-V7.md`](../../docs/PLAN-V7.md)): account roles (`bills` — the only account in the weekly math — `savings`, `fun` with an
+owner, `other`; `PUT /v1/accounts/{id}/role`), the payday-anchored pay week (`households.payday_weekday`, used by `/v1/week`), the
+Friday plan (`GET /v1/plan`: available now → bills / fun money / one-offs → left at the end, payday checklist, setup flags), recurring
+transfers (`kind: 'transfer'`, paid automatically from the bank feed), the savings sweep (frozen at payday 00:00, ticked from the bank or
+by hand: `POST/DELETE /v1/plan/sweep/done`), Paste-from-notes bulk create (`POST /v1/recurring/bulk`), per-account feed diagnostics
+(`GET /v1/banks` → `lastFeed`) and a single payday push.
 
 ```
 apps/api/
@@ -37,27 +43,33 @@ apps/api/
 │  │                              # WeekEngine (week bounds, status/variance, left-at-end, weekly budget rows + history, spendable),
 │  │                              # PendingReconciler (v5 pending → posted / dropped / superseded), TransferAnalysis (+ PaymentHistory),
 │  │                              # v6: BankNames (validation, learning), MatchingRules (levels, built-in detail), RematchRules (debounce,
-│  │                              # rate limit), BillSuggestionRules (fingerprint, upsert plan, anchor), PendingGrouping
+│  │                              # rate limit), BillSuggestionRules (fingerprint, upsert plan, anchor), PendingGrouping,
+│  │                              # v7: PlanEngine (plan buckets, left at the end, checklist, sweep + planned-transfer matching)
 │  ├─ Data/                       # NpgsqlDataSource, Dapper repositories, UnitOfWork, DbUpMigrator
 │  ├─ Services/                   # AuthSessionService, OccurrenceService, SummaryService, BudgetService, GoalService,
 │  │                              # ActivityService (+ summaries), PasskeyService (Fido2NetLib), DTO mapping,
 │  │                              # BankSyncService (claim/sync/mapping), InboxService (matcher run, auto-match, confirm/ignore/restore),
-│  │                              # WeekService (composes /week and /budgets/week; also feeds the week-summary pushes)
+│  │                              # WeekService (composes /week and /budgets/week), v7: PlanService (composes /plan), FridayService
+│  │                              # (bank-feed pass: planned transfers + sweep; sweep freeze; manual tick; payday push body)
 │  ├─ SimpleFin/                  # ISimpleFinClient + SimpleFinClient (claim, GET /accounts, URL masking/rewrite), SimpleFinParser
 │  ├─ Security/                   # DataProtector: AES-256-GCM for the stored access URL (Security__DataKey)
 │  ├─ Push/                       # PushOptions, VapidKeys (--vapid), WebPushSender (Lib.Net.Http.WebPush), PushNotifier queue + dispatcher
-│  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene, bank sync, rematch sweep, found bills,
-│  │                              # week summaries) + MatchingWorker (debounced immediate rematch / found bills)
+│  ├─ Scheduler/                  # SchedulerService hosted service (autopay, reminders, hygiene, sweep freeze, bank sync, friday pass,
+│  │                              # rematch sweep, found bills, payday push) + MatchingWorker (debounced immediate rematch / found bills)
 │  ├─ Validation/                 # FluentValidation validators + endpoint filter
 │  ├─ Infrastructure/             # ProblemDetails, exception handler, rate limiting, OpenAPI bearer, options, feature filters
 │  └─ Migrations/000N_*.sql       # embedded, journaled in public.schema_versions (0001 = v1, 0002 = v2, 0003 = v3 imports, 0004 = v4 week,
-│                                 # 0005 = v5 transactions, 0006 = v6 matcher: bank names, auto-match level, match detail, bill_suggestions)
+│                                 # 0005 = v5 transactions, 0006 = v6 matcher: bank names, auto-match level, match detail, bill_suggestions,
+│                                 # 0007 = v7 friday: account roles + owners, payday_weekday, transfer items, sweeps, last_feed)
 └─ CouplesCash.Api.Tests/         # xunit: recurrence, pay period, goal projection, scheduler rules (+ week summaries), budget math,
                                   # WeekEngine, VAPID keys, activity summaries, WebAuthn config, couple codes, tokens, Argon2,
                                   # DataProtector, Fingerprint, TransactionMatcher (+ one-off tolerances), SimpleFIN parser/client helpers,
                                   # bank sync rules, v3 + v4 validators, PendingReconciler, v5 transfers/candidates/analysis/validators,
                                   # v6 MatcherClient (contract JSON, chunking, 401/413/422/5xx/timeout/disabled fallback), bank names,
-                                  # learning, rematch debounce/rate limit, found bills, pending grouping, built-in detail
+                                  # learning, rematch debounce/rate limit, found bills, pending grouping, built-in detail,
+                                  # v7 pay week (any weekday, month/year/DST), bills-account spendable, the Friday plan with the household's
+                                  # numbers, checklist, sweep, planned transfers, payday push, validators, five-pending parser/reconciler;
+                                  # V7DbTests (needs COUPLESCASH_TEST_DB, else skipped): five pending rows stored and listed end to end
 ```
 
 ## Run locally
@@ -137,6 +149,16 @@ expense (`deduct=false`) → ignore/restore → CSV import with a duplicate → 
 route → unlink. Before the bank part the smoke also covers the always-on v4 checks: weekly target + weekly category budgets,
 `PUT /budgets/{id}?period=weekly` returning a `WeekBudgetRow`, `/week` for the current, a past (no snapshots → `leftAtEndCents`
 null) and a future (`projected`) week, and that planning the one-off lowers `leftAtEndCents` by exactly its amount.
+
+**v7 Friday flow.** The smoke always checks the bank-independent v7 surface (`paydayWeekday` 0–6, `/week` pay-week bounds, `/plan`
+shape before setup, account roles + owners, transfer validation, `POST /recurring/bulk` with per-index errors and its single activity row,
+sweep routes 400/404). With `SMOKE_SIMPLEFIN_PORT` and `SMOKE_SCHEDULER_WAIT` it also runs a fresh couple on the fake Bridge's v7 dataset
+(US Bank with 3 pending and an available balance, Ally savings with a student loan, two Ally fun accounts), today made their payday:
+bulk-create her note → paycheck auto-matched → roles → the plan reads $2,345.67 − $1,992.50 − $40.00 − $60.00 = $253.17 → the sweep is
+frozen ($845.67, last week's left) → feed diagnostics (3 pending, available reported) and all 3 pending listed → the $20 transfers to
+each fun account auto-pay their planned transfers → the bills → savings move ticks the sweep → untick sticks, manual tick →
+`bills` is exclusive. It works with either matching engine. For the DB-backed xunit test:
+`COUPLESCASH_TEST_DB="Host=127.0.0.1;Port=5432;Database=couplescash;Username=postgres" dotnet test`.
 
 **v6 matcher flow.** The smoke always checks the engine-independent v6 surface (bank names + legacy `payeeHint`, `amountVaries`,
 `autoMatchLevel`, `/matcher/status`, rematch 202/429, `/pending`, `/transactions`, found-bill routes). With a matcher it replaces the

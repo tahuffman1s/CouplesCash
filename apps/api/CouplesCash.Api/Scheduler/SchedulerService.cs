@@ -19,8 +19,9 @@ namespace CouplesCash.Api.Scheduler;
 /// high-confidence recurring payments — see <see cref="BankSyncService"/>;</item>
 /// <item>(v6) "rematch": re-scores every To-review row of a household at most every <c>Matcher__RematchMinutes</c> (30) — see
 /// <see cref="MatchingService"/>; "found-bills": daily regular-payment detection per household — see <see cref="BillSuggestionService"/>;</item>
-/// <item>(v4) sends week summaries during each user's <c>hourLocal</c>: "week ahead" the day before the week starts and
-/// "week left" on its 5th day, once per (user, week, kind) via <c>week_summary_log</c> — see <see cref="WeekService"/>.</item>
+/// <item>(v7) freezes the week's savings sweep at payday 00:00 household time, pays planned transfers / ticks the sweep from the bank
+/// feed (see <see cref="FridayService"/>) and sends the single payday push at each user's <c>hourLocal</c> on payday, once per (user,
+/// pay week) via <c>week_summary_log</c> kind <c>payday</c> (the v4 week-ahead / week-left summaries are gone).</item>
 /// </list>
 /// Selection logic is in <see cref="SchedulerRules"/>; this class only does I/O. Every exception is caught and logged.
 /// The logger category contains "Scheduler" so <c>make scheduler-logs</c> can filter for it.
@@ -36,7 +37,7 @@ public sealed class SchedulerService(
     ActivityService activity,
     PushNotifier notifier,
     BankSyncService bankSync,
-    WeekService weeks,
+    FridayService friday,
     MatchingService matching,
     BillSuggestionService bills,
     IHostApplicationLifetime lifetime,
@@ -93,10 +94,12 @@ public sealed class SchedulerService(
         await RunPhaseAsync("autopay", () => AutopayAsync(nowUtc, ct));
         await RunPhaseAsync("reminders", () => RemindersAsync(nowUtc, ct));
         await RunPhaseAsync("hygiene", () => HygieneAsync(nowUtc, ct));
+        await RunPhaseAsync("sweep-freeze", () => friday.FreezeDueAsync(nowUtc, ct));
         await RunPhaseAsync("bank-sync", () => bankSync.SyncDueAsync(nowUtc, ct));
+        await RunPhaseAsync("friday", () => friday.RunAllAsync(ct));
         await RunPhaseAsync("rematch", () => matching.SweepDueAsync(nowUtc, ct));
         await RunPhaseAsync("found-bills", () => bills.DetectDueAsync(nowUtc, ct));
-        await RunPhaseAsync("week-summaries", () => WeekSummariesAsync(nowUtc, ct));
+        await RunPhaseAsync("payday-push", () => PaydayPushesAsync(nowUtc, ct));
     }
 
     private async Task RunPhaseAsync(string name, Func<Task> phase)
@@ -238,56 +241,35 @@ public sealed class SchedulerService(
     }
 
     // ---------------------------------------------------------------------------------------------
-    // 5. Week summaries (v4)
+    // 5. The payday push (v7; replaces the v4 week-ahead / week-left summaries)
     // ---------------------------------------------------------------------------------------------
-    private async Task WeekSummariesAsync(DateTime nowUtc, CancellationToken ct)
+    private async Task PaydayPushesAsync(DateTime nowUtc, CancellationToken ct)
     {
         var users = await pushes.ReminderUsersAsync(ct);
-        var viewCache = new Dictionary<(Guid HouseholdId, DateOnly WeekStart), Contracts.WeekViewDto?>();
+        var bodyCache = new Dictionary<Guid, string?>();
 
         foreach (var user in users)
         {
             var nowLocal = SchedulerRules.ToLocal(nowUtc, user.Timezone);
-            if (!SchedulerRules.ShouldSendReminderNow(user.WeekSummaryEnabled, user.HourLocal, nowLocal))
-            {
-                continue;
-            }
-
             var today = DateOnly.FromDateTime(nowLocal);
-            if (SchedulerRules.WeekSummaryDueToday(today, user.WeekStart) is not { } due)
+            if (!SchedulerRules.ShouldSendReminderNow(user.WeekSummaryEnabled, user.HourLocal, nowLocal) || !PlanEngine.IsPayday(today, user.PaydayWeekday))
             {
                 continue;
             }
 
-            if (!await pushes.TryLogWeekSummaryAsync(user.UserId, due.WeekStart, due.Kind, nowUtc, ct))
+            if (!bodyCache.TryGetValue(user.HouseholdId, out var body))
+            {
+                body = await friday.PaydayBodyAsync(user.HouseholdId, ct);
+                bodyCache[user.HouseholdId] = body;
+            }
+
+            if (body is null || !await pushes.TryLogWeekSummaryAsync(user.UserId, today, WeekSummaryKind.Payday, nowUtc, ct))
             {
                 continue;
             }
 
-            var key = (user.HouseholdId, due.WeekStart);
-            if (!viewCache.TryGetValue(key, out var view))
-            {
-                view = await weeks.GetAsync(user.HouseholdId, due.WeekStart, ct);
-                viewCache[key] = view;
-            }
-
-            if (view is null)
-            {
-                continue;
-            }
-
-            var (title, body) = due.Kind switch
-            {
-                WeekSummaryKind.Ahead => ("Week ahead", SchedulerRules.WeekAheadBody(view.PlannedOutCents, view.LeftAtEndCents, user.Currency)),
-                _ => ("This week", SchedulerRules.WeekLeftBody(view.LeftAtEndCents, BudgetVariance(view.Budget), user.Currency)),
-            };
-
-            notifier.ToUser(user.UserId, new PushPayload(title, body, SchedulerRules.WeekLink, SchedulerRules.WeekSummaryTag(due.Kind)));
-            logger.LogInformation("Scheduler week summary {Kind} for week {WeekStart} queued to user {UserId}", due.Kind, due.WeekStart, user.UserId);
+            notifier.ToUser(user.UserId, new PushPayload("Payday", body, SchedulerRules.WeekLink, SchedulerRules.PaydayTag));
+            logger.LogInformation("Scheduler payday push for {Payday} queued to user {UserId}", today, user.UserId);
         }
     }
-
-    /// <summary>Overall target variance when set, else the budgeted categories' total variance, else null (no weekly budget).</summary>
-    private static long? BudgetVariance(Contracts.WeekBudgetDto budget) =>
-        budget.Overall?.VarianceCents ?? (budget.Categories.Count > 0 ? budget.TotalSpentCents - budget.TotalBudgetCents : null);
 }

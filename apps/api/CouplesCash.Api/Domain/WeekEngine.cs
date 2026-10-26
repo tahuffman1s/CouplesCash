@@ -26,8 +26,11 @@ public sealed record WeekOccurrence(Guid ItemId, Kind Kind, long AmountCents, Da
 /// <summary>An expense (unplanned spending) as the week math sees it.</summary>
 public sealed record WeekExpense(DateOnly SpentOn, long AmountCents, Guid? CategoryId = null);
 
-/// <summary>An account as the spendable math sees it (v5): <paramref name="AvailableCents"/> is the bank's available balance when linked.</summary>
-public sealed record SpendableAccount(AccountType Type, long BalanceCents, long? AvailableCents);
+/// <summary>
+/// An account as the spendable math sees it (v5): <paramref name="AvailableCents"/> is the bank's available balance when linked.
+/// v7: <paramref name="Role"/> and <paramref name="PendingOutCents"/> (still-pending outflows) for the bills-account rule.
+/// </summary>
+public sealed record SpendableAccount(AccountType Type, long BalanceCents, long? AvailableCents, AccountRole Role = AccountRole.Other, long PendingOutCents = 0);
 
 /// <summary>A category that has a weekly budget.</summary>
 public sealed record WeekBudgetCategory(Guid Id, string Name, string Color, string Icon, long BudgetCents);
@@ -63,14 +66,15 @@ public static class WeekEngine
     public const int HistoryWeeks = 8;
 
     /// <summary>
-    /// The week containing <paramref name="date"/>. <paramref name="weekStart"/> is 0 (Sunday) or 1 (Monday):
-    /// <c>start = date − ((dayOfWeek − weekStart + 7) mod 7)</c>, <c>end = start + 6</c>.
+    /// The week containing <paramref name="date"/>. <paramref name="weekStart"/> is any weekday 0 (Sunday) … 6 (Saturday) — v7 passes the
+    /// household's payday, so the week runs payday → the day before the next payday:
+    /// <c>start = date − ((dayOfWeek − weekStart + 7) mod 7)</c>, <c>end = start + 6</c>. Pure date arithmetic (no clock, no DST).
     /// </summary>
     public static WeekWindow WeekBounds(DateOnly date, int weekStart)
     {
-        if (weekStart is not (0 or 1))
+        if (weekStart is < 0 or > 6)
         {
-            throw new ArgumentOutOfRangeException(nameof(weekStart), weekStart, "Week start must be 0 (Sunday) or 1 (Monday)");
+            throw new ArgumentOutOfRangeException(nameof(weekStart), weekStart, "Week start must be a weekday 0 (Sunday) … 6 (Saturday)");
         }
 
         var offset = ((int)date.DayOfWeek - weekStart + 7) % 7;
@@ -117,7 +121,7 @@ public static class WeekEngine
     public static WeekTotals Totals(WeekWindow week, IEnumerable<WeekOccurrence> occurrences, IEnumerable<WeekExpense> expenses)
     {
         long incomeExpected = 0, incomeReceived = 0, plannedOut = 0, paidOut = 0, remainingOut = 0;
-        foreach (var o in occurrences.Where(o => week.Contains(o.DueDate)))
+        foreach (var o in occurrences.Where(o => week.Contains(o.DueDate) && o.Kind != Kind.Transfer))
         {
             if (o.Kind.IsOutflow())
             {
@@ -149,11 +153,27 @@ public static class WeekEngine
     /// v5 spendable now: Σ over checking and cash accounts of <c>availableCents ?? balanceCents</c> — a linked account's available balance
     /// already nets out pending authorizations and holds, so it is what can really be spent.
     /// </summary>
-    public static long Spendable(IEnumerable<SpendableAccount> accounts) =>
+    public static long SpendableV6(IEnumerable<SpendableAccount> accounts) =>
         accounts.Where(a => a.Type.IsSpendable()).Sum(a => a.AvailableCents ?? a.BalanceCents);
 
     /// <summary>
-    /// <c>spendableNow + Σ unpaid income due in [from, to] − Σ unpaid bill/subscription due in [from, to]</c> (planned amounts).
+    /// v7 spendable now (PLAN-V7 "Available now"): when the household has a <c>bills</c> account, ONLY that account counts — the bank's
+    /// <c>availableCents</c> when reported (already after pending), else <c>balanceCents − pendingOutCents</c> (so pending is never ignored
+    /// and never double-counted). Other checking accounts (fun money, other) are never summed in. Without a bills account (before setup)
+    /// the v6 rule applies: Σ over checking + cash of <c>availableCents ?? balanceCents</c>.
+    /// </summary>
+    public static long Spendable(IEnumerable<SpendableAccount> accounts)
+    {
+        var list = accounts as IReadOnlyCollection<SpendableAccount> ?? accounts.ToList();
+        var bills = list.FirstOrDefault(a => a.Role == AccountRole.Bills);
+        return bills is not null ? BillsAvailable(bills.AvailableCents, bills.BalanceCents, bills.PendingOutCents) : SpendableV6(list);
+    }
+
+    /// <summary>The bills account's "available now": bank-reported available, else balance − still-pending outflows.</summary>
+    public static long BillsAvailable(long? availableCents, long balanceCents, long pendingOutCents) => availableCents ?? balanceCents - pendingOutCents;
+
+    /// <summary>
+    /// <c>spendableNow + Σ unpaid income due in [from, to] − Σ unpaid bill/subscription/transfer due in [from, to]</c> (planned amounts).
     /// Paid occurrences are already reflected in the balances and are skipped.
     /// </summary>
     public static long ProjectedLeft(long spendableNowCents, DateOnly from, DateOnly to, IEnumerable<WeekOccurrence> occurrences)
@@ -161,7 +181,8 @@ public static class WeekEngine
         var left = spendableNowCents;
         foreach (var o in occurrences.Where(o => !o.IsPaid && o.DueDate >= from && o.DueDate <= to))
         {
-            left += o.Kind.IsOutflow() ? -o.AmountCents : o.AmountCents;
+            // v7: a planned transfer leaves the spendable account like a bill (it is never spending or income).
+            left += o.Kind.IsMoneyOut() ? -o.AmountCents : o.AmountCents;
         }
 
         return left;

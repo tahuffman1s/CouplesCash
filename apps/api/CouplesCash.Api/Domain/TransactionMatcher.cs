@@ -232,7 +232,8 @@ public static class TransactionMatcher
     public static bool AmountMatches(long expectedCents, long actualMagnitude, bool once = false, bool varies = false) =>
         Math.Abs(Math.Abs(expectedCents) - actualMagnitude) <= Tolerance(expectedCents, once, varies);
 
-    public static bool SignMatchesKind(Kind kind, bool isOutflow) => kind.IsOutflow() == isOutflow;
+    /// <summary>Money out pays a bill, subscription or (v7) transfer; money in pays income.</summary>
+    public static bool SignMatchesKind(Kind kind, bool isOutflow) => kind.IsMoneyOut() == isOutflow;
 
     /// <summary>Default category name for a description, or null. Income keywords apply to inflows only, the rest to outflows only.</summary>
     public static string? KeywordCategory(string? description, bool isOutflow)

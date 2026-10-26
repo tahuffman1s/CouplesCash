@@ -58,9 +58,10 @@ public class WeekEngineTests
     }
 
     [Fact]
-    public void WeekBounds_rejects_other_week_starts()
+    public void WeekBounds_rejects_values_that_are_not_weekdays()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => WeekEngine.WeekBounds(Today, 2));
+        Assert.Throws<ArgumentOutOfRangeException>(() => WeekEngine.WeekBounds(Today, 7));
+        Assert.Throws<ArgumentOutOfRangeException>(() => WeekEngine.WeekBounds(Today, -1));
     }
 
     [Fact]

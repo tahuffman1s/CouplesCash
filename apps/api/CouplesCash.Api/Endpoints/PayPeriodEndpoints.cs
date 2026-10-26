@@ -47,7 +47,7 @@ public static class PayPeriodEndpoints
         var due = outflows.Sum(o => o.AmountCents);
         var paid = outflows.Where(o => o.Paid is not null).Sum(o => o.Paid!.AmountCents);
         var remaining = outflows.Where(o => o.Paid is null).Sum(o => o.AmountCents);
-        var spendable = WeekEngine.Spendable(accountRows.Select(a => new SpendableAccount(a.Type, a.BalanceCents, a.AvailableCents))) - remaining;
+        var spendable = WeekEngine.Spendable(accountRows.Select(WeekService.ToSpendable)) - remaining;
 
         return TypedResults.Ok(new PayPeriodViewDto(
             Period: household.PayPeriod,

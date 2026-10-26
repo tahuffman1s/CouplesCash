@@ -27,7 +27,7 @@ public static class CoupleEndpoints
         group.MapPost("/leave", Leave)
             .WithSummary("Leave the household (deleted when empty)");
         group.MapPatch("", UpdateSettings).RequireHousehold().WithValidation<HouseholdSettingsRequest>()
-            .WithSummary("Update household name and settings (currency, week start, time zone, default account, pay period, weekly spending target, auto-ignore transfers, auto-match level)");
+            .WithSummary("Update household name and settings (currency, week start, time zone, default account, pay period, weekly spending target, auto-ignore transfers, auto-match level, v7 paydayWeekday 0–6 — the pay week)");
 
         return group;
     }
@@ -189,7 +189,8 @@ public static class CoupleEndpoints
             PayAnchorDate: request.PayAnchorDate,
             WeeklySpendCents: request.WeeklySpendCents,
             AutoIgnoreTransfers: request.AutoIgnoreTransfers.HasValue ? request.AutoIgnoreTransfers.Value : null,
-            AutoMatchLevel: request.AutoMatchLevel.HasValue ? request.AutoMatchLevel.Value : null);
+            AutoMatchLevel: request.AutoMatchLevel.HasValue ? request.AutoMatchLevel.Value : null,
+            PaydayWeekday: request.PaydayWeekday.HasValue ? request.PaydayWeekday.Value : null);
 
         var changed = new List<string>();
         if (update.Currency is not null)
@@ -232,6 +233,11 @@ public static class CoupleEndpoints
             changed.Add("auto-match level");
         }
 
+        if (update.PaydayWeekday is not null)
+        {
+            changed.Add("payday");
+        }
+
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         if (!await households.UpdateSettingsAsync(uow.Connection, householdId, update, ct))
         {
@@ -259,6 +265,7 @@ public static class CoupleEndpoints
             weeklySpendCents = update.WeeklySpendCents.HasValue ? update.WeeklySpendCents.Value : null,
             autoIgnoreTransfers = update.AutoIgnoreTransfers,
             autoMatchLevel = update.AutoMatchLevel?.ToDb(),
+            paydayWeekday = update.PaydayWeekday,
         };
         await activity.RecordAsync(uow, householdId, userId, "couple.settings", "household", householdId, summary, data, ct, principal.GetDisplayName());
         if (update.AutoMatchLevel is not null)

@@ -14,7 +14,9 @@ public sealed record AccountFields(string Name, string Institution, AccountType 
 public sealed class AccountRepository(NpgsqlDataSource db)
 {
     /// <summary>
-    /// Every statement aliases <c>accounts</c> as <c>a</c> (also in INSERT/UPDATE … RETURNING) so the v5 derived columns can be computed:
+    /// v7: <c>pending_out_cents</c> counts every still-pending outflow that is not dropped / superseded, whatever its review status — an
+    /// auto-ignored pending transfer or a manually ignored authorization still leaves the bank account (v5/v6 counted pending|confirmed
+    /// only, which hid pending transfers). Every statement aliases <c>accounts</c> as <c>a</c> (also in INSERT/UPDATE … RETURNING) so the v5 derived columns can be computed:
     /// the mapped external account's available balance, Σ still-pending bank outflows, and whether a bank account is mapped.
     /// </summary>
     private const string Columns =
@@ -24,13 +26,21 @@ public sealed class AccountRepository(NpgsqlDataSource db)
          ORDER BY e.updated_at DESC, e.id DESC LIMIT 1) AS available_cents,
         COALESCE((SELECT sum(-t.amount_cents) FROM imported_transactions t
                   WHERE t.household_id = a.household_id AND t.account_id = a.id AND t.pending AND t.amount_cents < 0
-                    AND t.status IN ('pending', 'confirmed')), 0)::bigint AS pending_out_cents,
-        EXISTS (SELECT 1 FROM external_accounts e WHERE e.account_id = a.id AND e.household_id = a.household_id) AS linked
+                    AND (t.ignore_reason IS NULL OR t.ignore_reason NOT IN ('dropped', 'superseded'))), 0)::bigint AS pending_out_cents,
+        EXISTS (SELECT 1 FROM external_accounts e WHERE e.account_id = a.id AND e.household_id = a.household_id) AS linked,
+        a.role, a.owner_user_id,
+        (SELECT u.display_name FROM users u WHERE u.id = a.owner_user_id) AS owner_name
         """;
 
     public async Task<IReadOnlyList<AccountRow>> ListAsync(Guid householdId, CancellationToken ct)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
+        return await ListAsync(conn, householdId, ct);
+    }
+
+    /// <summary>Active accounts on the caller's connection (sees bank rows written earlier in the same transaction).</summary>
+    public async Task<IReadOnlyList<AccountRow>> ListAsync(NpgsqlConnection conn, Guid householdId, CancellationToken ct)
+    {
         var rows = await conn.QueryAsync<AccountRow>(Cmd(
             $"SELECT {Columns} FROM accounts a WHERE a.household_id = @HouseholdId AND a.archived_at IS NULL",
             new { HouseholdId = householdId }, ct));
@@ -167,6 +177,34 @@ public sealed class AccountRepository(NpgsqlDataSource db)
 
         await InsertSnapshotAsync(conn, id, row.BalanceCents, userId, now, ct);
         return row;
+    }
+
+    /// <summary>
+    /// v7 <c>PUT /accounts/{id}/role</c>: sets role and owner. Setting <c>bills</c> first moves the role off the previous active bills account
+    /// (to <c>other</c>) so the partial unique index holds. Returns the updated row and the id of the account that lost the bills role.
+    /// </summary>
+    public async Task<(AccountRow? Row, Guid? PreviousBillsId)> SetRoleAsync(NpgsqlConnection conn, Guid householdId, Guid id, AccountRole role, Guid? ownerUserId, DateTime now, CancellationToken ct)
+    {
+        Guid? previous = null;
+        if (role == AccountRole.Bills)
+        {
+            previous = await conn.QuerySingleOrDefaultAsync<Guid?>(Cmd(
+                """
+                UPDATE accounts SET role = 'other', updated_at = @Now
+                WHERE household_id = @HouseholdId AND role = 'bills' AND archived_at IS NULL AND id <> @Id
+                RETURNING id
+                """,
+                new { HouseholdId = householdId, Id = id, Now = now }, ct));
+        }
+
+        var row = await conn.QuerySingleOrDefaultAsync<AccountRow>(Cmd(
+            $"""
+            UPDATE accounts AS a SET role = @Role, owner_user_id = @Owner, updated_at = @Now
+            WHERE a.id = @Id AND a.household_id = @HouseholdId AND a.archived_at IS NULL
+            RETURNING {Columns}
+            """,
+            new { Id = id, HouseholdId = householdId, Role = role.ToDb(), Owner = ownerUserId, Now = now }, ct));
+        return (row, previous);
     }
 
     /// <summary>Soft delete. Returns the archived row, or null when it is not in the household.</summary>

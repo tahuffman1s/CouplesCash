@@ -5,6 +5,7 @@ using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Matching;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -27,6 +28,8 @@ public static class AccountEndpoints
         group.MapDelete("/{id:guid}", Archive).WithSummary("Archive (soft delete) an account");
         group.MapPost("/{id:guid}/balance", SetBalance).WithValidation<BalanceRequest>().WithSummary("Update the balance and record a snapshot");
         group.MapGet("/{id:guid}/history", History).WithSummary("Balance snapshots, newest first");
+        group.MapPut("/{id:guid}/role", SetRole).WithValidation<AccountRoleRequest>()
+            .WithSummary("v7: set the account's role (bills | savings | fun | other) and owner; bills is exclusive — the previous bills account becomes other; fun moves its To-review rows to confirmed");
         group.MapGet("/{id:guid}/transactions", Transactions)
             .WithSummary("v5: bank rows and manual expenses on this account, newest first; ?filter=all|pending|review|matched|transfers&q=&month=YYYY-MM&before=&limit≤200&includeHidden=1");
 
@@ -156,6 +159,50 @@ public static class AccountEndpoints
     {
         var rows = await accounts.HistoryAsync(principal.GetHouseholdId(), id, Math.Clamp(limit, 1, 365), ct);
         return rows is null ? TypedResults.NotFound() : TypedResults.Ok(rows.Select(s => s.ToDto()).ToList());
+    }
+
+    /// <summary>
+    /// v7 <c>PUT /accounts/{id}/role</c>. <c>ownerUserId</c> must be a member (else <c>400 errors.ownerUserId</c>); setting <c>bills</c> moves the role
+    /// off the previous bills account in the same transaction; setting <c>fun</c> confirms the account's rows still to review (personal fun
+    /// money never waits in To review). One <c>account.updated</c> event (<c>data.role</c>, <c>ownerUserId</c>, <c>previousBillsAccountId</c>).
+    /// </summary>
+    private static async Task<Results<Ok<AccountDto>, NotFound, ValidationProblem>> SetRole(
+        Guid id,
+        AccountRoleRequest request,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        AccountRepository accounts,
+        HouseholdRepository households,
+        ImportRepository imports,
+        ActivityService activity,
+        MatchingQueue matching,
+        TimeProvider time,
+        CancellationToken ct)
+    {
+        var householdId = principal.GetHouseholdId();
+        var userId = principal.GetUserId();
+        if (request.OwnerUserId is { } owner && !(await households.MemberIdsAsync(householdId, ct)).Contains(owner))
+        {
+            return Problems.Validation("ownerUserId", "Must be a member of this household.");
+        }
+
+        var role = request.Role!.Value;
+        await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        var (row, previousBills) = await accounts.SetRoleAsync(uow.Connection, householdId, id, role, request.OwnerUserId, time.Now(), ct);
+        if (row is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        var confirmed = role == AccountRole.Fun ? await imports.ConfirmFunPendingAsync(uow.Connection, householdId, row.Id, ct) : 0;
+        await activity.RecordAsync(uow, householdId, userId, "account.updated", "account", row.Id,
+            ActivitySummaries.AccountRoleSet(row, role, row.OwnerName),
+            new { accountId = row.Id, role = role.ToDb(), ownerUserId = row.OwnerUserId, previousBillsAccountId = previousBills, confirmedFromReview = confirmed }, ct, principal.GetDisplayName());
+
+        // The weekly math and the matcher's view of transfers changed: re-score what is waiting.
+        uow.AfterCommit(() => matching.Enqueue(householdId, MatchingJobKind.Rematch));
+        await uow.CommitAsync(ct);
+        return TypedResults.Ok(row.ToDto());
     }
 
     public static readonly string[] TransactionFilters = ["all", "pending", "review", "matched", "transfers"];

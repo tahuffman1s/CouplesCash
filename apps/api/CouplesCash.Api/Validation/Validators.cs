@@ -93,6 +93,8 @@ public sealed class HouseholdSettingsRequestValidator : AbstractValidator<Househ
             .WithMessage("Must be true or false.");
         RuleFor(x => x.AutoMatchLevel.Value).NotNull().IsInEnum().When(x => x.AutoMatchLevel.HasValue).OverridePropertyName("AutoMatchLevel")
             .WithMessage("Must be one of: off, bills, all.");
+        RuleFor(x => x.PaydayWeekday.Value).NotNull().InclusiveBetween(0, 6).When(x => x.PaydayWeekday.HasValue).OverridePropertyName("PaydayWeekday")
+            .WithMessage("Must be a weekday 0 (Sunday) … 6 (Saturday).");
     }
 
     public static bool IsKnownTimeZone(string? id) => !string.IsNullOrWhiteSpace(id) && TimeZoneInfo.TryFindSystemTimeZoneById(id, out _);
@@ -146,6 +148,15 @@ public sealed class RecurringRequestValidator : AbstractValidator<RecurringReque
         RuleFor(x => x.PayeeHint).MaximumLength(MaxPayeeHintLength);
         RuleFor(x => x.BankNames).Must(names => BankNames.Validate(names) is null)
             .WithMessage(x => BankNames.Validate(x.BankNames) ?? "Invalid bank names.");
+
+        // v7: a transfer moves money between two different accounts of the household (existence is checked by the endpoint).
+        RuleFor(x => x.FromAccountId).NotNull().NotEqual(Guid.Empty).When(x => x.Kind == Kind.Transfer)
+            .WithMessage("A transfer needs the account it leaves (fromAccountId).");
+        RuleFor(x => x.ToAccountId).NotNull().NotEqual(Guid.Empty).When(x => x.Kind == Kind.Transfer)
+            .WithMessage("A transfer needs the account it goes to (toAccountId).");
+        RuleFor(x => x.ToAccountId).NotEqual(x => x.FromAccountId)
+            .When(x => x.Kind == Kind.Transfer && x.FromAccountId is not null && x.ToAccountId is not null)
+            .WithMessage("From and to must be different accounts.");
     }
 
     /// <summary>v4 "Bank shows it as" hint length.</summary>
@@ -392,8 +403,66 @@ public sealed class BillSuggestionAcceptRequestValidator : AbstractValidator<Bil
     public BillSuggestionAcceptRequestValidator()
     {
         RuleFor(x => x.Name).NotEmpty().MaximumLength(80).When(x => x.Name is not null);
-        RuleFor(x => x.Kind).IsInEnum().When(x => x.Kind is not null);
+        RuleFor(x => x.Kind).IsInEnum().NotEqual(Kind.Transfer).When(x => x.Kind is not null).WithMessage("Must be one of: bill, subscription, income.");
         RuleFor(x => x.AmountCents).GreaterThan(0).LessThanOrEqualTo(Rules.MaxCents).When(x => x.AmountCents is not null);
         RuleFor(x => x.Frequency).IsInEnum().When(x => x.Frequency is not null);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// v7
+// ---------------------------------------------------------------------------------------------
+
+public sealed class AccountRoleRequestValidator : AbstractValidator<AccountRoleRequest>
+{
+    public AccountRoleRequestValidator()
+    {
+        RuleFor(x => x.Role).NotNull().IsInEnum().WithMessage("Must be one of: bills, savings, fun, other.");
+        RuleFor(x => x.OwnerUserId).NotEqual(Guid.Empty).When(x => x.OwnerUserId is not null).WithMessage("ownerUserId must be a member id or null.");
+    }
+}
+
+/// <summary>
+/// <c>POST /v1/recurring/bulk</c>: 1–100 items; every item is validated with <see cref="RecurringRequestValidator"/> and its errors are keyed
+/// <c>items[i].field</c> (camelCase), so one bad line never hides another.
+/// </summary>
+public sealed class RecurringBulkRequestValidator : AbstractValidator<RecurringBulkRequest>
+{
+    private static readonly RecurringRequestValidator Item = new();
+
+    public RecurringBulkRequestValidator()
+    {
+        RuleFor(x => x.Items).NotNull().Must(items => items is { Length: >= 1 and <= RecurringEndpoints.MaxBulkItems })
+            .WithMessage($"Provide between 1 and {RecurringEndpoints.MaxBulkItems} items.");
+        RuleFor(x => x).Custom((request, context) =>
+        {
+            if (request.Items is not { Length: >= 1 and <= RecurringEndpoints.MaxBulkItems } items)
+            {
+                return;
+            }
+
+            for (var i = 0; i < items.Length; i++)
+            {
+                if (items[i] is null)
+                {
+                    context.AddFailure($"items[{i}]", "Must be an item.");
+                    continue;
+                }
+
+                foreach (var error in Item.Validate(items[i]).Errors)
+                {
+                    context.AddFailure($"items[{i}].{JsonNamingPolicy.CamelCase.ConvertName(error.PropertyName)}", error.ErrorMessage);
+                }
+            }
+        });
+    }
+}
+
+public sealed class SweepDoneRequestValidator : AbstractValidator<SweepDoneRequest>
+{
+    public SweepDoneRequestValidator()
+    {
+        RuleFor(x => x.WeekStart).NotNull().WithMessage("weekStart is required (YYYY-MM-DD, a payday).");
+        RuleFor(x => x.ActualCents).InclusiveBetween(0, Rules.MaxCents).When(x => x.ActualCents is not null);
     }
 }

@@ -156,7 +156,7 @@ public sealed class PushRepository(NpgsqlDataSource db)
         await using var conn = await db.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<ReminderUserRow>(Cmd(
             """
-            SELECT m.user_id, m.household_id, h.timezone, h.currency, h.week_start,
+            SELECT m.user_id, m.household_id, h.timezone, h.currency, h.week_start, h.payday_weekday,
                    COALESCE(p.reminders_enabled, true) AS reminders_enabled,
                    COALESCE(p.days_before, '{1}'::smallint[]) AS days_before,
                    COALESCE(p.hour_local, 9) AS hour_local,

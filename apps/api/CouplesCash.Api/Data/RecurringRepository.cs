@@ -18,7 +18,9 @@ public sealed record RecurringFields(
     string? Notes,
     string? Url,
     IReadOnlyList<string>? BankNames = null,
-    bool AmountVaries = false);
+    bool AmountVaries = false,
+    Guid? FromAccountId = null,
+    Guid? ToAccountId = null);
 
 public sealed class RecurringRepository(NpgsqlDataSource db)
 {
@@ -26,10 +28,13 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
         """
         SELECT i.id, i.household_id, i.name, i.kind, i.amount_cents, i.category_id, i.account_id, i.frequency,
                i.anchor_date, i.end_date, i.auto_pay, i.notes, i.url, i.payee_hint, i.bank_names, i.bank_names_learned, i.amount_varies, i.created_by, i.created_at, i.updated_at, i.archived_at,
-               c.name AS category_name, c.color AS category_color, a.name AS account_name
+               c.name AS category_name, c.color AS category_color, a.name AS account_name,
+               i.from_account_id, i.to_account_id, fa.name AS from_account_name, ta.name AS to_account_name
         FROM recurring_items i
         LEFT JOIN categories c ON c.id = i.category_id
         LEFT JOIN accounts a ON a.id = i.account_id
+        LEFT JOIN accounts fa ON fa.id = i.from_account_id
+        LEFT JOIN accounts ta ON ta.id = i.to_account_id
         """;
 
     private const string PaymentColumns = "recurring_item_id, due_date, paid_at, paid_by, amount_cents, auto, source";
@@ -79,9 +84,10 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
         await conn.ExecuteAsync(Cmd(
             """
             INSERT INTO recurring_items (id, household_id, name, kind, amount_cents, category_id, account_id, frequency,
-                                         anchor_date, end_date, auto_pay, notes, url, bank_names, amount_varies, created_by, created_at, updated_at)
+                                         anchor_date, end_date, auto_pay, notes, url, bank_names, amount_varies, from_account_id, to_account_id,
+                                         created_by, created_at, updated_at)
             VALUES (@Id, @HouseholdId, @Name, @Kind, @AmountCents, @CategoryId, @AccountId, @Frequency,
-                    @AnchorDate, @EndDate, @AutoPay, @Notes, @Url, @BankNames, @AmountVaries, @UserId, @Now, @Now)
+                    @AnchorDate, @EndDate, @AutoPay, @Notes, @Url, @BankNames, @AmountVaries, @FromAccountId, @ToAccountId, @UserId, @Now, @Now)
             """,
             new
             {
@@ -100,6 +106,8 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
                 f.Url,
                 BankNames = (f.BankNames ?? []).ToArray(),
                 f.AmountVaries,
+                f.FromAccountId,
+                f.ToAccountId,
                 UserId = userId,
                 Now = now,
             }, ct));
@@ -114,7 +122,8 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
             UPDATE recurring_items
             SET name = @Name, kind = @Kind, amount_cents = @AmountCents, category_id = @CategoryId, account_id = @AccountId,
                 frequency = @Frequency, anchor_date = @AnchorDate, end_date = @EndDate, auto_pay = @AutoPay,
-                notes = @Notes, url = @Url, bank_names = @BankNames, amount_varies = @AmountVaries, updated_at = @Now
+                notes = @Notes, url = @Url, bank_names = @BankNames, amount_varies = @AmountVaries,
+                from_account_id = @FromAccountId, to_account_id = @ToAccountId, updated_at = @Now
             WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL
             """,
             new
@@ -134,6 +143,8 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
                 f.Url,
                 BankNames = (f.BankNames ?? []).ToArray(),
                 f.AmountVaries,
+                f.FromAccountId,
+                f.ToAccountId,
                 Now = now,
             }, ct));
 

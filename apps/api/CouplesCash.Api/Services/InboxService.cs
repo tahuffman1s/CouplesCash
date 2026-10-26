@@ -543,6 +543,12 @@ public sealed class InboxService(
             }
         }
 
+        if (row is { IsTransfer: true, ConfirmedItemId: { } plannedItem, ConfirmedDueDate: { } plannedDue })
+        {
+            // v7: this transfer paid a planned transfer (fun money) — the occurrence is unpaid again.
+            hadPayment = await items.DeletePaymentAsync(uow.Connection, plannedItem, plannedDue, ct) is not null || hadPayment;
+        }
+
         if (row.IsTransfer && row.TransferPeerId is { } pid)
         {
             await imports.LockAsync(uow.Connection, householdId, pid, ct);
@@ -566,8 +572,8 @@ public sealed class InboxService(
 
         if (!TransactionMatcher.SignMatchesKind(item.Kind, row.IsOutflow))
         {
-            return (item, new InboxError("itemId", item.Kind.IsOutflow()
-                ? "A bill or subscription payment must be money out."
+            return (item, new InboxError("itemId", item.Kind.IsMoneyOut()
+                ? "A bill, subscription or transfer payment must be money out."
                 : "An income payment must be money in."));
         }
 

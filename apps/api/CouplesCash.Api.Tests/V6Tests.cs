@@ -71,7 +71,7 @@ public class V6Tests
     public void Household_settings_auto_match_level_must_be_a_known_value()
     {
         var validator = new HouseholdSettingsRequestValidator();
-        HouseholdSettingsRequest With(Optional<AutoMatchLevel?> level) => new(default, default, default, default, default, default, default, default, default, level);
+        HouseholdSettingsRequest With(Optional<AutoMatchLevel?> level) => new(default, default, default, default, default, default, default, default, default, level, default);
 
         Assert.Empty(Fields(validator, With(Optional<AutoMatchLevel?>.Of(AutoMatchLevel.Off))));
         Assert.Empty(Fields(validator, With(default)));

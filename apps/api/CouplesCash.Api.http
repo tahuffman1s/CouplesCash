@@ -623,6 +623,76 @@ Content-Type: application/json
 POST {{host}}/v1/bill-suggestions/{{found.response.body.1.id}}/dismiss
 Authorization: Bearer {{accessToken}}
 
+### v7: payday weekday (0 Sunday … 6 Saturday; default 5 Friday) — the pay week runs payday → the day before the next payday
+PATCH {{host}}/v1/couple
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "paydayWeekday": 5 }
+
+### v7: the bills account (exclusive — the previous bills account becomes "other")
+PUT {{host}}/v1/accounts/{{account.response.body.id}}/role
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "role": "bills" }
+
+### v7: a fun-money account with its owner (its transactions never go to To review)
+# @name funAccount
+POST {{host}}/v1/accounts
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Fun (Alex)", "institution": "Ally Bank", "type": "checking", "balanceCents": 5000 }
+
+###
+PUT {{host}}/v1/accounts/{{funAccount.response.body.id}}/role
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "role": "fun", "ownerUserId": "{{register.response.body.user.id}}" }
+
+### v7: $20 a week to the fun account (kind transfer: from + to, never spending; paid from the bank feed automatically)
+POST {{host}}/v1/recurring
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Fun money · Alex", "kind": "transfer", "amountCents": 2000, "frequency": "weekly", "anchorDate": "2026-10-30",
+  "fromAccountId": "{{account.response.body.id}}", "toAccountId": "{{funAccount.response.body.id}}" }
+
+### v7: Paste from notes — up to 100 items, all validated first (errors keyed items[3].amountCents), one transaction
+POST {{host}}/v1/recurring/bulk
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "items": [
+  { "name": "Rent", "kind": "bill", "amountCents": 185000, "frequency": "monthly", "anchorDate": "2026-11-01", "bankNames": ["Rent"] },
+  { "name": "Netflix", "kind": "subscription", "amountCents": 1549, "frequency": "monthly", "anchorDate": "2026-11-07", "bankNames": ["Netflix"] },
+  { "name": "Water", "kind": "bill", "amountCents": 6000, "frequency": "monthly", "anchorDate": "2026-11-20", "amountVaries": true, "bankNames": ["Water"] }
+] }
+
+### v7: the Friday plan (any day of the pay week; default today)
+GET {{host}}/v1/plan
+Authorization: Bearer {{accessToken}}
+
+### v7: tick the savings sweep by hand (default amount = planned)
+POST {{host}}/v1/plan/sweep/done
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "weekStart": "2026-10-30" }
+
+### v7: untick it (the bank-feed detection then leaves that week alone)
+DELETE {{host}}/v1/plan/sweep/done
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "weekStart": "2026-10-30" }
+
+### v7: linked banks with feed diagnostics (accounts[].lastFeed: pending / posted / availableReported / at)
+GET {{host}}/v1/banks
+Authorization: Bearer {{accessToken}}
+
 ### Banks: unlink (inbox rows and mapped accounts are kept)
 DELETE {{host}}/v1/banks/{{link.response.body.id}}
 Authorization: Bearer {{accessToken}}

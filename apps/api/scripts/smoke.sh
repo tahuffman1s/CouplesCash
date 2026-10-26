@@ -9,6 +9,9 @@
 # sync/cooldown → scheduler auto-match → undo → unlink, then v4 cleanup (DELETE weekly budgets, clear the target).
 # v6 (always): bank names / legacy payeeHint, amountVaries, auto-match level, matcher status, rematch 202/429, /pending,
 # /transactions, found-bill routes; with SMOKE_MATCHER_URL the fuzzy-matcher flow (see below).
+# v7 (always): paydayWeekday, account roles, recurring transfers, bulk create, /plan, sweep routes; with SMOKE_SIMPLEFIN_PORT +
+# SMOKE_SCHEDULER_WAIT the Friday flow on the fake Bridge's v7 dataset (roles → plan math → fun transfers auto-paid → sweep frozen
+# then auto-done → fun accounts never in To review → bulk from her note → feed diagnostics → all pending listed).
 # Requires: curl, jq. Usage: scripts/smoke.sh [base-url]
 #   SMOKE_SCHEDULER_WAIT=<seconds>  also create an autopay bill due today and wait for the scheduler
 #                                   to mark it (set to > Scheduler__IntervalSeconds); default 0 = skip.
@@ -173,7 +176,7 @@ request PATCH /v1/couple "$A_TOKEN" '{"defaultAccountId":"00000000-0000-7000-800
 [[ "$(echo "$BODY" | jq -r '.errors | keys | join(",")')" == "defaultAccountId" ]] || fail "errors should name 'defaultAccountId'"
 request PATCH /v1/couple "$A_TOKEN" "$(jq -nc --arg a "$ACC" '{currency:"USD",weekStart:1,timezone:"America/Chicago",defaultAccountId:$a,payPeriod:"biweekly",payAnchorDate:"2026-01-09"}')"; expect 200 "PATCH settings"
 [[ "$(echo "$BODY" | jq -r .timezone)" == "America/Chicago" ]] || fail "timezone saved"
-[[ "$(echo "$BODY" | jq -r .weekStart)" == "1" ]] || fail "weekStart saved"
+[[ "$(echo "$BODY" | jq -r .weekStart)" == "$(echo "$BODY" | jq -r .paydayWeekday)" ]] || fail "v7: weekStart is derived from paydayWeekday"
 [[ "$(echo "$BODY" | jq -r .payPeriod)" == "biweekly" ]] || fail "payPeriod saved"
 [[ "$(echo "$BODY" | jq -r .defaultAccountId)" == "$ACC" ]] || fail "defaultAccountId saved"
 request GET /v1/couple "$B_TOKEN"; expect 200 "GET couple carries settings"
@@ -428,9 +431,10 @@ echo "$BODY" | jq -e '.overall.categoryId==null and .overall.budgetCents==20000 
 request GET "/v1/week?start=nope" "$A_TOKEN"; expect 400 "bad week start → 400"
 request GET "/v1/week?start=$TODAY_UTC" "$A_TOKEN"; expect 200 "week view (week of $TODAY_UTC)"
 WEEK0="$BODY"
-echo "$WEEK0" | jq -e '(.days|length==7) and .weekStart==1 and (.isCurrent or .projected) and (.isPast|not) and .leftAtEndCents!=null and .budget.overall.budgetCents==20000 and (.overdue|type=="array")' >/dev/null || fail "week view shape: $(echo "$WEEK0" | jq -c 'del(.days,.budget,.overdue)')"
+PAYDAY_WD="$(request GET /v1/couple "$A_TOKEN" >/dev/null; echo "$BODY" | jq -r .paydayWeekday)"
+echo "$WEEK0" | jq -e --argjson p "$PAYDAY_WD" '(.days|length==7) and .weekStart==$p and (.isCurrent or .projected) and (.isPast|not) and .leftAtEndCents!=null and .budget.overall.budgetCents==20000 and (.overdue|type=="array")' >/dev/null || fail "week view shape: $(echo "$WEEK0" | jq -c 'del(.days,.budget,.overdue)')"
 WEEK_START="$(echo "$WEEK0" | jq -r .start)"; WEEK_END="$(echo "$WEEK0" | jq -r .end)"
-[[ "$(date -u -d "$WEEK_START" +%u)" == "1" && "$(date -u -d "$WEEK_START +6 days" +%F)" == "$WEEK_END" ]] || fail "Monday-start week bounds: $WEEK_START … $WEEK_END"
+[[ "$(date -u -d "$WEEK_START" +%w)" == "$PAYDAY_WD" && "$(date -u -d "$WEEK_START +6 days" +%F)" == "$WEEK_END" ]] || fail "v7 payday-anchored week bounds (payday $PAYDAY_WD): $WEEK_START … $WEEK_END"
 [[ "$(echo "$WEEK0" | jq -r '.days[0].date')" == "$WEEK_START" && "$(echo "$WEEK0" | jq -r '.days[6].date')" == "$WEEK_END" ]] || fail "days run start → end"
 LEFT0="$(echo "$WEEK0" | jq -r .leftAtEndCents)"
 request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg c "$TRANSPORT" --arg a "$ACC" --arg d "$TODAY_UTC" --arg h "$(printf 'x%.0s' $(seq 1 81))" '{name:"Oil change",kind:"bill",amountCents:6000,categoryId:$c,accountId:$a,frequency:"once",anchorDate:$d,payeeHint:$h}')"; expect 400 "payeeHint > 80 chars → 400"
@@ -514,6 +518,76 @@ request POST /v1/bill-suggestions/00000000-0000-7000-8000-000000000000/accept "$
 request POST /v1/bill-suggestions/00000000-0000-7000-8000-000000000000/dismiss "$A_TOKEN"; expect 404 "dismiss an unknown suggestion → 404"
 request GET "/v1/week?start=$TODAY_UTC" "$A_TOKEN"; expect 200 "week view"
 v6check "WeekView.pendingOutCents" '.pendingOutCents|type=="number"'
+
+# ---------------------------------------------------------------------------------------------
+# v7 (always on): payday weekday, account roles, recurring transfers, bulk create, the Friday plan, sweep routes.
+# ---------------------------------------------------------------------------------------------
+echo "--- v7: payday, roles, transfers, bulk, plan"
+request PATCH /v1/couple "$A_TOKEN" '{"paydayWeekday":7}'; expect 400 "paydayWeekday 7 → 400"
+v6check "errors name paydayWeekday" '.errors | has("paydayWeekday")'
+request PATCH /v1/couple "$A_TOKEN" '{"paydayWeekday":null}'; expect 400 "paydayWeekday null → 400"
+request PATCH /v1/couple "$A_TOKEN" '{"paydayWeekday":5}'; expect 200 "payday Friday"
+v6check "Household.paydayWeekday 5, weekStart derived" '.paydayWeekday==5 and .weekStart==5'
+request GET "/v1/week?start=2026-11-05" "$A_TOKEN"; expect 200 "week of Thursday 2026-11-05"
+v6check "pay week Fri 2026-10-30 … Thu 2026-11-05" '.start=="2026-10-30" and .end=="2026-11-05" and .weekStart==5'
+request GET "/v1/plan?date=2026-11-06" "$A_TOKEN"; expect 200 "plan for payday 2026-11-06"
+v6check "Plan shape (no bills account yet → billsAccount null, setup.rolesSet false)" \
+  '.start=="2026-11-06" and .end=="2026-11-12" and .nextPayday=="2026-11-13" and .billsAccount==null and (.accounts|type=="array") and (.bills|type=="array") and (.funMoney|type=="array") and (.oneOffs|type=="array") and (.income|type=="array") and (.savingsBills|type=="array") and (.checklist|type=="array") and (.leftAtEndCents|type=="number") and (.toReviewCount|type=="number") and .setup.rolesSet==false and (.setup|has("banksLinked") and has("paycheckKnown") and has("billsAdded") and has("partnerJoined"))'
+request GET "/v1/plan?date=nope" "$A_TOKEN"; expect 400 "plan with a bad date → 400"
+request GET /v1/plan "$A_TOKEN"; expect 200 "plan (today)"
+v6check "today's plan" '.isCurrent==true and (.isPayday|type=="boolean")'
+
+request PUT "/v1/accounts/$ACC/role" "$A_TOKEN" '{"role":"boss"}'; expect 400 "unknown role → 400"
+request PUT "/v1/accounts/00000000-0000-7000-8000-000000000000/role" "$A_TOKEN" '{"role":"bills"}'; expect 404 "role of a foreign account → 404"
+request PUT "/v1/accounts/$ACC/role" "$A_TOKEN" '{"role":"fun","ownerUserId":"00000000-0000-7000-8000-000000000000"}'; expect 400 "owner who is not a member → 400"
+v6check "errors name ownerUserId" '.errors | has("ownerUserId")'
+request POST /v1/accounts "$A_TOKEN" '{"name":"Fun checking","institution":"Ally Bank","type":"checking","balanceCents":5000}'; expect 201 "a fun-money account"
+FUNACC="$(echo "$BODY" | jq -r .id)"
+v6check "Account.role defaults to other" '.role=="other" and .ownerUserId==null and .ownerName==null'
+A_ID="$(request GET /v1/auth/me "$A_TOKEN" >/dev/null; echo "$BODY" | jq -r .user.id)"
+request PUT "/v1/accounts/$FUNACC/role" "$A_TOKEN" "$(jq -nc --arg u "$A_ID" '{role:"fun",ownerUserId:$u}')"; expect 200 "fun money owned by Alex"
+v6check "role fun, owner Alex" ".role==\"fun\" and .ownerUserId==\"$A_ID\" and .ownerName==\"Alex\""
+
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg a "$ACC" '{name:"Fun money",kind:"transfer",amountCents:2000,frequency:"weekly",anchorDate:"2026-10-30",fromAccountId:$a}')"
+expect 400 "transfer without toAccountId → 400"
+v6check "errors name toAccountId" '.errors | has("toAccountId")'
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg a "$ACC" '{name:"Fun money",kind:"transfer",amountCents:2000,frequency:"weekly",anchorDate:"2026-10-30",fromAccountId:$a,toAccountId:$a}')"
+expect 400 "transfer to the same account → 400"
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg a "$ACC" '{name:"Fun money",kind:"transfer",amountCents:2000,frequency:"weekly",anchorDate:"2026-10-30",fromAccountId:$a,toAccountId:"00000000-0000-7000-8000-000000000000"}')"
+expect 400 "transfer to a foreign account → 400"
+request POST /v1/recurring "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg f "$FUNACC" '{name:"Fun money (Alex)",kind:"transfer",amountCents:2000,frequency:"weekly",anchorDate:"2026-10-30",fromAccountId:$a,toAccountId:$f}')"
+expect 201 "weekly \$20 transfer → Alex's fun account"
+XFER="$(echo "$BODY" | jq -r .id)"
+v6check "RecurringItem carries from/to (accountId = from)" ".kind==\"transfer\" and .fromAccountId==\"$ACC\" and .toAccountId==\"$FUNACC\" and .accountId==\"$ACC\" and .toAccountName==\"Fun checking\" and (.fromAccountName|type==\"string\")"
+request GET "/v1/recurring?kind=transfer" "$A_TOKEN"; expect 200 "list transfers"
+v6check "one transfer listed" "length==1 and .[0].id==\"$XFER\""
+request GET /v1/summary "$A_TOKEN"; expect 200 "summary with a transfer item"
+v6check "byKind keeps bill/subscription/income only (transfers are not spending)" '[.byKind[].kind] == ["bill","subscription","income"]'
+
+BULK_BAD="$(jq -nc '{items:([range(5) | {name:"Line \(.)",kind:"bill",amountCents:1000,frequency:"monthly",anchorDate:"2026-11-01"}] | .[3].amountCents = 0)}')"
+request POST /v1/recurring/bulk "$A_TOKEN" "$BULK_BAD"; expect 400 "bulk with a bad line → 400, nothing written"
+v6check "per-index errors" '.errors | has("items[3].amountCents") and (keys|length==1)'
+request POST /v1/recurring/bulk "$A_TOKEN" "$(jq -nc '{items:[range(101) | {name:"x",kind:"bill",amountCents:100,frequency:"monthly",anchorDate:"2026-11-01"}]}')"; expect 400 "bulk of 101 → 400"
+request POST /v1/recurring/bulk "$A_TOKEN" "$(jq -nc --arg c "00000000-0000-7000-8000-000000000000" '{items:[{name:"A",kind:"bill",amountCents:100,frequency:"monthly",anchorDate:"2026-11-01"},{name:"B",kind:"bill",amountCents:100,frequency:"monthly",anchorDate:"2026-11-01",categoryId:$c}]}')"
+expect 400 "bulk with a foreign categoryId → 400"
+v6check "reference error per index" '.errors | has("items[1].categoryId")'
+request GET "/v1/recurring?kind=bill" "$A_TOKEN"; BILLS_BEFORE="$(echo "$BODY" | jq length)"
+request POST /v1/recurring/bulk "$A_TOKEN" '{"items":[{"name":"Gym","kind":"bill","amountCents":2999,"frequency":"monthly","anchorDate":"2026-11-03","bankNames":["Planet Fitness"]},{"name":"Water","kind":"bill","amountCents":6000,"frequency":"monthly","anchorDate":"2026-11-20","amountVaries":true}]}'
+expect 201 "bulk create 2 bills"
+v6check "201 { items } in order" '(.items|length==2) and .items[0].name=="Gym" and .items[0].bankNames==["Planet Fitness"] and .items[1].amountVaries==true'
+BULK_IDS="$(echo "$BODY" | jq -r '.items[].id')"
+request GET "/v1/recurring?kind=bill" "$A_TOKEN"; [[ "$(echo "$BODY" | jq length)" == "$((BILLS_BEFORE + 2))" ]] || fail "bulk added exactly 2 bills (the failed bulk wrote nothing)"
+request GET "/v1/activity?limit=20" "$A_TOKEN"
+v6check "one activity row 'added 2 bills'" '[.events[] | select(.kind=="recurring.created" and .data.bulk==true and .data.count==2 and .summary=="added 2 bills")] | length==1'
+for id in $BULK_IDS; do request DELETE "/v1/recurring/$id" "$A_TOKEN"; done
+request DELETE "/v1/recurring/$XFER" "$A_TOKEN"; expect 204 "archive the transfer"
+
+request POST /v1/plan/sweep/done "$A_TOKEN" '{}'; expect 400 "sweep done without weekStart → 400"
+request POST /v1/plan/sweep/done "$A_TOKEN" '{"weekStart":"2026-01-02"}'; expect 404 "sweep done for a week without a frozen sweep → 404"
+request DELETE "/v1/plan/sweep/done?weekStart=2026-01-02" "$A_TOKEN"; expect 404 "untick a week without a sweep → 404"
+request DELETE /v1/plan/sweep/done "$A_TOKEN"; expect 400 "untick without weekStart → 400"
+request PUT "/v1/accounts/$FUNACC/role" "$A_TOKEN" '{"role":"other"}'; expect 200 "fun account back to other"
+request DELETE "/v1/accounts/$FUNACC" "$A_TOKEN"; expect 204 "archive the fun account"
 
 # v6 matcher flow (SMOKE_MATCHER_URL + SMOKE_SIMPLEFIN_PORT + SMOKE_SCHEDULER_WAIT): a fresh household against the real matcher
 # and the fake Bridge's v6 dataset. Defined here, run inside the SimpleFIN block below.
@@ -675,6 +749,163 @@ v6_matcher_flow() {
     '[.events[].kind] as $k | ($k | index("bill_suggestion.dismissed")) != null and ([.events[] | select(.kind=="recurring.created" and .data.fromSuggestion==true)] | length==1) and ([.events[] | select(.kind=="couple.settings" and .data.autoMatchLevel=="off")] | length==1)'
   request DELETE "/v1/banks/$LINK6" "$C_TOKEN"; expect 204 "unlink Casey's bank"
   request POST /v1/couple/leave "$C_TOKEN"; expect 200 "Casey leaves (household deleted)"
+}
+
+# v7 Friday flow (SMOKE_SIMPLEFIN_PORT + SMOKE_SCHEDULER_WAIT): a fresh couple with their real shape on the fake Bridge's v7 dataset —
+# US Bank (bills) with 3 pending and an available balance, Ally savings with a student loan, two Ally fun accounts, a Friday paycheck,
+# $20 to each fun account, the sweep. Today is made their payday. Defined here, run inside the SimpleFIN block below (any engine).
+v7_friday_flow() {
+  local T_EMAIL="travis+$RUN@example.com" J_EMAIL="jordan+$RUN@example.com" T_TOKEN T_REFRESH J_TOKEN T_ID J_ID LINK7 USB SAV F1 F2
+  local PAY7 LOAN7 FUNT FUNJ D0 D1 D2 D3 D4 D10 D12 PAYDAY7 PLANNED7 SWEEP_TX
+  v7wait() { # v7wait LABEL PATH JQ-FILTER [SECONDS]
+    local label="$1" path="$2" filter="$3" seconds="${4:-$SMOKE_SCHEDULER_WAIT}"
+    for _ in $(seq 1 "$seconds"); do
+      request GET "$path" "$T_TOKEN"
+      if [[ "$STATUS" == "200" ]] && echo "$BODY" | jq -e "$filter" >/dev/null 2>&1; then pass "$label"; return 0; fi
+      sleep 1
+    done
+    echo "$BODY" | head -c 2500; echo; fail "$label: not observed within ${seconds}s"
+  }
+  v7check() { if echo "$BODY" | jq -e "$2" >/dev/null 2>&1; then pass "$1"; else echo "$BODY" | head -c 2500; echo; fail "$1"; fi; }
+
+  echo "--- v7: the Friday routine (fake Bridge v7 dataset)"
+  D0="$TODAY_UTC"; PAYDAY7="$(date -u -d "$D0" +%w)"
+  for n in 1 2 3 4 10 12; do printf -v "D$n" '%s' "$(date -u -d "$D0 +$n days" +%F)"; done
+  request POST /v1/auth/register '' "$(jq -nc --arg e "$T_EMAIL" --arg p "$PASSWORD" '{email:$e,password:$p,displayName:"Travis"}')"; expect 201 "register Travis"
+  T_TOKEN="$(echo "$BODY" | jq -r .accessToken)"; T_REFRESH="$(echo "$BODY" | jq -r .refreshToken)"; T_ID="$(echo "$BODY" | jq -r .user.id)"
+  request POST /v1/couple/code "$T_TOKEN" '{"name":"Travis & Jordan"}'; expect 201 "Travis creates the household"
+  local CODE7; CODE7="$(echo "$BODY" | jq -r .code)"
+  request POST /v1/auth/refresh '' "$(jq -nc --arg r "$T_REFRESH" '{refreshToken:$r}')"; expect 200 "refresh Travis"
+  T_TOKEN="$(echo "$BODY" | jq -r .accessToken)"
+  request POST /v1/auth/register '' "$(jq -nc --arg e "$J_EMAIL" --arg p "$PASSWORD" '{email:$e,password:$p,displayName:"Jordan"}')"; expect 201 "register Jordan"
+  J_TOKEN="$(echo "$BODY" | jq -r .accessToken)"; J_ID="$(echo "$BODY" | jq -r .user.id)"
+  request POST /v1/couple/join "$J_TOKEN" "$(jq -nc --arg c "$CODE7" '{code:$c}')"; expect 200 "Jordan joins"
+  J_TOKEN="$(echo "$BODY" | jq -r .accessToken)"
+  request PATCH /v1/couple "$T_TOKEN" "$(jq -nc --argjson p "$PAYDAY7" '{paydayWeekday:$p}')"; expect 200 "payday = today's weekday ($PAYDAY7)"
+
+  local V7TOKEN; V7TOKEN="$(printf 'http://127.0.0.1:%s/simplefin/claim/v7' "$SMOKE_SIMPLEFIN_PORT" | base64 -w0)"
+  request POST /v1/banks/simplefin/claim "$T_TOKEN" "$(jq -nc --arg t "$V7TOKEN" '{setupToken:$t,name:"Their banks"}')"; expect 201 "claim the v7 Bridge (US Bank + Ally ×3)"
+  LINK7="$(echo "$BODY" | jq -r .id)"
+  local EXTS; EXTS="$BODY"
+  map7() { # map7 EXTERNAL-ID NAME TYPE INSTITUTION → prints the new account id
+    local ext; ext="$(echo "$EXTS" | jq -r --arg x "$1" '.accounts[] | select(.externalId==$x) | .id')"
+    request PUT "/v1/banks/accounts/$ext" "$T_TOKEN" "$(jq -nc --arg n "$2" --arg t "$3" --arg i "$4" '{create:{name:$n,type:$t,institution:$i}}')"
+    [[ "$STATUS" == "200" ]] || { echo "$BODY"; fail "map $1"; }
+    echo "$BODY" | jq -r .accountId
+  }
+  USB="$(map7 ACT-V7-USB "US Bank" checking "U.S. Bank")"; SAV="$(map7 ACT-V7-SAV "Ally High Yield Savings" savings "Ally Bank")"
+  F1="$(map7 ACT-V7-FUN1 "Fun (Travis)" checking "Ally Bank")"; F2="$(map7 ACT-V7-FUN2 "Fun (Jordan)" checking "Ally Bank")"
+  [[ "$USB" =~ ^[0-9a-f-]{36}$ && "$SAV" =~ ^[0-9a-f-]{36}$ && "$F1" =~ ^[0-9a-f-]{36}$ && "$F2" =~ ^[0-9a-f-]{36}$ ]] || fail "four accounts created by mapping"
+  pass "four bank accounts mapped (US Bank, Ally savings, two Ally fun accounts)"
+
+  # Her notes, as the client-side parser turns them into items (Paste from notes → POST /v1/recurring/bulk).
+  request POST /v1/recurring/bulk "$T_TOKEN" "$(jq -nc --arg d2 "$D2" --arg d3 "$D3" --arg d4 "$D4" --arg d10 "$D10" --arg d12 "$D12" --arg d0 "$D0" --arg sav "$SAV" '{items:[
+      {name:"Rent",kind:"bill",amountCents:185000,frequency:"monthly",anchorDate:$d2,bankNames:["Rent"]},
+      {name:"Phone",kind:"bill",amountCents:8500,frequency:"monthly",anchorDate:$d3,bankNames:["Phone"]},
+      {name:"Internet",kind:"subscription",amountCents:5750,frequency:"monthly",anchorDate:$d4,bankNames:["Internet"]},
+      {name:"Netflix",kind:"subscription",amountCents:1549,frequency:"monthly",anchorDate:$d10,bankNames:["Netflix"]},
+      {name:"Water",kind:"bill",amountCents:6000,frequency:"monthly",anchorDate:$d12,amountVaries:true,bankNames:["Water"]},
+      {name:"Student loan",kind:"bill",amountCents:25000,frequency:"monthly",anchorDate:$d0,accountId:$sav,bankNames:["NELNET STUDENT LOAN"]}]}')"
+  expect 201 "bulk create the 6 lines of her note"
+  LOAN7="$(echo "$BODY" | jq -r '.items[] | select(.name=="Student loan") | .id')"
+  [[ "$(echo "$BODY" | jq '.items|length')" == "6" ]] || fail "6 items created"
+  request POST /v1/recurring "$T_TOKEN" "$(jq -nc --arg a "$USB" --arg d "$D0" '{name:"Paycheck",kind:"income",amountCents:150000,frequency:"weekly",anchorDate:$d,accountId:$a,bankNames:["ACME CORP PAYROLL"]}')"
+  expect 201 "Travis's weekly paycheck (Friday)"; PAY7="$(echo "$BODY" | jq -r .id)"
+  request POST /v1/recurring "$T_TOKEN" "$(jq -nc --arg a "$USB" --arg d "$D1" '{name:"Oil change",kind:"bill",amountCents:6000,frequency:"once",anchorDate:$d,accountId:$a}')"
+  expect 201 "one-off: oil change 60 tomorrow"
+  request POST /v1/recurring "$T_TOKEN" "$(jq -nc --arg a "$USB" --arg f "$F1" --arg d "$D0" '{name:"Fun money · Travis",kind:"transfer",amountCents:2000,frequency:"weekly",anchorDate:$d,fromAccountId:$a,toAccountId:$f}')"
+  expect 201 "\$20 a week → Fun (Travis)"; FUNT="$(echo "$BODY" | jq -r .id)"
+  request POST /v1/recurring "$T_TOKEN" "$(jq -nc --arg a "$USB" --arg f "$F2" --arg d "$D0" '{name:"Fun money · Jordan",kind:"transfer",amountCents:2000,frequency:"weekly",anchorDate:$d,fromAccountId:$a,toAccountId:$f}')"
+  expect 201 "\$20 a week → Fun (Jordan)"; FUNJ="$(echo "$BODY" | jq -r .id)"
+
+  v7wait "the paycheck posted and auto-matched (rematch after the item was added)" "/v1/calendar?from=$D0&to=$D0" \
+    ".occurrences[] | select(.itemId==\"$PAY7\") | .paid.source==\"bank\" and .paid.amountCents==150000"
+
+  # Roles: bills, savings, fun × 2 with owners.
+  request PUT "/v1/accounts/$USB/role" "$T_TOKEN" '{"role":"bills"}'; expect 200 "US Bank = bills"
+  v7check "Account.role bills" '.role=="bills"'
+  request PUT "/v1/accounts/$SAV/role" "$T_TOKEN" '{"role":"savings"}'; expect 200 "Ally High Yield Savings = savings"
+  request PUT "/v1/accounts/$F1/role" "$T_TOKEN" "$(jq -nc --arg u "$T_ID" '{role:"fun",ownerUserId:$u}')"; expect 200 "Fun (Travis) = fun, owner Travis"
+  v7check "fun owner" ".role==\"fun\" and .ownerUserId==\"$T_ID\" and .ownerName==\"Travis\""
+  request PUT "/v1/accounts/$F2/role" "$J_TOKEN" "$(jq -nc --arg u "$J_ID" '{role:"fun",ownerUserId:$u}')"; expect 200 "Fun (Jordan) = fun, owner Jordan (set by Jordan)"
+
+  request GET "/v1/inbox?status=pending&limit=200" "$T_TOKEN"; expect 200 "To review"
+  v7check "fun-account transactions are never in To review" "[.items[] | select(.accountId==\"$F1\" or .accountId==\"$F2\")] | length==0"
+  request GET "/v1/accounts/$F1/transactions" "$T_TOKEN"; expect 200 "Fun (Travis) transactions"
+  v7check "… but they are listed on the account (TARGET, confirmed, nothing attached)" '[.items[] | select(.description=="TARGET 0042" and .status=="confirmed")] | length==1'
+
+  # The Friday plan: her note.
+  v7wait "plan: Left on Thursday = \$253.17" /v1/plan '.leftAtEndCents==25317' 15
+  v7check "available now = US Bank available \$2,345.67 (bank-reported), 3 pending −\$62.40 informational" \
+    ".billsAccount.id==\"$USB\" and .billsAccount.availableCents==234567 and .billsAccount.availableFromBank==true and .billsAccount.balanceCents==240807 and (.billsAccount.pending|length==3) and .billsAccount.pendingOutCents==6240"
+  v7check "bills before next payday \$1,992.50 (Rent, Phone, Internet), fun money \$40.00, one-offs \$60.00, no income still to come" \
+    '.billsOutCents==199250 and .funOutCents==4000 and .oneOffOutCents==6000 and .incomeInCents==0 and ([.bills[].occurrence.name]|sort)==["Internet","Phone","Rent"] and (.funMoney|length==2) and (.oneOffs|length==1) and .oneOffs[0].kind=="oneoff"'
+  v7check "student loan is a savings bill (shown, not in the math); paycheck line ticked" \
+    "(.savingsBills|length==1) and .savingsBills[0].occurrence.itemId==\"$LOAN7\" and (.income|length==1) and .income[0].occurrence.paid!=null"
+  v7check "pay week = payday … payday + 6, isPayday, accounts strip bills · savings · fun · fun" \
+    ".start==\"$D0\" and .end==\"$(date -u -d "$D0 +6 days" +%F)\" and .isPayday==true and .isCurrent==true and ([.accounts[].role][:4])==[\"bills\",\"savings\",\"fun\",\"fun\"] and .setup.rolesSet==true and .setup.banksLinked==true and .setup.paycheckKnown==true and .setup.billsAdded==true and .setup.partnerJoined==true"
+  v7check "payday checklist: paycheck ✓ (auto, its transaction), two \$20 fun transfers open" \
+    '([.checklist[] | select(.key=="paycheck")][0] | .done==true and .auto==true and .transactionId!=null and .amountCents==150000) and ([.checklist[] | select(.key=="fun" and .done==false and .amountCents==2000)] | length==2)'
+
+  # shellcheck disable=SC2016 # "$845.67" is a jq string literal (the checklist label), not a shell expansion
+  v7wait "the sweep is frozen at payday 00:00 (catch-up tick): last week's left = \$845.67 (available − the paycheck that posted today)" /v1/plan \
+    '.sweep!=null and .sweep.plannedCents==84567 and .sweep.leftCents==84567 and .sweep.doneAt==null and ([.checklist[] | select(.key=="sweep" and .label=="Move $845.67 to savings" and .done==false)] | length==1)'
+  PLANNED7="$(echo "$BODY" | jq -r .sweep.plannedCents)"
+
+  request GET /v1/banks "$T_TOKEN"; expect 200 "linked banks"
+  v7check "feed diagnostics: US Bank sent 3 pending, available balance reported; savings without available" \
+    '(.[0].accounts[] | select(.externalId=="ACT-V7-USB") | .lastFeed.pending==3 and .lastFeed.posted>=1 and .lastFeed.availableReported==true and (.lastFeed.at|type=="string")) and (.[0].accounts[] | select(.externalId=="ACT-V7-SAV") | .lastFeed.availableReported==false)'
+  request GET "/v1/transactions?accountId=$USB" "$T_TOKEN"; expect 200 "US Bank transactions feed"
+  v7check "/v1/transactions lists all 3 pending" '(.pending|length==3) and ([.pending[].description]|sort)==["SHELL OIL 5741","STARBUCKS 0091","WALMART SUPERCENTER"]'
+  request GET /v1/pending "$T_TOKEN"; expect 200 "pending view"
+  v7check "/v1/pending: US Bank group with all 3" ".groups[] | select(.accountId==\"$USB\") | .pendingCount==3 and .pendingOutCents==6240"
+
+  # Friday: Travis moves $20 to each fun account → the bank feed shows both legs → the planned transfers tick themselves.
+  curl -fs -X POST "$FAKE/__phase/v7/2" >/dev/null || fail "phase v7/2"
+  v7wait "fun transfers auto-paid from the bank feed (transfer pairs to each fun account)" /v1/plan \
+    '.funOutCents==0 and ([.funMoney[] | select(.occurrence.paid.source=="bank" and .occurrence.paid.auto==true)] | length==2)'
+  v7check "left on Thursday unchanged (\$40 left the account and the plan): \$253.17, available \$2,305.67" '.leftAtEndCents==25317 and .billsAccount.availableCents==230567'
+  v7check "checklist: both fun transfers ticked automatically with their transactions" '[.checklist[] | select(.key=="fun" and .done==true and .auto==true and .transactionId!=null)] | length==2'
+  request GET "/v1/accounts/$USB/transactions?filter=transfers" "$T_TOKEN"; expect 200 "US Bank transfers"
+  v7check "both −\$20 rows are ignored transfers paired with a fun account and linked to their planned transfer" \
+    "[.items[] | select(.amountCents==-2000 and .ignoreReason==\"transfer\" and (.transfer.peerAccountId==\"$F1\" or .transfer.peerAccountId==\"$F2\") and (.match.itemId==\"$FUNT\" or .match.itemId==\"$FUNJ\"))] | length==2"
+  request GET "/v1/activity?limit=50" "$T_TOKEN"
+  v7check "activity transfer.planned_paid × 2 (system)" '[.events[] | select(.kind=="transfer.planned_paid" and .actorId==null)] | length==2'
+  request GET "/v1/inbox?status=pending&limit=200" "$T_TOKEN"
+  v7check "still nothing from the fun accounts (or the \$20 transfers) in To review" "[.items[] | select(.accountId==\"$F1\" or .accountId==\"$F2\" or .amountCents==-2000)] | length==0"
+
+  # The sweep: last week's leftover moves to savings.
+  curl -fs -X POST "$FAKE/__phase/v7/3?cents=$PLANNED7" >/dev/null || fail "phase v7/3"
+  v7wait "sweep auto-done from the bills → savings transfer" /v1/plan '.sweep.doneAt!=null and .sweep.auto==true'
+  v7check "sweep: actual = planned, transaction attached; checklist sweep ticked (auto)" \
+    ".sweep.actualCents==$PLANNED7 and .sweep.transactionId!=null and ([.checklist[] | select(.key==\"sweep\" and .done==true and .auto==true and .transactionId!=null)] | length==1)"
+  v7check "the plan follows the bank: left = \$253.17 − \$845.67" ".leftAtEndCents==(25317 - $PLANNED7)"
+  SWEEP_TX="$(echo "$BODY" | jq -r .sweep.transactionId)"
+  request GET "/v1/accounts/$USB/transactions?filter=transfers" "$T_TOKEN"
+  v7check "the sweep rows are a transfer pair to savings" ".items[] | select(.id==\"$SWEEP_TX\") | .ignoreReason==\"transfer\" and .transfer.peerAccountId==\"$SAV\""
+  request GET "/v1/activity?limit=50" "$T_TOKEN"
+  v7check "activity sweep.planned + sweep.auto" '([.events[] | select(.kind=="sweep.auto")] | length==1) and ([.events[] | select(.kind=="sweep.planned")] | length==1)'
+
+  # Manual untick / tick: the Undo sticks (the detection never re-ticks that week).
+  request DELETE /v1/plan/sweep/done "$T_TOKEN" "$(jq -nc --arg w "$D0" '{weekStart:$w}')"; expect 200 "untick the sweep"
+  v7check "not done any more" '.doneAt==null and .auto==false and .actualCents==null and .transactionId==null'
+  sleep 6
+  request GET /v1/plan "$T_TOKEN"; v7check "a scheduler tick later it is still unticked (auto-detection blocked)" '.sweep.doneAt==null'
+  request POST /v1/plan/sweep/done "$J_TOKEN" "$(jq -nc --arg w "$D0" '{weekStart:$w,actualCents:80000}')"; expect 200 "Jordan ticks it by hand (\$800.00)"
+  v7check "manual tick" '.doneAt!=null and .auto==false and .actualCents==80000'
+  request GET "/v1/activity?limit=50" "$T_TOKEN"
+  v7check "activity sweep.done × 2 (untick, tick)" '[.events[] | select(.kind=="sweep.done")] | length==2'
+
+  # bills is exclusive: moving it clears the previous one (then back).
+  request PUT "/v1/accounts/$SAV/role" "$T_TOKEN" '{"role":"bills"}'; expect 200 "savings → bills"
+  request GET /v1/accounts "$T_TOKEN"
+  v7check "exactly one bills account; US Bank became other" "([.[] | select(.role==\"bills\")] | length==1) and (.[] | select(.id==\"$USB\") | .role==\"other\")"
+  request PUT "/v1/accounts/$USB/role" "$T_TOKEN" '{"role":"bills"}'; expect 200 "US Bank → bills again"
+  request PUT "/v1/accounts/$SAV/role" "$T_TOKEN" '{"role":"savings"}'; expect 200 "savings again"
+  request GET "/v1/week" "$T_TOKEN"; expect 200 "week view"
+  v7check "/v1/week is the pay week too" ".start==\"$D0\" and .weekStart==$PAYDAY7"
+
+  request DELETE "/v1/banks/$LINK7" "$T_TOKEN"; expect 204 "unlink the v7 Bridge"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -1113,6 +1344,11 @@ if [[ -n "${SMOKE_SIMPLEFIN_PORT:-}" ]]; then
   if [[ -n "${SMOKE_MATCHER_URL:-}" ]]; then
     [[ "${SMOKE_SCHEDULER_WAIT:-0}" -gt 0 ]] || fail "the v6 matcher flow needs SMOKE_SCHEDULER_WAIT > 0 (and Sync__IntervalHours=0, Scheduler__IntervalSeconds=5)"
     v6_matcher_flow
+  fi
+  if [[ "${SMOKE_SCHEDULER_WAIT:-0}" -gt 0 ]]; then
+    v7_friday_flow
+  else
+    echo "--- v7 Friday flow skipped: it needs SMOKE_SCHEDULER_WAIT > 0 (the sweep freeze and the bank sync run in the scheduler)"
   fi
   kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null || true
   trap 'rm -f "$TMP_BODY" "$TMP_REQ"' EXIT

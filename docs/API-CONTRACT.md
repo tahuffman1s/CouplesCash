@@ -851,3 +851,125 @@ type Plan = {
 Transactions on `fun` accounts never enter To review (status confirmed, `ignoreReason` null, no suggestion) but appear in
 the account's transaction list. Activity kinds added: `sweep.done`, `sweep.auto`, `transfer.planned_paid`. Push tag
 `payday`. Week endpoints (`/v1/week`) use the pay week (payday-anchored) from v7 on.
+
+## v7 implementation notes (API)
+
+Deviations and clarifications from the "# v7 additions" table, as built in `apps/api`:
+
+- **Migration 0007** (`0007_friday.sql`): `accounts.role` (CHECK bills|savings|fun|other, default `other`), `accounts.owner_user_id`
+  (`ON DELETE SET NULL`), partial unique index `(household_id) WHERE role = 'bills' AND archived_at IS NULL` (an archived account keeps its
+  role but never blocks a new bills account); `households.payday_weekday` (0–6, default 5) backfilled from `pay_anchor_date`'s weekday when
+  `pay_period` is weekly/biweekly; `recurring_items.from_account_id` / `to_account_id` and `recurring_items_kind_check` replaced to allow
+  `transfer`; `sweeps` as in PLAN-V7 plus **`left_cents`** (the raw, possibly negative, left-at-end the sweep was frozen from) and
+  **`auto_blocked`** (a person unticked it); `external_accounts.last_feed jsonb`; `week_summary_log.kind` adds `payday`. Role backfill for
+  existing households: the linked (mapped) active checking account with the most confirmed bill/subscription payments → `bills` (ties →
+  largest balance, then id), `savings`-type accounts → `savings`, everything else stays `other`.
+- **Pay week.** `WeekEngine.WeekBounds` accepts any weekday 0–6; `/v1/week` (and the calendar grid, through `Household.weekStart`) is
+  anchored to `payday_weekday`: `[payday, payday + 6]`. `Household.weekStart` and `WeekView.weekStart` now return `paydayWeekday`;
+  `PATCH /couple { weekStart }` is still validated (0/1) and stored in the legacy column but drives nothing. `PATCH /couple
+  { paydayWeekday }`: integer 0–6 (`null` or anything else → `400 errors.paydayWeekday`); `couple.settings` lists "payday" with
+  `data.paydayWeekday`.
+- **Spendable (the "available now" fix).** When the household has a `bills` account, `/v1/week` `spendableNowCents`, `/v1/payperiod`
+  `spendableCents` and the plan use **only** that account: bank `availableCents` when reported, else `balanceCents − pendingOutCents`.
+  Other checking/cash accounts (fun money) are never summed. Without a bills account the v6 rule (Σ checking + cash of `availableCents ??
+  balanceCents`) is kept, so nothing changes before setup. `WeekView.pendingOutCents` follows the same accounts.
+- **Pending rows (the "only one pending" bug, fixed).** `Account.pendingOutCents`, `GET /v1/pending` and the account-transactions
+  `totals.pendingOutCents` counted only pending rows whose review status was `pending|confirmed`. A pending row that was **ignored** — in
+  particular a v5 auto-ignored transfer pair while both legs are still pending (the Friday $20 fun-money transfers, a pending move to
+  savings) or a manually ignored authorization — vanished from the pending view and from the pending total although the money is leaving
+  the account. v7 counts and lists every bank-pending row that is not dropped / superseded, whatever its review status (`GET /v1/transactions`
+  already did). Nothing in the parser → reconcile → fingerprint → upsert path collapses distinct pending rows: distinct ids give distinct
+  fingerprints (two same-merchant same-amount authorizations stay two rows), v2 `posted: 0` and `transacted_at`-only rows parse as pending,
+  the `ON CONFLICT … WHERE pending` refresh only applies to the same id, the reconciler only pairs a *posted* new id with an *absent*
+  pending row and supersedes only an absent authorization whose posted copy is present, and rows of an unmapped bank account (`account_id
+  NULL`) are listed (grouped by their external account in `/pending`). Only a repeated id inside one response collapses (first wins), as
+  SimpleFIN ids are unique per account. Covered by `V7Tests` (parser / reconciler) and `V7DbTests` (five pending rows stored and listed
+  by every endpoint, real database).
+- **Feed diagnostics.** Every successful sync stores, per external account in the response (mapped or not), `last_feed = { pending,
+  posted, availableReported, at }`: the raw counts of transactions the Bridge sent (after parsing, so a v2 `posted: 0` row counts as
+  pending; before any dedupe or reconciliation) and whether it sent `available-balance`. `GET /v1/banks` → `accounts[].lastFeed`
+  (`null` until the first v7 sync); the plan's `billsAccount.feed` is the mapped external account's.
+- **Account roles.** `PUT /v1/accounts/{id}/role { role, ownerUserId? }`: unknown/archived/foreign account → 404; `role` required
+  (`400 errors.role`); `ownerUserId` must be a household member (`400 errors.ownerUserId`; `null`/absent clears the owner; any role may
+  carry one). Setting `bills` moves the role off the previous active bills account (to `other`) in the same transaction. Setting `fun`
+  confirms the account's rows still to review (suggestion cleared). One `account.updated` event (`data: { accountId, role, ownerUserId,
+  previousBillsAccountId, confirmedFromReview }`); a rematch is queued. `Account` gains `role`, `ownerUserId`, `ownerName`; `POST/PUT
+  /accounts` leave the role alone.
+- **Fun accounts never enter To review.** New SimpleFIN rows (and CSV rows) on a `fun` account are inserted `status: confirmed` with
+  nothing attached; mapping an external account onto a fun account confirms its rows to review; every path that sends a row "back to
+  review" (restore, unmatch, unpairing a transfer peer, un-marking an occurrence) returns a fun-account row to `confirmed` instead. They are
+  therefore never matched, rematched, bulk-confirmed or counted in `toReviewCount` / inbox summaries, and they stay in the account's
+  transaction list and in `/v1/transactions`. A fun-account inflow can still become the other leg of a planned transfer (below).
+- **Recurring transfers** (`kind: 'transfer'`): `fromAccountId` and `toAccountId` required, different (`400 errors.fromAccountId` /
+  `errors.toAccountId`), both active accounts of the household (`400` with the same keys); `accountId` is stored as the from-account; other
+  kinds never store from/to. `RecurringItem` gains `fromAccountId`, `toAccountId`, `fromAccountName`, `toAccountName`; `GET
+  /recurring?kind=transfer` filters. Transfers are never spending, budgets or income: `Summary.byKind` keeps its three entries, budgets /
+  month report / reminders / pay-period outflows ignore them, the v4 week totals skip them and `leftAtEnd` (v4) subtracts unpaid ones.
+  They are never sent to the matcher nor used by the built-in matcher; `POST /recurring/from-transaction` and found-bill accept refuse
+  `kind: 'transfer'` (`400 errors.kind`). A manual `match` of a money-out row to a transfer occurrence is allowed (v5 semantics).
+- **Planned-transfer matching** (`FridayService`, run in the sync / CSV import transaction before the matcher scores new rows, in the
+  immediate rematch and in the scheduler's `friday` phase every tick). Unpaid occurrences due `[today − 14, today + 2]` (household-local) of
+  transfer items match bank rows on the from-account: money out, `| |amount| − planned | ≤ $1.00`, posted within ±2 days of the due date;
+  the row is still to review, or an ignored transfer not yet linked to a plan, never `auto_blocked`, never attached to a sweep. Evidence,
+  strongest first: its existing transfer peer is on the to-account; a money-in row on the to-account within $1 and ±2 days of the outflow
+  that is unpaired (to review, confirmed with nothing attached — fun money — or a one-sided transfer); or — when the to-account has no bank
+  feed and the row reads like a transfer (keyword, learned transfer payee, transfer suggestion), or when the row names the to-account (a
+  significant word of its name / institution, e.g. "ALLY") — one-sided. Best evidence, then closest date, then closest amount; one-to-one.
+  Then: the occurrence is paid (`paid_by NULL`, `auto true`, `source bank`, bank amount), both rows become `ignored / transfer` (auto, peers
+  linked), the outflow records the occurrence in `confirmed_item_id/confirmed_due_date` (so `InboxItem.match` is set on that transfer row
+  and `/recurring/{id}/payments` shows it), and `transfer.planned_paid` is written (actor null, `data: { itemId, dueDate, transactionId,
+  peerId, amountCents, plannedCents }`). A one-sided match is completed later when the inflow shows up. Unmatching / unpairing the row
+  un-pays the occurrence; marking the occurrence unpaid by hand keeps the rows as transfers, drops the link and blocks them from automatic
+  matching (`occurrence.unpaid` `data.unlinkedTransactionIds`).
+- **`GET /v1/plan?date=`** (`PlanService` + pure `PlanEngine`): the pay week containing `date` (default household-local today); a bad
+  date → 400. Lines are the occurrences due in `[start, end]`, sorted by date then name, classified: bills / subscriptions on the bills
+  account or unassigned → `bills` (`frequency: once` → `oneOffs`, line kind `oneoff`); on a `savings` account → `savingsBills` (shown,
+  never in the math); on any other account → not listed. Income on the bills account or unassigned → `income`. Transfers: from the bills
+  account to a `fun` account → `funMoney`; from the bills account elsewhere → `bills` (line kind `transfer`); into the bills account →
+  `income`; between two other accounts → not listed. Before setup (no bills account) every account that is not savings / fun counts as the
+  bills side. Paid lines are listed (ticked) and never counted. `billsOutCents` / `funOutCents` / `oneOffOutCents` / `incomeInCents` are
+  the unpaid planned amounts; **`leftAtEndCents = available − billsOut − funOut − oneOffOut + incomeIn`** where unpaid income counts only
+  when due inside the pay week (≤ end = the day before the next payday): the next payday's paycheck belongs to the new week, and this
+  week's paycheck, once it posts, is paid and already in available — it is never added twice. For a past week `leftAtEndCents` is the
+  number frozen for the following payday's sweep (`left_cents`) when there is one; a future week uses today's available (a rough
+  projection). `billsAccount`: `availableCents` as above,
+  `availableFromBank` = the bank reported it, `pending` = every visible bank-pending row of the account (any review status, newest first),
+  `pendingOutCents` = Σ of their outflows, `feed` = last feed stats; `null` when no account has role `bills`. `accounts` = every active
+  account ordered bills, savings, fun, other, then name. `setup`: `banksLinked` (a bank link exists), `rolesSet` (a bills account exists),
+  `paycheckKnown` (an active income item), `billsAdded` (an active bill / subscription), `partnerJoined` (two members). `toReviewCount` =
+  household rows to review. `sweep` = this week's sweep row (`Sweep` gains `leftCents`, `transactionId`).
+- **Payday checklist** (only for the current pay week; shown on payday and, while an item is open, through payday + 3): `paycheck` =
+  income lines due on payday ("Paycheck arrived · $1,500.00", amount = paid amount when paid, `done` = paid, `auto` = the payment is
+  automatic, `transactionId` = the paying row); `fun` = fun-money lines due payday … payday + 3 (weekly ones on payday, a monthly one when
+  its date falls in that window; label "$20.00 → Ally Spending (Travis)" = amount → to-account name, plus the owner when the name does not already say it); `sweep` (only once
+  frozen) = "Move $253.17 to savings" (`done` = ticked, `auto` = ticked from the bank, `transactionId`) or, when last week's left was
+  negative, "Nothing to move this week (−$42.10)" with `amountCents 0`, `done true`. `dueDate` = the occurrence date (sweep: payday).
+- **Sweep.** Scheduler phase `sweep-freeze` (first phase of every tick): on payday (household-local; catch-up through payday + 3 when the
+  API was down at midnight) every household with a bills account and no sweep row for the week gets one: `left_cents` = the previous pay
+  week's `leftAtEndCents` computed at that moment minus what already moved through the bank in the new week (occurrences due payday … today
+  paid from a bank transaction: a posted paycheck is subtracted, posted bills / fun transfers / one-offs are added back — zero at midnight),
+  `planned_cents = max(0, left_cents)`; `INSERT … ON CONFLICT DO NOTHING` (idempotent per household and week); activity **`sweep.planned`**
+  (addition; actor null, `data: { weekStart, plannedCents, leftCents }`). Auto-detection (same pass as planned transfers): a bills-account
+  outflow posted payday − 1 … payday + 3 within max(5 %, $5.00) of `planned_cents` (to review or a transfer not linked to a plan), backed by
+  a transfer peer on a savings account, a savings-account inflow within 1 % ($1 floor) and ±3 days, or — savings without a bank feed and a
+  transfer-looking row, or a row naming a savings account — one-sided; closest amount then closest to payday wins. The rows become an auto
+  transfer pair, the sweep gets `actual_cents` = |amount|, `transaction_id`, `done_at` (done_by NULL = auto) — or, after a manual tick,
+  only the transaction — and `sweep.auto` (actor null) is written. Never for a zero plan or an `auto_blocked` week.
+- **`POST /v1/plan/sweep/done { weekStart, actualCents? }`**: `weekStart` required (400), `actualCents` 0…max (default the previous
+  actual, else the planned amount); no sweep for that week → `404` problem "No sweep for that week"; ticks by the caller (`auto false`);
+  again = updates the amount. **`DELETE /v1/plan/sweep/done`** takes `{ weekStart }` in the body or `?weekStart=` (missing → 400, unknown
+  week → 404): clears actual / done / transaction and sets `auto_blocked`, so the bank-feed detection never re-ticks that week. Both write
+  `sweep.done` (`data.done` true/false, `actualCents`, `wasAuto`). Both answer `200 Sweep`.
+- **`POST /v1/recurring/bulk { items }`**: 1–100 items (else `400 errors.items`); every item is validated like `POST /recurring` and
+  every reference checked before anything is written; errors are keyed `items[i].field` (camelCase, e.g. `items[3].amountCents`,
+  `items[1].categoryId`). One transaction creates the items (bank-name payee rules seeded per item), one `recurring.created` event with
+  `summary` "added N bills", `entityId` null and `data: { bulk: true, count, itemIds, totalCents }`, and one rematch. `201 { items }` in
+  request order (Location `/v1/recurring`).
+- **Payday push** (scheduler phase `payday-push`, replaces the v4 week-ahead / week-left summaries, which are no longer sent): on payday
+  (household-local) during the user's `hourLocal`, gated by the existing `weekSummaryEnabled` preference, once per (user, payday) via
+  `week_summary_log` kind `payday`: title "Payday", body e.g. "Payday · move $253.17 to savings · fun money $40.00" (" sent ✓" once every
+  checklist fun transfer is paid; "nothing to move to savings" for a zero sweep; parts dropped when there is no frozen sweep / no fun
+  money), `url: /week`, `tag: payday`. Bill-due reminders are unchanged.
+- **Scheduler order per tick**: autopay → reminders → hygiene → sweep-freeze → bank-sync → friday (planned transfers + sweep for every
+  household with a bills account or a transfer item) → rematch → found-bills → payday-push. `bank.synced` data gains
+  `plannedTransfersPaid`, `sweepsDone`, `toReview` (the "N to review" push now counts rows actually left to review). OpenAPI tag `Plan`.

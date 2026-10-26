@@ -130,6 +130,8 @@ builder.Services.AddSingleton<OccurrenceService>();
 builder.Services.AddSingleton<SummaryService>();
 builder.Services.AddSingleton<BudgetService>();
 builder.Services.AddSingleton<WeekService>();
+builder.Services.AddSingleton<PlanService>();
+builder.Services.AddSingleton<FridayService>();
 builder.Services.AddSingleton<GoalService>();
 builder.Services.AddSingleton<ActivityService>();
 builder.Services.AddSingleton<PasskeyService>();

@@ -167,4 +167,32 @@ public static class SchedulerRules
     public static string WeekSummaryTag(WeekSummaryKind kind) => kind == WeekSummaryKind.Ahead ? "week-ahead" : "week-left";
 
     public const string WeekLink = "/week";
+
+    // ---------------------------------------------------------------------------------------------
+    // v7: the payday push
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>Push tag of the payday push (one per pay week; a later push replaces an earlier one on the device).</summary>
+    public const string PaydayTag = "payday";
+
+    /// <summary>
+    /// "Payday · move $253.17 to savings · fun money $40.00" (values only). A frozen sweep of zero says "nothing to move to savings" (the negative leftover is shown in the app);
+    /// without a frozen sweep the part is dropped; fun money gets " sent ✓" once every fun transfer of the checklist is paid and is dropped
+    /// when there is none.
+    /// </summary>
+    public static string PaydayBody(long? sweepPlannedCents, long funCents, bool funSent, string currency)
+    {
+        var parts = new List<string> { "Payday" };
+        if (sweepPlannedCents is { } planned)
+        {
+            parts.Add(planned > 0 ? $"move {Money.Format(planned, currency)} to savings" : "nothing to move to savings");
+        }
+
+        if (funCents > 0)
+        {
+            parts.Add($"fun money {Money.Format(funCents, currency)}{(funSent ? " sent ✓" : "")}");
+        }
+
+        return string.Join(" · ", parts);
+    }
 }

@@ -30,7 +30,8 @@ public sealed record HouseholdSettingsRequest(
     Optional<DateOnly?> PayAnchorDate,
     Optional<long?> WeeklySpendCents,
     Optional<bool?> AutoIgnoreTransfers,
-    Optional<AutoMatchLevel?> AutoMatchLevel);
+    Optional<AutoMatchLevel?> AutoMatchLevel,
+    Optional<int?> PaydayWeekday);
 
 public sealed record AccountRequest(
     string Name,
@@ -59,7 +60,9 @@ public sealed record RecurringRequest(
     string? Url,
     string? PayeeHint,
     string[]? BankNames = null,
-    bool? AmountVaries = null);
+    bool? AmountVaries = null,
+    Guid? FromAccountId = null,
+    Guid? ToAccountId = null);
 
 public sealed record MarkPaidRequest(long? AmountCents);
 
@@ -156,3 +159,16 @@ public sealed record LinkTransactionRequest(Guid? TransactionId);
 
 /// <summary><c>POST /v1/bill-suggestions/{id}/accept</c>: every field overrides what was detected.</summary>
 public sealed record BillSuggestionAcceptRequest(string? Name, Kind? Kind, long? AmountCents, Frequency? Frequency, DateOnly? NextDue);
+
+// ---------------------------------------------------------------------------------------------
+// v7
+// ---------------------------------------------------------------------------------------------
+
+/// <summary><c>PUT /v1/accounts/{id}/role</c>. <paramref name="OwnerUserId"/> must be a household member (null = no owner).</summary>
+public sealed record AccountRoleRequest(AccountRole? Role, Guid? OwnerUserId);
+
+/// <summary><c>POST /v1/recurring/bulk</c>: 1–100 items, all validated before anything is written.</summary>
+public sealed record RecurringBulkRequest(RecurringRequest[]? Items);
+
+/// <summary><c>POST /v1/plan/sweep/done</c> (<paramref name="ActualCents"/> defaults to the planned amount) and <c>DELETE</c> (weekStart only).</summary>
+public sealed record SweepDoneRequest(DateOnly? WeekStart, long? ActualCents);
