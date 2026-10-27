@@ -208,6 +208,59 @@ public class V7Tests
     }
 
     [Fact]
+    public void The_week_as_a_ledger_adds_up_from_the_start_of_the_week_to_available_now()
+    {
+        // Tuesday Nov 3 of the pay week Fri Oct 30 … Thu Nov 5. Paid so far: paycheck and Netflix on Friday, groceries Monday (pending),
+        // a pending charge the bank dated Saturday ahead. Still to come: rent (Sun, unpaid → overdue), phone, internet, fun, oil change.
+        var today = D(2026, 11, 3);
+        var items = new Dictionary<Guid, (string, Kind, Frequency)>
+        {
+            [Id(4)] = ("Netflix", Kind.Subscription, Frequency.Monthly),
+            [Id(10)] = ("Paycheck", Kind.Income, Frequency.Weekly),
+        };
+        LedgerTransaction Tx(int n, DateOnly on, long cents, string name, bool pending = false, int? item = null, DateOnly? due = null) =>
+            new(Id(100 + n), on, cents, name, pending, false, item is { } i ? Id(i) : null, due);
+        var txs = new[]
+        {
+            Tx(1, D(2026, 10, 30), 150_000, "ACME PAYROLL", item: 10, due: D(2026, 10, 30)),
+            Tx(2, D(2026, 10, 30), -1_549, "NETFLIX.COM", item: 4, due: D(2026, 10, 30)),
+            Tx(3, D(2026, 11, 2), -8_412, "HY-VEE", pending: true),
+            Tx(4, D(2026, 11, 7), -500, "PARKING", pending: true), // dated ahead by the bank: listed today
+            Tx(5, D(2026, 10, 29), -999, "LAST WEEK"),                // before the week: not in it
+        };
+        var available = 234_567L;
+        var classified = Week.Select(o => (o, PlanEngine.Classify(o, UsBank, Roles))).ToList();
+        var ledger = PlanLedger.Build(PayWeek, today, available, txs, classified, items);
+
+        Assert.Equal(available - (150_000 - 1_549 - 8_412 - 500), ledger.StartCents);
+        Assert.Equal(available, ledger.StartCents + ledger.Days.SelectMany(d => d.Entries).Sum(e => e.AmountCents));
+        Assert.Equal([D(2026, 10, 30), D(2026, 10, 31), D(2026, 11, 1), D(2026, 11, 2), D(2026, 11, 3)], ledger.Days.Select(d => d.Date));
+
+        // a matched row shows as its item, once; an unmatched one as itself
+        var friday = ledger.Days[0].Entries;
+        Assert.Equal([("Paycheck", "income"), ("Netflix", "subscription")], friday.Select(e => (e.Name, e.Kind)).OrderBy(x => x.Kind));
+        Assert.Equal(("HY-VEE", "transaction", true), (ledger.Days[3].Entries[0].Name, ledger.Days[3].Entries[0].Kind, ledger.Days[3].Entries[0].Pending));
+        Assert.Equal("PARKING", Assert.Single(ledger.Days[4].Entries).Name);
+        Assert.Empty(ledger.Days[1].Entries);
+
+        // still to come: what the bank has not paid, by due date (Netflix and this payday's paycheck are paid; next week's are not in it)
+        Assert.Equal([Id(7), Id(8), Id(9), Id(1), Id(2), Id(3)], ledger.Upcoming.Select(o => o.ItemId));
+        Assert.DoesNotContain(ledger.Upcoming, o => o.ItemId == Id(4) || o.Kind == Kind.Income);
+
+        // the projected savings is start − what moved − what is still to come, the same number as before
+        var left = PlanEngine.Totals(PayWeek, available, Week, UsBank, Roles).LeftAtEndCents;
+        Assert.Equal(left, ledger.AvailableCents - ledger.Upcoming.Sum(o => o.AmountCents));
+    }
+
+    [Fact]
+    public void Projected_amount_in_savings_adds_this_weeks_savings_until_it_moves()
+    {
+        Assert.Equal(500_000 - 31_200 + 25_317, PlanLedger.ProjectedSavings(500_000, 31_200, 25_317, sweepDone: false));
+        Assert.Equal(500_000, PlanLedger.ProjectedSavings(500_000, 0, 25_317, sweepDone: true)); // already in the balance
+        Assert.Equal(500_000, PlanLedger.ProjectedSavings(500_000, 0, -4_210, sweepDone: false)); // a negative week moves nothing
+    }
+
+    [Fact]
     public void Her_note_without_the_bank_available_balance()
     {
         // Balance $2,408.07 − pending $62.40 → the same $2,345.67 → the same $253.17.

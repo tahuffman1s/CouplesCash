@@ -27,6 +27,7 @@
 <li
 	class="flex min-h-12 items-center gap-2 py-1.5"
 	data-testid="plan-line"
+	data-kind={line.kind}
 	data-status={status.toLowerCase()}
 >
 	{#if tickable}

@@ -47,8 +47,10 @@ test('a transaction added by hand counts until the bank shows it, then the bank 
 	await expect(page.getByTestId('pending-subline')).toHaveText(
 		'after 3 pending · −$62.40 · 1 you added −$4.25'
 	);
-	await page.getByTestId('plan-row-available').locator('summary').click();
-	await expect(page.getByTestId('pending-added')).toHaveCount(1);
+	// … and it is a line of today in the ledger, marked as added by you
+	await expect(
+		page.getByTestId('ledger-day').last().getByTestId('ledger-entry').filter({ hasText: 'Coffee' })
+	).toContainText('added by you');
 
 	// the bank already shows a Starbucks −$6.50 today: it asks first, "Add anyway" stores it
 	await addTransaction(page, { amount: '-6.50', description: 'Starbucks' });
@@ -98,7 +100,9 @@ test('a transaction added by hand can pay a bill, so it is counted once', async 
 	await addBill(page, { name: 'Water', amount: '61.37', firstDue: today });
 	await setupHousehold(page, { payday: weekdayOf(today) });
 	const left = page.getByTestId('left-on');
-	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$61.37');
+	const stillToCome = () =>
+		page.getByTestId('ledger-upcoming').getByTestId('plan-line').filter({ hasText: 'Water' });
+	await expect(stillToCome()).toHaveCount(1);
 	const before = cents(await left.textContent());
 
 	// paid this morning, added by hand: until it is linked the bill is counted too
@@ -117,9 +121,14 @@ test('a transaction added by hand can pay a bill, so it is counted once', async 
 	await expect(row()).toContainText('Water · added');
 	await page.goto('/week');
 	await expect(left).toHaveText(usd(before));
-	// still one of the week's bills, and added back on top of the balance it already left
-	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$61.37');
-	await expect(page.getByTestId('plan-amount-paid')).toHaveText('+$61.37');
+	// today's ledger shows it once, as the bill it paid; it is no longer still to come
+	const todays = page.getByTestId('ledger-day').last().getByTestId('ledger-entry');
+	await expect(todays.filter({ hasText: 'City water' })).toHaveCount(0);
+	await expect(todays.filter({ hasText: 'Water' })).toContainText('Bill paid');
+	await expect(todays.filter({ hasText: 'Water' }).getByTestId('ledger-entry-amount')).toHaveText(
+		'−$61.37'
+	);
+	await expect(stillToCome()).toHaveCount(0);
 
 	// unlink: the bill is unpaid again (and counted again)
 	await page.goto('/transactions');
@@ -140,7 +149,7 @@ test('a transaction added by hand can pay a bill, so it is counted once', async 
 	await expect(page.getByText('Removed City water')).toBeVisible();
 	await page.goto('/week');
 	await expect(left).toHaveText(usd(before));
-	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$61.37');
+	await expect(stillToCome()).toHaveCount(1);
 });
 
 test('the bill tab still adds bills and one-offs from a sentence', async ({ page }) => {

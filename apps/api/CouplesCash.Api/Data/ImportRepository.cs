@@ -572,6 +572,18 @@ public sealed class ImportRepository(NpgsqlDataSource db)
         return rows.ToList();
     }
 
+    /// <summary>
+    /// v7 plan ledger: every row on <paramref name="accountId"/> dated on or after <paramref name="from"/> that moved its balance — any status,
+    /// pending, added by hand, transfers — except dropped / superseded ones.
+    /// </summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListAccountRowsSinceAsync(NpgsqlConnection conn, Guid householdId, Guid accountId, DateOnly from, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"{Select} WHERE t.household_id = @HouseholdId AND t.account_id = @AccountId AND t.posted_on >= @From AND {NotHidden} ORDER BY t.posted_on, t.id",
+            new { HouseholdId = householdId, AccountId = accountId, From = from }, ct));
+        return rows.ToList();
+    }
+
     /// <summary>Rows confirmed against any occurrence of <paramref name="itemId"/> (bill payments view).</summary>
     public async Task<IReadOnlyList<ImportedTransactionRow>> ListConfirmedForItemAsync(NpgsqlConnection conn, Guid householdId, Guid itemId, CancellationToken ct)
     {

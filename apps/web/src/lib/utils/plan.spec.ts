@@ -28,7 +28,9 @@ import {
 	shortDay,
 	sweepState,
 	sweepText,
-	weekdayName
+	weekdayName,
+	upcomingCents,
+	upcomingGroups
 } from './plan.ts';
 
 const occ = (over: Partial<Occurrence> = {}): Occurrence => ({
@@ -439,5 +441,40 @@ describe('checklistText', () => {
 			showAmount: true
 		});
 		expect(checklistText({ key: 'fun', label: '', amountCents: 1 }).text).toBe('Fun money');
+	});
+});
+
+describe('ledger: still to come', () => {
+	const upcoming = (name: string, dueDate: string, kind = 'bill', amountCents = 1000) =>
+		({ kind, occurrence: { name, dueDate, kind, amountCents, paid: null } }) as unknown as PlanLine;
+
+	it('groups what the bank has not paid: before today, still due today, then every later day', () => {
+		const groups = upcomingGroups(
+			[
+				upcoming('Rent', '2026-10-24'),
+				upcoming('Gas', '2026-10-27'),
+				upcoming('Inositol', '2026-10-29')
+			],
+			'2026-10-27',
+			'2026-10-29'
+		);
+		expect(groups.map((g) => [g.key, g.label, g.lines.map((l) => l.occurrence.name)])).toEqual([
+			['before', 'Not through the bank yet', ['Rent']],
+			['2026-10-27', 'Still due today', ['Gas']],
+			['2026-10-28', 'Wed Oct 28', []],
+			['2026-10-29', 'Thu Oct 29', ['Inositol']]
+		]);
+	});
+
+	it('leaves out an empty today and sums money out minus money in', () => {
+		const lines = [
+			upcoming('Gas', '2026-10-29', 'bill', 3222),
+			upcoming('Paycheck', '2026-10-29', 'income', 245000)
+		];
+		expect(upcomingGroups(lines, '2026-10-27', '2026-10-29').map((g) => g.key)).toEqual([
+			'2026-10-28',
+			'2026-10-29'
+		]);
+		expect(upcomingCents(lines)).toBe(245000 - 3222);
 	});
 });

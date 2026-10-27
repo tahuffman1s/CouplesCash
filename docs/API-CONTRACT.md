@@ -844,9 +844,14 @@ type Plan = {
   incomeInCents: number;         // income still to come this week
   paidThisWeekCents: number;     // what the bank already paid for this week's bills / fun / one-offs (added back)
   leftAtEndCents: number;        // "Projected Savings Amount": available + paidThisWeek − bills − fun − one-offs + incomeIn
+  ledger: PlanLedger | null;     // the current week as a ledger (null for other weeks and before setup)
   savingsBills: PlanLine[];      // e.g. student loans from savings — shown, not in the math
   checklist: ChecklistItem[];    // payday only (empty otherwise): paycheck and fun money
   sweep: Sweep | null; toReviewCount: number; setup: { banksLinked: boolean; rolesSet: boolean; paycheckKnown: boolean; billsAdded: boolean; partnerJoined: boolean } };
+type PlanLedger = { startCents: number; days: { date: string; entries: PlanLedgerEntry[] }[]; availableCents: number;
+  upcoming: PlanLine[]; projectedSavingsBalanceCents: number | null };
+type PlanLedgerEntry = { transactionId: string; kind: 'transaction' | 'bill' | 'subscription' | 'income' | 'transfer' | 'oneoff';
+  name: string; amountCents: number /* signed */; pending: boolean; added: boolean; itemId: string | null; dueDate: string | null };
 ```
 
 | Method | Route | Body / Query | Response |
@@ -963,7 +968,13 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   (`paid.source = 'bank'`) counts at the bank's amount, and since that money already left `available` it is added back as
   `paidThisWeekCents`; a line ticked by hand or by autopay counts at its planned amount and its money is still in `available`. So a tick never
   moves `leftAtEndCents` (only the bank does, by the paid − planned difference). `billsOutCents` / `funOutCents` / `oneOffOutCents` are those
-  sums, `incomeInCents` the income not received yet;
+  sums, `incomeInCents` the income not received yet. **`ledger`** (current week with a bills account): `startCents` = available − every
+  bills-account row dated on or after payday that is not dropped / superseded (any status: pending, added by hand, transfers), so start +
+  every day = available; `days` = payday … today, each with its rows (a row dated after today is listed under today; a row matched to an
+  item — bill, subscription, planned transfer, income — is that item, named after it, never twice); `upcoming` = the week's bill / fun /
+  one-off lines the bank has not paid (ticked by hand or not) and income not received yet, by due date, so
+  `leftAtEndCents = availableCents − upcoming out + upcoming income`; `projectedSavingsBalanceCents` = the savings accounts' balance −
+  their bills still due this week + max(0, `leftAtEndCents`) until this week's sweep is done (null without a savings account);
   **`leftAtEndCents = available + paidThisWeek − billsOut − funOut − oneOffOut + incomeIn`** (shown as "Projected Savings Amount") where unpaid income counts only
   when due inside the pay week (≤ end = the day before the next payday): the next payday's paycheck belongs to the new week, and this
   week's paycheck, once it posts, is paid and already in available — it is never added twice. For a past week `leftAtEndCents` is the

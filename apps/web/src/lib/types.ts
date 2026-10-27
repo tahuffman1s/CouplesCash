@@ -812,6 +812,8 @@ export type Plan = {
 	paidThisWeekCents?: number;
 	/** projected savings: available + paidThisWeek − bills − fun − one-offs + income still to come */
 	leftAtEndCents: number;
+	/** the current week as a ledger (null for other weeks, before setup, or from an older API) */
+	ledger?: PlanLedger | null;
 	/** e.g. student loans from savings: shown, not in the math */
 	savingsBills: PlanLine[];
 	/** payday only (empty otherwise): paycheck and fun money */
@@ -820,6 +822,30 @@ export type Plan = {
 	sweep: Sweep | null;
 	toReviewCount: number;
 	setup: PlanSetup;
+};
+/** A bills-account transaction of the week, or (itemId set) the bill / transfer / income it paid. */
+export type PlanLedgerEntry = {
+	transactionId: string;
+	kind: 'transaction' | 'bill' | 'subscription' | 'income' | 'transfer' | 'oneoff';
+	name: string;
+	/** signed: money out negative */
+	amountCents: number;
+	pending: boolean;
+	added: boolean;
+	itemId: string | null;
+	dueDate: string | null;
+};
+export type PlanLedgerDay = { date: string; entries: PlanLedgerEntry[] };
+export type PlanLedger = {
+	/** available now minus everything that went through the bills account since payday */
+	startCents: number;
+	/** payday … today */
+	days: PlanLedgerDay[];
+	availableCents: number;
+	/** plan lines the bank has not paid yet, by due date */
+	upcoming: PlanLine[];
+	/** savings balance − savings bills still due + this week's projected savings until it moves; null without a savings account */
+	projectedSavingsBalanceCents: number | null;
 };
 export const ROLE_LABEL: Record<AccountRole, string> = {
 	bills: 'Bills',

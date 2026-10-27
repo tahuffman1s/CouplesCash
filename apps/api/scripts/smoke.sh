@@ -851,6 +851,8 @@ v7_friday_flow() {
   v7check "payday checklist: paycheck ✓ (auto, its transaction), two \$20 fun transfers open" \
     '([.checklist[] | select(.key=="paycheck")][0] | .done==true and .auto==true and .transactionId!=null and .amountCents==150000) and ([.checklist[] | select(.key=="fun" and .done==false and .amountCents==2000)] | length==2)'
 
+  v7check "ledger: start of the week + every day so far = available; still to come = what is left to pay; projected = available − still to come" \
+    '(.ledger.startCents + ([.ledger.days[].entries[].amountCents] | add // 0)) == .ledger.availableCents and .ledger.availableCents == .billsAccount.availableCents and (.ledger.days[0].date == .start) and (.ledger.availableCents - ([.ledger.upcoming[] | if .occurrence.kind == "income" then -.occurrence.amountCents else .occurrence.amountCents end] | add // 0)) == .leftAtEndCents'
   v7check "payday: no savings move (it is the bottom line on the last day of the week), nothing taken out of the plan" \
     '.sweep==null and ([.checklist[] | select(.key=="sweep")] | length==0) and .leftAtEndCents==25317'
 

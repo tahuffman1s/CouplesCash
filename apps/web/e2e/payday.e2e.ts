@@ -45,7 +45,11 @@ test('payday: Done by hand, then the bank ticks the paycheck and fun money', asy
 	await expect(item('paycheck')).toHaveAttribute('data-done', 'false');
 
 	// the bank sends every fun transfer planned this pay week (the $150s too in a week with a 1st)
-	const funCount = await page.getByTestId('plan-row-fun').getByTestId('plan-line').count();
+	const funCount = await page
+		.getByTestId('ledger-upcoming')
+		.locator('[data-testid="plan-line"][data-kind="transfer"]')
+		.count();
+	expect(funCount).toBeGreaterThan(0);
 	// the payday transactions arrive: every line ticks itself ("auto"), the card folds away
 	await bankSync(page, email, 'payday');
 	await page.reload();
@@ -57,23 +61,23 @@ test('payday: Done by hand, then the bank ticks the paycheck and fun money', asy
 		await expect(row).toHaveAttribute('data-done', 'true');
 	await expect(done.getByTestId('checklist-auto').first()).toBeVisible();
 
-	// the fun money in the plan is paid, and the transfers left To review
-	const funRow = page.getByTestId('plan-row-fun');
-	await funRow.locator('summary').click();
-	for (const s of await funRow.getByTestId('plan-status').all())
-		await expect(s).toContainText('Paid · auto');
-	// … and still counted in the plan (every line of the week counts), added back as already paid
-	const funText = (await page.getByTestId('plan-amount-fun').textContent())!.trim();
-	expect(funText.startsWith('−')).toBe(true);
-	await expect(page.getByTestId('plan-amount-paid')).toHaveText(funText.replace('−', '+'));
+	// the fun money is paid by the bank: today's ledger shows each transfer once, as the fun money
+	// it paid, and none is still to come
+	const todays = page.getByTestId('ledger-day').last();
+	await expect(todays.locator('[data-testid="ledger-entry"][data-kind="transfer"]')).toHaveCount(
+		funCount
+	);
+	await expect(todays.getByTestId('ledger-entry').filter({ hasText: 'Fun money' })).toHaveCount(
+		funCount
+	);
+	await expect(
+		page.getByTestId('ledger-upcoming').locator('[data-testid="plan-line"][data-kind="transfer"]')
+	).toHaveCount(0);
 
 	// every pending row is listed: the 3 card holds plus today's still-pending fun transfers,
 	// in the plan (the "after N pending" line and its list) and in Transactions → Pending
 	const pending = 3 + funCount;
 	await expect(page.getByTestId('pending-subline')).toContainText(`after ${pending} pending`);
-	await page.getByTestId('plan-row-available').locator('summary').click();
-	await expect(page.getByTestId('plan-pending').locator('li')).toHaveCount(pending);
-	await expect(page.getByTestId('plan-pending')).toContainText('ONLINE TRANSFER TO ALLY');
 	await page.goto('/transactions');
 	await expect(page.getByTestId('pending-count')).toHaveText(String(pending));
 	await expect(page.getByTestId('pending-section').getByTestId('tx-row')).toHaveCount(pending);

@@ -3392,6 +3392,71 @@ function planFor(hh: string, date: string) {
 		sweep.plannedCents = Math.max(0, leftAtEndCents);
 	}
 	if (end < today && sweep) leftAtEndCents = sweep.leftCents;
+
+	// v7 the current week as a ledger: start (worked back from available), each day through today, then what is still to come
+	let ledger = null;
+	if (isCurrent && bills) {
+		const moved = [...txs.values()].filter(
+			(t) => t.householdId === hh && t.accountId === bills.id && !isHidden(t) && t.postedOn >= start
+		);
+		const paidByTx = new Map<string, { itemId: string; dueDate: string }>();
+		for (const [key, p] of payments)
+			if (p.txId) {
+				const [itemId, dueDate] = key.split(':');
+				paidByTx.set(p.txId, { itemId, dueDate });
+			}
+		const entry = (t: Tx) => {
+			const match =
+				t.confirmed?.itemId && t.confirmed.dueDate
+					? { itemId: t.confirmed.itemId, dueDate: t.confirmed.dueDate }
+					: paidByTx.get(t.id);
+			const item = match ? items.get(match.itemId) : undefined;
+			return {
+				transactionId: t.id,
+				kind: item
+					? item.frequency === 'once' && item.kind !== 'income'
+						? 'oneoff'
+						: item.kind
+					: 'transaction',
+				name: item?.name ?? (t.payee || t.description),
+				amountCents: t.amountCents,
+				pending: t.pending,
+				added: t.source === 'added',
+				itemId: item ? match!.itemId : null,
+				dueDate: item ? match!.dueDate : null
+			};
+		};
+		const days: { date: string; entries: ReturnType<typeof entry>[] }[] = [];
+		for (let d = start; d <= today; d = addDaysIso(d, 1)) {
+			const day = d;
+			days.push({
+				date: day,
+				entries: moved
+					.filter((t) => (t.postedOn < today ? t.postedOn : today) === day)
+					.sort(
+						(a, b) => a.postedOn.localeCompare(b.postedOn) || Number(a.pending) - Number(b.pending)
+					)
+					.map(entry)
+			});
+		}
+		const savings = mine.filter((a) => a.role === 'savings');
+		const savingsDue = lines.savingsBills
+			.filter((l) => !fromBank(l))
+			.reduce((s, l) => s + l.occurrence.amountCents, 0);
+		ledger = {
+			startCents: available - moved.reduce((s, t) => s + t.amountCents, 0),
+			days,
+			availableCents: available,
+			upcoming: [...lines.bills, ...lines.funMoney, ...lines.oneOffs, ...lines.income]
+				.filter((l) => !fromBank(l))
+				.sort((a, b) => a.occurrence.dueDate.localeCompare(b.occurrence.dueDate)),
+			projectedSavingsBalanceCents: savings.length
+				? savings.reduce((s, a) => s + a.balanceCents, 0) -
+					savingsDue +
+					(sweep?.doneAt ? 0 : Math.max(0, leftAtEndCents))
+				: null
+		};
+	}
 	const checklist: {
 		key: string;
 		label: string;
@@ -3462,6 +3527,7 @@ function planFor(hh: string, date: string) {
 		incomeInCents,
 		paidThisWeekCents,
 		leftAtEndCents,
+		ledger,
 		checklist,
 		sweep: sweep ? sweepView(sweep) : null,
 		toReviewCount: [...txs.values()].filter(

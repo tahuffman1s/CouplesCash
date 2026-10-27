@@ -30,6 +30,11 @@ The week runs **payday → the day before the next payday** (Fri → Thu for the
 Paycheck = the household's income item (weekly); detected automatically from deposits (found bills) if missing.
 
 ## The Friday plan (the home screen, `/week`)
+**The current week reads as a ledger** (v7.1), top to bottom: *Start of the week* (payday; worked back from available now), each day
+from payday through today with what went through the bills account (a transaction that paid a bill shows as that bill, once; pending and
+added-by-you marked), **today highlighted**, *available now* set apart in a box, then every day left in the week with its bills still to
+come (anything due earlier and not through the bank yet first), the green **Projected Savings Amount** (start + what moved − what is to
+come) and **Projected Amount in Savings** (savings balance + this week's projected savings until it moves). Other weeks keep the receipt below.
 Reads top-to-bottom like her note, every line tappable to expand:
 ```
 US Bank, available now             $2,345.67   ← bank available balance (already after pending)

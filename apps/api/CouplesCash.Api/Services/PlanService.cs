@@ -200,6 +200,34 @@ public sealed class PlanService(
             }
         }
 
+        PlanLedgerDto? ledger = null;
+        if (isCurrent && c.BillsAccount is { } ledgerAccount)
+        {
+            var rows = await imports.ListAccountRowsSinceAsync(conn, householdId, ledgerAccount.Id, week.Start, ct);
+            var itemsById = c.Items.ToDictionary(i => i.Id, i => (i.Name, i.Kind, i.Frequency));
+            var built = PlanLedger.Build(week, today, available,
+                rows.Select(r => new LedgerTransaction(r.Id, r.PostedOn, r.AmountCents, string.IsNullOrWhiteSpace(r.Payee) ? r.Description : r.Payee,
+                    r.Pending, r.Source == ImportRepository.AddedSource, r.ConfirmedItemId, r.ConfirmedDueDate)),
+                lines.Select(l => (l.Plan, l.Bucket)), itemsById);
+            var dtoByKey = lines.ToDictionary(l => (l.Dto.ItemId, l.Dto.DueDate), l => new PlanLineDto(PlanEngine.LineKind(l.Bucket, l.Dto.Kind), l.Dto));
+
+            var savings = c.Accounts.Where(a => a.Role == AccountRole.Savings).ToList();
+            long? savingsProjected = null;
+            if (savings.Count > 0)
+            {
+                var savingsBillsDue = lines.Where(l => l.Bucket == PlanBucket.SavingsBill && !l.Plan.PaidFromBank && week.Contains(l.Plan.DueDate)).Sum(l => l.Plan.AmountCents);
+                savingsProjected = PlanLedger.ProjectedSavings(savings.Sum(a => a.BalanceCents), savingsBillsDue, left, sweep is { IsDone: true });
+            }
+
+            ledger = new PlanLedgerDto(
+                built.StartCents,
+                built.Days.Select(d => new PlanLedgerDayDto(d.Date, d.Entries
+                    .Select(e => new PlanLedgerEntryDto(e.TransactionId, e.Kind, e.Name, e.AmountCents, e.Pending, e.Added, e.ItemId, e.DueDate)).ToList())).ToList(),
+                built.AvailableCents,
+                built.Upcoming.Select(o => dtoByKey[(o.ItemId, o.DueDate)]).ToList(),
+                savingsProjected);
+        }
+
         var (_, linkCount) = await banks.SyncSummaryAsync(householdId, ct);
         var members = await households.MemberCountAsync(householdId, ct);
         var setup = new PlanSetupDto(
@@ -238,7 +266,8 @@ public sealed class PlanService(
             Sweep: sweep?.ToDto(),
             ToReviewCount: await imports.CountPendingAsync(conn, householdId, ct),
             Setup: setup,
-            PaidThisWeekCents: totals.PaidThisWeekCents);
+            PaidThisWeekCents: totals.PaidThisWeekCents,
+            Ledger: ledger);
     }
 }
 

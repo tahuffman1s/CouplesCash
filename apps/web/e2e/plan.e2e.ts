@@ -54,28 +54,39 @@ test('the plan reads like her note and its math follows bills paid and one-offs 
 	await expect(page.getByTestId('week-label')).toHaveText(
 		/^Fri \w{3} \d{1,2} – Thu \w{3} \d{1,2}$/
 	);
-	await expect(receipt.getByTestId('plan-row-available')).toContainText('U.S. Bank, available now');
+	// the current week is a ledger: start of the week, payday … today (today highlighted), available now, what is still to come
+	const ledger = receipt.getByTestId('plan-ledger');
+	await expect(ledger.getByTestId('ledger-start')).toContainText('Start of the week');
+	const days = ledger.getByTestId('ledger-day');
+	await expect(days).toHaveCount(
+		Math.round((Date.parse(today) - Date.parse(start)) / 86400000) + 1
+	);
+	await expect(days.first()).toHaveAttribute('data-date', start);
+	await expect(days.last()).toHaveAttribute('data-today', 'true');
+	await expect(days.last()).toContainText('Today ·');
+	await expect(ledger.getByTestId('ledger-available')).toContainText('U.S. Bank, available now');
 	await expect(page.getByTestId('plan-amount-available')).toHaveText('$2,345.67');
 	await expect(page.getByTestId('pending-subline')).toHaveText('after 3 pending · −$62.40');
-	await expect(receipt.getByTestId('plan-row-bills')).toContainText('Bills before next Friday');
-	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$60.00');
-	await expect(page.getByTestId('plan-amount-fun')).toHaveText(`−${usd(fun)}`);
+	// still to come: Water today, the paycheck and fun money (due on payday); next Friday's rent is not in this week
+	const upcoming = ledger.getByTestId('ledger-upcoming');
+	const water = upcoming.getByTestId('plan-line').filter({ hasText: 'Water' });
+	await expect(water).toHaveCount(1);
+	await expect(
+		upcoming.filter({ has: page.getByTestId('plan-line').filter({ hasText: 'Water' }) })
+	).toHaveAttribute('data-date', today);
+	await expect(ledger).not.toContainText('Rent');
+	await expect(upcoming.last()).toHaveAttribute('data-date', shiftDays(start, 6));
 	await expect(page.getByTestId('projected')).toContainText('Projected Savings Amount');
 	await expect(page.getByTestId('projected')).toHaveClass(/bg-success/);
 	await expect(receipt).toContainText('Left on Thursday');
-	// nothing paid by the bank yet: no "already paid" line
-	await expect(receipt.getByTestId('plan-row-paid')).toHaveCount(0);
+	await expect(page.getByTestId('projected-math')).toContainText('at the start');
+	await expect(page.getByTestId('projected-math')).toContainText('still to come');
+	// under it, where savings will be once this week's projected savings moves
+	await expect(page.getByTestId('projected-savings-balance')).toContainText(
+		'Projected Amount in Savings'
+	);
 	await expect(page.getByTestId('left-on')).toHaveText(usd(left));
 	await expect(page.getByTestId('review-line')).toContainText('to review');
-
-	// expanding a line lists what's in it; the pending list explains itself
-	await receipt.getByTestId('plan-row-available').locator('summary').click();
-	await expect(receipt.getByTestId('plan-pending').locator('li')).toHaveCount(3);
-	const bills = receipt.getByTestId('plan-row-bills');
-	await bills.locator('summary').click();
-	await expect(bills.getByTestId('plan-line')).toHaveCount(1);
-	await expect(bills.getByTestId('plan-line')).toContainText('Water');
-	await expect(bills.getByTestId('plan-line')).not.toContainText('Rent');
 
 	// Copy puts the number she writes down on the clipboard
 	await hydrated(page);
@@ -83,17 +94,16 @@ test('the plan reads like her note and its math follows bills paid and one-offs 
 	await expect(page.getByText(`Copied ${(left / 100).toFixed(2)}`)).toBeVisible();
 	expect(await page.evaluate(() => navigator.clipboard.readText())).toBe((left / 100).toFixed(2));
 
-	// a bill ticked by hand: the money is still in the account until the bank shows it, so the
-	// number she writes down does not move (it never jumps up)
-	await bills.getByRole('button', { name: 'Mark Water paid' }).click();
-	await expect(bills.getByTestId('plan-status')).toHaveText('Paid · waiting for the bank');
+	// a bill ticked by hand: the money is still in the account until the bank shows it, so it stays
+	// still to come and the number she writes down does not move (it never jumps up)
+	await water.getByRole('button', { name: 'Mark Water paid' }).click();
+	await expect(water.getByTestId('plan-status')).toHaveText('Paid · waiting for the bank');
 	await expect(page.getByTestId('left-on')).toHaveText(usd(left));
-	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$60.00');
 
 	// a one-off from one sentence joins it
 	await quickAdd(page, 'oil change 60 today');
 	left -= 6000;
-	await expect(page.getByTestId('plan-amount-oneoffs')).toHaveText('−$60.00');
+	await expect(upcoming.getByTestId('plan-line').filter({ hasText: /oil change/i })).toHaveCount(1);
 	await expect(page.getByTestId('left-on')).toHaveText(usd(left));
 
 	// next week: the arrows move a pay week at a time

@@ -379,6 +379,14 @@ public class V7DbTests
             Assert.Null(await Match(paid.Id, netflix));
             var plan = await Plan();
             Assert.Equal((1_549L + 4_000, 1_549L, before.LeftAtEndCents), (plan.BillsOutCents, plan.PaidThisWeekCents, plan.LeftAtEndCents));
+
+            // The ledger: the added row shows once, as the bill it paid, today; the days add up to available; the gym is still to come.
+            var ledger = plan.Ledger!;
+            Assert.Equal(ledger.AvailableCents, ledger.StartCents + ledger.Days.SelectMany(d => d.Entries).Sum(e => e.AmountCents));
+            var netflixEntry = Assert.Single(ledger.Days.Single(d => d.Date == today).Entries, e => e.ItemId == netflix.Id);
+            Assert.Equal(("Netflix", "subscription", -1_549L, true), (netflixEntry.Name, netflixEntry.Kind, netflixEntry.AmountCents, netflixEntry.Added));
+            Assert.Equal([gym.Id], ledger.Upcoming.Select(l => l.Occurrence.ItemId));
+            Assert.Equal(plan.LeftAtEndCents, ledger.AvailableCents - ledger.Upcoming.Sum(l => l.Occurrence.AmountCents));
             Assert.Equal(PaymentSource.Bank, (await Payment(netflix.Id))!.Source);
             var linked = (await imports.GetAsync(householdId, paid.Id, ct))!;
             Assert.Equal(("added", "confirmed", (Guid?)netflix.Id), (linked.Source, linked.Status, linked.ConfirmedItemId));

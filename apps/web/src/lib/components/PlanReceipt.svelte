@@ -3,6 +3,7 @@
 	import type { Plan } from '#lib/types.ts';
 	import CopyButton from './CopyButton.svelte';
 	import Icon from './Icon.svelte';
+	import PlanLedgerView from './PlanLedgerView.svelte';
 	import PlanLineRow from './PlanLineRow.svelte';
 	import { formatDate } from '#lib/utils/dates.ts';
 	import { formatMoney, signedMoney } from '#lib/utils/money.ts';
@@ -13,7 +14,8 @@
 		pendingLine,
 		receiptLines,
 		savingsNote,
-		sweepState
+		sweepState,
+		upcomingCents
 	} from '#lib/utils/plan.ts';
 
 	/**
@@ -21,7 +23,8 @@
 	 * every line expands (pending, each bill with its tick, fun money per person, one-offs), and
 	 * the green hero "= Projected Savings Amount" (what is left on the week's last day) with Copy. Under it, the bottom line: on Thursday what is left
 	 * moves to savings (Copy / Done; ticks itself when the bank shows it). Savings bills sit under
-	 * it, not in it.
+	 * it, not in it. The current week is a day-by-day ledger instead (PlanLedgerView) with the
+	 * projected amount in savings under the hero.
 	 */
 	let { plan }: { plan: Plan } = $props();
 
@@ -40,6 +43,8 @@
 	const bankAge = $derived(bankDataAge(b.balanceAt));
 	const lines = $derived(receiptLines(plan));
 	const negative = $derived(plan.leftAtEndCents < 0);
+	const ledger = $derived(plan.ledger ?? null);
+	const movedCents = $derived(ledger ? ledger.availableCents - ledger.startCents : 0);
 	const amount = (key: string, cents: number) =>
 		key === 'available' ? formatMoney(cents) : signedMoney(cents);
 	const emptyText: Record<string, string> = {
@@ -57,89 +62,98 @@
 	data-testid="plan-receipt"
 >
 	<h2 id="plan-h" class="sr-only">This week's calculation</h2>
-	<div class="flex flex-col px-4 pt-2 pb-1">
-		{#each lines as l (l.key)}
-			<details class="group border-b border-dashed border-base-300" data-testid="plan-row-{l.key}">
-				<summary
-					class="flex min-h-14 cursor-pointer list-none items-center gap-2 py-2 [&::-webkit-details-marker]:hidden"
+	{#if ledger}
+		<PlanLedgerView {plan} {ledger} />
+	{:else}
+		<div class="flex flex-col px-4 pt-2 pb-1">
+			{#each lines as l (l.key)}
+				<details
+					class="group border-b border-dashed border-base-300"
+					data-testid="plan-row-{l.key}"
 				>
-					<span class="w-3 shrink-0 font-mono text-base-content/60" aria-hidden="true">{l.op}</span>
-					<span class="min-w-0 flex-1">
-						<span class="block text-sm leading-snug font-medium">{l.label}</span>
-						{#if l.key === 'available'}
-							<span class="block text-xs text-base-content/60" data-testid="pending-subline"
-								>{pendingLine(b)}</span
-							>
-							{#if bankAge?.stale}
-								<span class="block text-xs font-medium text-warning" data-testid="bank-as-of"
-									>{bankAge.label}</span
-								>
-							{/if}
-						{/if}
-					</span>
-					<span
-						class="shrink-0 font-mono text-[0.95rem] font-semibold tabular"
-						data-testid="plan-amount-{l.key}">{amount(l.key, l.cents)}</span
+					<summary
+						class="flex min-h-14 cursor-pointer list-none items-center gap-2 py-2 [&::-webkit-details-marker]:hidden"
 					>
-					<Icon
-						name="chevron-down"
-						size={16}
-						class="shrink-0 text-base-content/35 transition-transform group-open:rotate-180"
-					/>
-				</summary>
-				<div class="pb-3 pl-5">
-					{#if l.key === 'available'}
-						<p class="text-xs text-base-content/65">
-							{#if b.availableFromBank}
-								What your bank says you can spend now. Pending charges are already taken out, so
-								they're listed here, not subtracted again.
-							{:else}
-								Your bank doesn't report an available balance, so this is the balance
-								{formatMoney(b.balanceCents)} minus what's pending.
+						<span class="w-3 shrink-0 font-mono text-base-content/60" aria-hidden="true"
+							>{l.op}</span
+						>
+						<span class="min-w-0 flex-1">
+							<span class="block text-sm leading-snug font-medium">{l.label}</span>
+							{#if l.key === 'available'}
+								<span class="block text-xs text-base-content/60" data-testid="pending-subline"
+									>{pendingLine(b)}</span
+								>
+								{#if bankAge?.stale}
+									<span class="block text-xs font-medium text-warning" data-testid="bank-as-of"
+										>{bankAge.label}</span
+									>
+								{/if}
 							{/if}
-						</p>
-						{#if b.pending.length}
-							<ul class="mt-1 divide-y divide-base-300/60" data-testid="plan-pending">
-								{#each b.pending as t (t.id)}
-									<li class="flex min-h-10 items-center gap-2 py-1 text-sm">
-										<span class="min-w-0 flex-1 truncate"
-											>{t.payee || t.description}{#if t.source === 'added'}<span
-													class="ml-1.5 badge border-0 bg-base-200 px-1.5 badge-xs text-[0.65rem] text-base-content/70"
-													data-testid="pending-added">added by you</span
-												>{/if}</span
-										>
-										<span class="shrink-0 text-xs text-base-content/55"
-											>{formatDate(t.postedOn)}</span
-										>
-										<span class="shrink-0 font-mono tabular">{signedMoney(t.amountCents)}</span>
-									</li>
+						</span>
+						<span
+							class="shrink-0 font-mono text-[0.95rem] font-semibold tabular"
+							data-testid="plan-amount-{l.key}">{amount(l.key, l.cents)}</span
+						>
+						<Icon
+							name="chevron-down"
+							size={16}
+							class="shrink-0 text-base-content/35 transition-transform group-open:rotate-180"
+						/>
+					</summary>
+					<div class="pb-3 pl-5">
+						{#if l.key === 'available'}
+							<p class="text-xs text-base-content/65">
+								{#if b.availableFromBank}
+									What your bank says you can spend now. Pending charges are already taken out, so
+									they're listed here, not subtracted again.
+								{:else}
+									Your bank doesn't report an available balance, so this is the balance
+									{formatMoney(b.balanceCents)} minus what's pending.
+								{/if}
+							</p>
+							{#if b.pending.length}
+								<ul class="mt-1 divide-y divide-base-300/60" data-testid="plan-pending">
+									{#each b.pending as t (t.id)}
+										<li class="flex min-h-10 items-center gap-2 py-1 text-sm">
+											<span class="min-w-0 flex-1 truncate"
+												>{t.payee || t.description}{#if t.source === 'added'}<span
+														class="ml-1.5 badge border-0 bg-base-200 px-1.5 badge-xs text-[0.65rem] text-base-content/70"
+														data-testid="pending-added">added by you</span
+													>{/if}</span
+											>
+											<span class="shrink-0 text-xs text-base-content/55"
+												>{formatDate(t.postedOn)}</span
+											>
+											<span class="shrink-0 font-mono tabular">{signedMoney(t.amountCents)}</span>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						{:else if l.lines.length === 0}
+							<p class="text-xs text-base-content/60">{emptyText[l.key]}</p>
+						{:else}
+							<ul class="divide-y divide-base-300/60">
+								{#each l.lines as pl (`${pl.occurrence.itemId}:${pl.occurrence.dueDate}`)}
+									<PlanLineRow line={pl} today={plan.today} />
 								{/each}
 							</ul>
+							{#if l.key === 'paid'}
+								<p class="mt-1 text-xs text-base-content/55">
+									The bank already took these out of the balance above. They're added back here
+									because every bill of the week is subtracted below, so nothing counts twice.
+								</p>
+							{:else if l.key === 'bills' || l.key === 'oneoffs' || l.key === 'fun'}
+								<p class="mt-1 text-xs text-base-content/55">
+									Every bill due this week counts, paid or not: the ticks are your to-do list and
+									never change the number. Bills tick themselves when the bank shows them.
+								</p>
+							{/if}
 						{/if}
-					{:else if l.lines.length === 0}
-						<p class="text-xs text-base-content/60">{emptyText[l.key]}</p>
-					{:else}
-						<ul class="divide-y divide-base-300/60">
-							{#each l.lines as pl (`${pl.occurrence.itemId}:${pl.occurrence.dueDate}`)}
-								<PlanLineRow line={pl} today={plan.today} />
-							{/each}
-						</ul>
-						{#if l.key === 'paid'}
-							<p class="mt-1 text-xs text-base-content/55">
-								The bank already took these out of the balance above. They're added back here
-								because every bill of the week is subtracted below, so nothing counts twice.
-							</p>
-						{:else if l.key === 'bills' || l.key === 'oneoffs' || l.key === 'fun'}
-							<p class="mt-1 text-xs text-base-content/55">
-								Every bill due this week counts, paid or not: the ticks are your to-do list and
-								never change the number. Bills tick themselves when the bank shows them.
-							</p>
-						{/if}
-					{/if}
-				</div>
-			</details>
-		{/each}
-	</div>
+					</div>
+				</details>
+			{/each}
+		</div>
+	{/if}
 	<div
 		class="flex flex-wrap items-center gap-x-3 gap-y-2 border-t-2 border-base-content/70 px-4 py-4 {negative
 			? 'bg-error/10'
@@ -160,9 +174,37 @@
 			>
 				{formatMoney(plan.leftAtEndCents)}
 			</p>
+			{#if ledger}
+				<p class="text-xs text-base-content/60" data-testid="projected-math">
+					{formatMoney(ledger.startCents)} at the start {signedMoney(movedCents)} so far {signedMoney(
+						upcomingCents(ledger.upcoming)
+					)} still to come
+				</p>
+			{/if}
 		</div>
 		<CopyButton cents={plan.leftAtEndCents} testid="copy-left" />
 	</div>
+	{#if ledger && ledger.projectedSavingsBalanceCents !== null}
+		<div
+			class="flex min-h-14 items-center gap-2 border-t border-base-300/70 bg-success/5 px-4 py-3"
+			data-testid="projected-savings-balance"
+		>
+			<Icon name="piggy-bank" size={20} class="shrink-0 text-success" />
+			<span class="min-w-0 flex-1">
+				<span class="block text-sm font-semibold">Projected Amount in Savings</span>
+				<span class="block text-xs text-base-content/60"
+					>{sweep.kind === 'done'
+						? 'Savings now, this week already moved'
+						: 'Savings now + this week once it moves'}</span
+				>
+			</span>
+			<span
+				class="shrink-0 font-mono text-base font-bold tabular"
+				data-testid="projected-savings-amount"
+				>{formatMoney(ledger.projectedSavingsBalanceCents)}</span
+			>
+		</div>
+	{/if}
 	{#if sweep.kind !== 'none'}
 		<div
 			class="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-base-300/70 px-4 py-3"

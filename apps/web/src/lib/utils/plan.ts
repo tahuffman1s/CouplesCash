@@ -396,3 +396,55 @@ export function checklistText(item: Pick<ChecklistItem, 'key' | 'label' | 'amoun
 	const label = item.label.trim() || (item.key === 'paycheck' ? 'Paycheck arrived' : 'Fun money');
 	return { text: label, showAmount: !/\$\s?\d/.test(label) };
 }
+
+/** One group of the ledger's "still to come": not through the bank yet (due before today), today, or a later day of the week. */
+export type UpcomingGroup = {
+	key: string;
+	label: string;
+	date: ISODate | null;
+	today: boolean;
+	lines: PlanLine[];
+};
+
+/**
+ * The ledger below "available now": lines due before today the bank has not paid ("Not through the bank yet"), then today's
+ * ("Still due today", only when there are any), then every remaining day of the pay week, empty days included.
+ */
+export function upcomingGroups(
+	upcoming: PlanLine[],
+	today: ISODate,
+	end: ISODate
+): UpcomingGroup[] {
+	const groups: UpcomingGroup[] = [];
+	const before = upcoming.filter((l) => l.occurrence.dueDate < today);
+	if (before.length)
+		groups.push({
+			key: 'before',
+			label: 'Not through the bank yet',
+			date: null,
+			today: false,
+			lines: before
+		});
+	const todays = upcoming.filter((l) => l.occurrence.dueDate === today);
+	if (todays.length)
+		groups.push({ key: today, label: 'Still due today', date: today, today: true, lines: todays });
+	for (let d = addDays(today, 1); d <= end; d = addDays(d, 1)) {
+		const day = d;
+		groups.push({
+			key: day,
+			label: shortDay(day),
+			date: day,
+			today: false,
+			lines: upcoming.filter((l) => l.occurrence.dueDate === day)
+		});
+	}
+	return groups;
+}
+
+/** Signed sum of what is still to come (bills, fun money, one-offs out; income in). */
+export function upcomingCents(upcoming: PlanLine[]): number {
+	return upcoming.reduce(
+		(s, l) => s + (l.occurrence.kind === 'income' ? 1 : -1) * l.occurrence.amountCents,
+		0
+	);
+}
