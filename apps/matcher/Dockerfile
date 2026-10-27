@@ -6,7 +6,7 @@
 # on the *target* platform (RapidFuzz and pydantic-core ship native wheels per architecture); under QEMU that only
 # means unpacking wheels, nothing is compiled. (Literal FROM lines so Dependabot can bump them together.)
 
-FROM ghcr.io/astral-sh/uv:0.11.32 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
 
 FROM python:3.13-slim AS build
 COPY --from=uv /uv /usr/local/bin/uv
