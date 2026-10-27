@@ -254,6 +254,16 @@ public sealed class ImportRepository(NpgsqlDataSource db)
         return rows.ToList();
     }
 
+    /// <summary>The oldest posted date of any row (hidden ones included) the link's accounts brought in; null when there is none.</summary>
+    public Task<DateOnly?> OldestPostedForLinkAsync(NpgsqlConnection conn, Guid householdId, Guid linkId, CancellationToken ct) =>
+        conn.ExecuteScalarAsync<DateOnly?>(Cmd(
+            """
+            SELECT MIN(t.posted_on) FROM imported_transactions t
+            WHERE t.household_id = @HouseholdId
+              AND t.external_account_id IN (SELECT e.id FROM external_accounts e WHERE e.household_id = @HouseholdId AND e.bank_link_id = @LinkId)
+            """,
+            new { HouseholdId = householdId, LinkId = linkId }, ct));
+
     /// <summary>Deletes a transaction added by hand (never a bank row). False when there is none with that id.</summary>
     public async Task<bool> DeleteAddedAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct) =>
         await conn.ExecuteAsync(Cmd(

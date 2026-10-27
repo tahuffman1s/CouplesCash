@@ -1045,7 +1045,8 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   without it and a warning is logged); with `linkId` → `access_token` instead of products (update mode). The access token is
   stored encrypted in `bank_links.access_url_enc` (`provider = 'plaid'`, `plaid_item_id`). A sync reads `/item/get`
   (`status.transactions.last_successful_update` → every account's `balanceAt`, `institution_name` when present) and
-  `/transactions/get` for the usual window (`today − 30`, `− 90` first sync, … today; 500 per page, ≤ 20 pages,
+  `/transactions/get` for the usual window (`today − 30` … today, or all of Plaid's `− 90` while the link has no row posted
+  60+ days ago — a first sync during "still loading" stores nothing and Plaid sends its history after the recent days; 500 per page, ≤ 20 pages,
   `include_original_description`) — the same reconcile / matching pipeline as SimpleFIN, rows `source = 'plaid'`. Mapping:
   amount sign flipped (Plaid positive = money out); credit / loan `current` = owed (stored positive like SimpleFIN's);
   `available` only for depository; description = `original_description` ?? `name`, payee = `merchant_name` (when different);

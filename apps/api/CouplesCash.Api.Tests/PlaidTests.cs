@@ -136,6 +136,22 @@ public class PlaidTests
     }
 
     [Fact]
+    public void A_Plaid_link_without_its_history_asks_for_all_of_it_until_it_is_in()
+    {
+        var today = new DateOnly(2026, 10, 27);
+        var regular = today.AddDays(-BankSyncRules.RegularSyncDays);
+        // first sync ran while Plaid was still loading: nothing stored, so not just the regular 30 days
+        Assert.Equal(today.AddDays(-90), BankSyncRules.PlaidStart(regular, null, today));
+        // only the recent days arrived so far
+        Assert.Equal(today.AddDays(-90), BankSyncRules.PlaidStart(regular, today.AddDays(-25), today));
+        // the history is in: back to the regular window
+        Assert.Equal(regular, BankSyncRules.PlaidStart(regular, today.AddDays(-60), today));
+        Assert.Equal(regular, BankSyncRules.PlaidStart(regular, today.AddDays(-89), today));
+        // never shortens a window that already reaches further back
+        Assert.Equal(today.AddDays(-120), BankSyncRules.PlaidStart(today.AddDays(-120), null, today));
+    }
+
+    [Fact]
     public void A_posted_row_naming_its_pending_row_replaces_it_even_when_the_wording_and_amount_changed()
     {
         var created = new DateTime(2026, 10, 20, 12, 0, 0, DateTimeKind.Utc);

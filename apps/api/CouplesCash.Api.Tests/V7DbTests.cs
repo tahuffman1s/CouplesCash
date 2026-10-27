@@ -60,6 +60,8 @@ public class V7DbTests
 
         public string? LastUpdateToken { get; private set; }
 
+        public DateOnly? LastStart { get; private set; }
+
         public bool Configured => true;
 
         public Task<PlaidLinkToken> CreateLinkTokenAsync(string clientUserId, string? accessToken, CancellationToken ct)
@@ -75,6 +77,7 @@ public class V7DbTests
 
         public Task<SimpleFinAccountSet> GetFeedAsync(string accessToken, string orgName, DateOnly start, DateOnly end, DateOnly today, CancellationToken ct)
         {
+            LastStart = start;
             if (Fail is { } fail)
             {
                 throw fail;
@@ -496,6 +499,8 @@ public class V7DbTests
             var result = await sync.SyncAsync((await banks.GetLinkAsync(householdId, link.Id, ct))!, user.Id, "Tester", manual: true, ct);
             Assert.Equal(0, result.NewTransactions);
             Assert.Equal(1, plaid.Refreshes);
+            // the link holds no history yet (its oldest row is days old), so the sync asks for all of Plaid's 90 days, not 30
+            Assert.Equal(DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-BankSyncRules.PlaidHistoryDays), plaid.LastStart);
             var posted = (await imports.GetAsync(householdId, pending.Id, ct))!;
             Assert.Equal((false, -4_800L, "THE DINER LLC", "t-diner"), (posted.Pending, posted.AmountCents, posted.Description, posted.ExternalId));
             Assert.Equal(("FOOD_AND_DRINK_RESTAURANT", "HIGH"), (posted.ProviderCategory, posted.ProviderCategoryConfidence));

@@ -129,6 +129,10 @@ Income — and Dining, Shopping, Travel, … if you create them). Learned payee 
 confidence files a money-out transaction under that category by itself (auto-match level *all*; undo puts it back in
 To review), **high** and **medium** only suggest it, low suggests nothing. Transfers and card payments never get a category.
 
+**History.** A new Plaid link is usually still loading at the first sync, and Plaid sends the recent days
+before the rest, so every sync asks for all 90 days until the link holds a transaction at least 60 days old,
+then 30 days as usual. Found bills needs that history (3 payments of the same bill).
+
 **When the bank wants a new sign-in** (`ITEM_LOGIN_REQUIRED`, a new password, MFA…): the link card
 says so and shows **Reconnect**, which opens Plaid in update mode for that bank; the scheduler stops
 trying until then. **Unlink** also revokes the access token at Plaid (`/item/remove`).

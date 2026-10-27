@@ -193,6 +193,11 @@ public sealed class BankSyncService(
         SimpleFinAccountSet set;
         if (link.IsPlaid)
         {
+            await using (var conn = await db.OpenConnectionAsync(ct))
+            {
+                start = BankSyncRules.PlaidStart(start, await imports.OldestPostedForLinkAsync(conn, householdId, link.Id, ct), today);
+            }
+
             set = await FetchPlaidAsync(link, accessUrl, actorId, manual, start, today, ct);
         }
         else

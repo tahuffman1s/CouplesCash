@@ -71,6 +71,28 @@ public static class BankSyncRules
     public static (DateOnly Start, DateOnly EndExclusive) FetchWindow(DateTime? lastSyncedAtUtc, DateOnly today) =>
         (today.AddDays(-(lastSyncedAtUtc is null ? FirstSyncDays : RegularSyncDays)), today.AddDays(LookAheadDays));
 
+    /// <summary>Plaid keeps this much history for an Item (<c>days_requested</c> at link time).</summary>
+    public const int PlaidHistoryDays = 90;
+
+    /// <summary>A Plaid link whose oldest row is at least this old has its history.</summary>
+    public const int PlaidHistoryHaveDays = 60;
+
+    /// <summary>
+    /// Plaid start date: the regular window once the link holds history (a row posted <see cref="PlaidHistoryHaveDays"/> or more days
+    /// ago), else all of Plaid's <see cref="PlaidHistoryDays"/>. The first sync usually runs while Plaid is still loading (no rows),
+    /// and its history can arrive after its recent days, so it is asked for again until it is in; found bills needs it.
+    /// </summary>
+    public static DateOnly PlaidStart(DateOnly windowStart, DateOnly? oldestPostedOn, DateOnly today)
+    {
+        if (oldestPostedOn is { } oldest && oldest <= today.AddDays(-PlaidHistoryHaveDays))
+        {
+            return windowStart;
+        }
+
+        var history = today.AddDays(-PlaidHistoryDays);
+        return history < windowStart ? history : windowStart;
+    }
+
     /// <summary>
     /// The Bridge requests that cover a window, newest first, each at most <see cref="MaxRequestDays"/> long. Only the newest asks for
     /// pending transactions (they are recent); the older ones are history for the first sync.
