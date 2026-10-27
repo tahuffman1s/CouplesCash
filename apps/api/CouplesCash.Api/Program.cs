@@ -266,8 +266,8 @@ if (apiOptions.AllowedOrigins.Length > 0)
     app.UseCors();
 }
 
-app.UseRateLimiter();
 app.UseAuthentication();
+app.UseRateLimiter(); // after authentication: signed-in requests are limited per user
 app.UseAuthorization();
 
 if (docsEnabled)

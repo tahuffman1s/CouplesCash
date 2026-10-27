@@ -39,7 +39,11 @@ public sealed class RateLimitingOptions
 
     public int AuthPerMinute { get; set; } = 10;
 
+    /// <summary>Requests per minute per client IP that is not signed in.</summary>
     public int GlobalPerMinute { get; set; } = 120;
+
+    /// <summary>Requests per minute per signed-in user (a page load is several API calls, all from the web container's IP).</summary>
+    public int UserPerMinute { get; set; } = 600;
 }
 
 public sealed class DatabaseOptions

@@ -1,7 +1,10 @@
 using System.Globalization;
+using System.Net;
+using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.IdentityModel.JsonWebTokens;
 
 namespace CouplesCash.Api.Infrastructure;
 
@@ -19,14 +22,19 @@ public static class RateLimitingExtensions
         {
             limiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
+            // Every request reaches the API through the web container, so one IP is everyone: a signed-in request counts against
+            // its user (runs after authentication), anything else against the client IP.
             limiter.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                RateLimitPartition.GetFixedWindowLimiter(ClientKey(context), _ => new FixedWindowRateLimiterOptions
+            {
+                var key = GlobalKey(context.User, context.Connection.RemoteIpAddress);
+                return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
                 {
-                    PermitLimit = options.GlobalPerMinute,
+                    PermitLimit = key.StartsWith(UserPrefix, StringComparison.Ordinal) ? options.UserPerMinute : options.GlobalPerMinute,
                     Window = TimeSpan.FromMinutes(1),
                     QueueLimit = 0,
                     AutoReplenishment = true,
-                }));
+                });
+            });
 
             limiter.AddPolicy(RateLimitPolicies.Auth, context =>
                 RateLimitPartition.GetFixedWindowLimiter(ClientKey(context), _ => new FixedWindowRateLimiterOptions
@@ -59,6 +67,14 @@ public static class RateLimitingExtensions
 
         return services;
     }
+
+    public const string UserPrefix = "user:";
+
+    /// <summary>Global partition: <c>user:{sub}</c> for a signed-in request, else the client IP (<see cref="ClientKey"/>).</summary>
+    public static string GlobalKey(ClaimsPrincipal user, IPAddress? remoteIp) =>
+        user.Identity?.IsAuthenticated == true && user.FindFirst(JwtRegisteredClaimNames.Sub)?.Value is { Length: > 0 } sub
+            ? UserPrefix + sub
+            : remoteIp?.ToString() ?? "unknown";
 
     /// <summary>Partition key: the client IP as seen after ForwardedHeaders; "unknown" for in-process/test hosts.</summary>
     private static string ClientKey(HttpContext context) => context.Connection.RemoteIpAddress?.ToString() ?? "unknown";

@@ -9,7 +9,9 @@ Conventions
 - Errors are RFC 9457 `application/problem+json`: `{ type, title, status, detail?, errors?: { field: [msg] } }`.
 - Household scoping: the household id comes from the `hh` JWT claim. Users without a household get `409 { title: "No household" }` on household routes except `/v1/couple/*`.
 - Unknown or foreign `{id}` → `404`.
-- Rate limits: `/v1/auth/*`, `/v1/couple/join` → 10/min/IP (`429` with `Retry-After`). Global 120/min/IP.
+- Rate limits: `/v1/auth/*`, `/v1/couple/join` → 10/min/IP (`429` with `Retry-After`). Global: 600/min per signed-in user
+  (`RateLimiting__UserPerMinute`; the limiter runs after authentication, since every request arrives from the web container's IP),
+  120/min per IP otherwise (`RateLimiting__GlobalPerMinute`).
 
 ## Shapes
 
