@@ -584,6 +584,27 @@ public sealed class ImportRepository(NpgsqlDataSource db)
         return rows.ToList();
     }
 
+    /// <summary>
+    /// v7 plan ledger: the merchant name Plaid sent for rows it brought in twice (switching SimpleFIN → Plaid): the hidden Plaid twin's payee,
+    /// by the id of the row that was kept.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<Guid, string>> TwinPayeesAsync(NpgsqlConnection conn, Guid householdId, IReadOnlyCollection<Guid> ids, CancellationToken ct)
+    {
+        if (ids.Count == 0)
+        {
+            return new Dictionary<Guid, string>();
+        }
+
+        var rows = await conn.QueryAsync<(Guid Id, string Payee)>(Cmd(
+            """
+            SELECT t.replaced_by, t.payee FROM imported_transactions t
+            WHERE t.household_id = @HouseholdId AND t.replaced_by = ANY(@Ids) AND t.source = 'plaid' AND t.ignore_reason = 'superseded'
+              AND t.payee IS NOT NULL AND t.payee <> ''
+            """,
+            new { HouseholdId = householdId, Ids = ids.ToArray() }, ct));
+        return rows.GroupBy(r => r.Id).ToDictionary(g => g.Key, g => g.First().Payee);
+    }
+
     /// <summary>Rows confirmed against any occurrence of <paramref name="itemId"/> (bill payments view).</summary>
     public async Task<IReadOnlyList<ImportedTransactionRow>> ListConfirmedForItemAsync(NpgsqlConnection conn, Guid householdId, Guid itemId, CancellationToken ct)
     {

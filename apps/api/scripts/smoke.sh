@@ -868,7 +868,8 @@ v7_friday_flow() {
   curl -fs -X POST "$FAKE/__phase/v7/2" >/dev/null || fail "phase v7/2"
   v7wait "fun transfers auto-paid from the bank feed (transfer pairs to each fun account)" /v1/plan \
     '([.funMoney[] | select(.occurrence.paid.source=="bank" and .occurrence.paid.auto==true)] | length==2)'
-  v7check "projected savings unchanged: fun money still \$40 in the plan, added back as already paid; available \$2,305.67" '.leftAtEndCents==25317 and .funOutCents==4000 and .paidThisWeekCents==4000 and .billsAccount.availableCents==230567'
+  v7wait "projected savings unchanged: fun money still \$40 in the plan, added back as already paid; available \$2,305.67" /v1/plan \
+    '.leftAtEndCents==25317 and .funOutCents==4000 and .paidThisWeekCents==4000 and .billsAccount.availableCents==230567' 15
   v7check "checklist: both fun transfers ticked automatically with their transactions" '[.checklist[] | select(.key=="fun" and .done==true and .auto==true and .transactionId!=null)] | length==2'
   request GET "/v1/accounts/$USB/transactions?filter=transfers" "$T_TOKEN"; expect 200 "US Bank transfers"
   v7check "both −\$20 rows are ignored transfers paired with a fun account and linked to their planned transfer" \

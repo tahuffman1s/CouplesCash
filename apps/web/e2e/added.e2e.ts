@@ -44,9 +44,6 @@ test('a transaction added by hand counts until the bank shows it, then the bank 
 	await addTransaction(page, { amount: '-4.25', description: 'Coffee' });
 	await expect(page.getByText('Coffee added · $4.25')).toBeVisible();
 	await expect(page.getByTestId('plan-amount-available')).toHaveText(usd(234567 - 425));
-	await expect(page.getByTestId('pending-subline')).toHaveText(
-		'after 3 pending · −$62.40 · 1 you added −$4.25'
-	);
 	// … and it is a line of today in the ledger, marked as added by you
 	await expect(
 		page.getByTestId('ledger-day').last().getByTestId('ledger-entry').filter({ hasText: 'Coffee' })

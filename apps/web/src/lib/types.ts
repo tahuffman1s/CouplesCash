@@ -834,11 +834,17 @@ export type PlanLedgerEntry = {
 	added: boolean;
 	itemId: string | null;
 	dueDate: string | null;
+	/** the matched category (the bill's for a bill payment); null when none */
+	categoryName?: string | null;
+	categoryIcon?: string | null;
+	categoryColor?: string | null;
 };
 export type PlanLedgerDay = { date: string; entries: PlanLedgerEntry[] };
 export type PlanLedger = {
 	/** available now minus everything that went through the bills account since payday */
 	startCents: number;
+	/** the paycheck(s) that landed on payday: part of the start, not of payday's list */
+	startPaychecks?: PlanLedgerEntry[];
 	/** payday … today */
 	days: PlanLedgerDay[];
 	availableCents: number;

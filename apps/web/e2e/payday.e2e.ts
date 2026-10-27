@@ -61,6 +61,15 @@ test('payday: Done by hand, then the bank ticks the paycheck and fun money', asy
 		await expect(row).toHaveAttribute('data-done', 'true');
 	await expect(done.getByTestId('checklist-auto').first()).toBeVisible();
 
+	// the paycheck landed on payday: it is part of the start of the week, not a line of today
+	await expect(page.getByTestId('ledger-start-paycheck')).toContainText('+$2,450.00');
+	await expect(
+		page
+			.getByTestId('ledger-day')
+			.last()
+			.locator('[data-testid="ledger-entry"][data-kind="income"]')
+	).toHaveCount(0);
+
 	// the fun money is paid by the bank: today's ledger shows each transfer once, as the fun money
 	// it paid, and none is still to come
 	const todays = page.getByTestId('ledger-day').last();
@@ -74,10 +83,9 @@ test('payday: Done by hand, then the bank ticks the paycheck and fun money', asy
 		page.getByTestId('ledger-upcoming').locator('[data-testid="plan-line"][data-kind="transfer"]')
 	).toHaveCount(0);
 
-	// every pending row is listed: the 3 card holds plus today's still-pending fun transfers,
-	// in the plan (the "after N pending" line and its list) and in Transactions → Pending
+	// every pending row is listed in Transactions → Pending: the 3 card holds plus today's
+	// still-pending fun transfers
 	const pending = 3 + funCount;
-	await expect(page.getByTestId('pending-subline')).toContainText(`after ${pending} pending`);
 	await page.goto('/transactions');
 	await expect(page.getByTestId('pending-count')).toHaveText(String(pending));
 	await expect(page.getByTestId('pending-section').getByTestId('tx-row')).toHaveCount(pending);

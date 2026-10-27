@@ -94,7 +94,7 @@ test('setup wizard: bank → roles → payday → fun money → notes → invite
 	// the plan replaces the setup; the bills are there
 	await page.goto('/week');
 	await expect(page.getByTestId('setup-overview')).toHaveCount(0);
-	await expect(page.getByTestId('plan-receipt')).toContainText('U.S. Bank, available now');
+	await expect(page.getByTestId('plan-receipt')).toContainText('Available now');
 	await expect(page.getByTestId('strip-account')).toHaveCount(4);
 	await expect(page.getByTestId('strip-account').first()).toContainText('U.S. Bank');
 	await expect(page.getByTestId('accounts-strip')).toContainText('Savings');

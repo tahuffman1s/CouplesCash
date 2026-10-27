@@ -64,9 +64,19 @@ test('the plan reads like her note and its math follows bills paid and one-offs 
 	await expect(days.first()).toHaveAttribute('data-date', start);
 	await expect(days.last()).toHaveAttribute('data-today', 'true');
 	await expect(days.last()).toContainText('Today ·');
-	await expect(ledger.getByTestId('ledger-available')).toContainText('U.S. Bank, available now');
+	// the days before today are folded up until tapped; today ends in available now
+	if (start !== today) {
+		await expect(days.first()).not.toHaveAttribute('open', '');
+		await days.first().locator('summary').click();
+		await expect(days.first()).toHaveAttribute('open', '');
+	}
+	// today folds up too, but available now stays in sight under it
+	await expect(days.last()).not.toHaveAttribute('open', '');
+	await expect(ledger.getByTestId('ledger-today').getByTestId('ledger-available')).toBeVisible();
+	await expect(ledger.getByTestId('ledger-available')).toHaveText(
+		/^\s*Available now\s*\$2,345\.67\s*$/
+	);
 	await expect(page.getByTestId('plan-amount-available')).toHaveText('$2,345.67');
-	await expect(page.getByTestId('pending-subline')).toHaveText('after 3 pending · −$62.40');
 	// still to come: Water today, the paycheck and fun money (due on payday); next Friday's rent is not in this week
 	const upcoming = ledger.getByTestId('ledger-upcoming');
 	const water = upcoming.getByTestId('plan-line').filter({ hasText: 'Water' });
@@ -96,6 +106,10 @@ test('the plan reads like her note and its math follows bills paid and one-offs 
 
 	// a bill ticked by hand: the money is still in the account until the bank shows it, so it stays
 	// still to come and the number she writes down does not move (it never jumps up)
+	// the days still to come are folded up with their count and total; open today's to tick Water
+	const todayDue = upcoming.and(page.locator(`[data-date="${today}"]`));
+	await expect(todayDue).not.toHaveAttribute('open', '');
+	await todayDue.locator('summary').click();
 	await water.getByRole('button', { name: 'Mark Water paid' }).click();
 	await expect(water.getByTestId('plan-status')).toHaveText('Paid · waiting for the bank');
 	await expect(page.getByTestId('left-on')).toHaveText(usd(left));

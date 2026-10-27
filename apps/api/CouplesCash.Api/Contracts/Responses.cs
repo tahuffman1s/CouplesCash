@@ -529,7 +529,8 @@ public sealed record BillSuggestionAcceptedDto(RecurringItemDto Item, int Matche
 public sealed record PlanLineDto(string Kind, OccurrenceDto Occurrence);
 
 /// <summary>A ledger line: a bills-account transaction, or (<paramref name="ItemId"/> set) the bill / transfer / income it paid.</summary>
-public sealed record PlanLedgerEntryDto(Guid TransactionId, string Kind, string Name, long AmountCents, bool Pending, bool Added, Guid? ItemId, DateOnly? DueDate);
+public sealed record PlanLedgerEntryDto(Guid TransactionId, string Kind, string Name, long AmountCents, bool Pending, bool Added, Guid? ItemId, DateOnly? DueDate,
+    string? CategoryName = null, string? CategoryIcon = null, string? CategoryColor = null);
 
 public sealed record PlanLedgerDayDto(DateOnly Date, IReadOnlyList<PlanLedgerEntryDto> Entries);
 
@@ -537,7 +538,7 @@ public sealed record PlanLedgerDayDto(DateOnly Date, IReadOnlyList<PlanLedgerEnt
 /// v7 the current pay week as a ledger: start of the week, each day through today, available now, what is still to come (plan lines by
 /// due date), and the projected amount in savings (null without a savings account).
 /// </summary>
-public sealed record PlanLedgerDto(long StartCents, IReadOnlyList<PlanLedgerDayDto> Days, long AvailableCents, IReadOnlyList<PlanLineDto> Upcoming, long? ProjectedSavingsBalanceCents);
+public sealed record PlanLedgerDto(long StartCents, IReadOnlyList<PlanLedgerEntryDto> StartPaychecks, IReadOnlyList<PlanLedgerDayDto> Days, long AvailableCents, IReadOnlyList<PlanLineDto> Upcoming, long? ProjectedSavingsBalanceCents);
 
 /// <summary>A payday checklist item. <paramref name="Key"/>: paycheck | fun | sweep.</summary>
 public sealed record ChecklistItemDto(string Key, string Label, long AmountCents, bool Done, bool Auto, Guid? TransactionId, Guid? ItemId, DateOnly? DueDate);

@@ -3396,7 +3396,7 @@ function planFor(hh: string, date: string) {
 	// v7 the current week as a ledger: start (worked back from available), each day through today, then what is still to come
 	let ledger = null;
 	if (isCurrent && bills) {
-		const moved = [...txs.values()].filter(
+		let moved = [...txs.values()].filter(
 			(t) => t.householdId === hh && t.accountId === bills.id && !isHidden(t) && t.postedOn >= start
 		);
 		const paidByTx = new Map<string, { itemId: string; dueDate: string }>();
@@ -3423,9 +3423,32 @@ function planFor(hh: string, date: string) {
 				pending: t.pending,
 				added: t.source === 'added',
 				itemId: item ? match!.itemId : null,
-				dueDate: item ? match!.dueDate : null
+				dueDate: item ? match!.dueDate : null,
+				...categoryOf(
+					item?.categoryId ??
+						t.confirmed?.categoryId ??
+						(t.status === 'pending' && t.suggestion?.kind === 'category'
+							? t.suggestion.categoryId
+							: null)
+				)
 			};
 		};
+		const categoryOf = (id: string | null | undefined) => {
+			const c = id ? categories.get(id) : undefined;
+			return {
+				categoryName: c?.name ?? null,
+				categoryIcon: c?.icon ?? null,
+				categoryColor: c?.color ?? null
+			};
+		};
+		// the paycheck that landed on payday is where the week starts from
+		const isPaycheck = (t: Tx) => {
+			if (t.postedOn !== start || t.amountCents <= 0) return false;
+			const m = t.confirmed?.itemId ?? paidByTx.get(t.id)?.itemId;
+			return !!m && items.get(m)?.kind === 'income';
+		};
+		const startPaychecks = moved.filter(isPaycheck);
+		moved = moved.filter((t) => !isPaycheck(t));
 		const days: { date: string; entries: ReturnType<typeof entry>[] }[] = [];
 		for (let d = start; d <= today; d = addDaysIso(d, 1)) {
 			const day = d;
@@ -3445,6 +3468,7 @@ function planFor(hh: string, date: string) {
 			.reduce((s, l) => s + l.occurrence.amountCents, 0);
 		ledger = {
 			startCents: available - moved.reduce((s, t) => s + t.amountCents, 0),
+			startPaychecks: startPaychecks.map(entry),
 			days,
 			availableCents: available,
 			upcoming: [...lines.bills, ...lines.funMoney, ...lines.oneOffs, ...lines.income]

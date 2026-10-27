@@ -848,10 +848,11 @@ type Plan = {
   savingsBills: PlanLine[];      // e.g. student loans from savings — shown, not in the math
   checklist: ChecklistItem[];    // payday only (empty otherwise): paycheck and fun money
   sweep: Sweep | null; toReviewCount: number; setup: { banksLinked: boolean; rolesSet: boolean; paycheckKnown: boolean; billsAdded: boolean; partnerJoined: boolean } };
-type PlanLedger = { startCents: number; days: { date: string; entries: PlanLedgerEntry[] }[]; availableCents: number;
+type PlanLedger = { startCents: number; startPaychecks: PlanLedgerEntry[]; days: { date: string; entries: PlanLedgerEntry[] }[]; availableCents: number;
   upcoming: PlanLine[]; projectedSavingsBalanceCents: number | null };
 type PlanLedgerEntry = { transactionId: string; kind: 'transaction' | 'bill' | 'subscription' | 'income' | 'transfer' | 'oneoff';
-  name: string; amountCents: number /* signed */; pending: boolean; added: boolean; itemId: string | null; dueDate: string | null };
+  name: string; amountCents: number /* signed */; pending: boolean; added: boolean; itemId: string | null; dueDate: string | null;
+  categoryName: string | null; categoryIcon: string | null; categoryColor: string | null };
 ```
 
 | Method | Route | Body / Query | Response |
@@ -971,7 +972,11 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   sums, `incomeInCents` the income not received yet. **`ledger`** (current week with a bills account): `startCents` = available − every
   bills-account row dated on or after payday that is not dropped / superseded (any status: pending, added by hand, transfers), so start +
   every day = available; `days` = payday … today, each with its rows (a row dated after today is listed under today; a row matched to an
-  item — bill, subscription, planned transfer, income — is that item, named after it, never twice); `upcoming` = the week's bill / fun /
+  item — bill, subscription, planned transfer, income — is that item, named after it, never twice; the paycheck(s) matched to an income
+  item and posted on payday are part of the start, listed in `startPaychecks`, not in payday's entries). An entry's `name` is the item's
+  name, else the merchant Plaid named (also the hidden Plaid twin's for a row SimpleFIN brought in first), else `Domain/PayeeDisplay`'s
+  cleaned card wording ("Debit Purchase -visa Chick-fil-a #034columbia Mo 10/24 Card 8023" → "Chick-fil-a"; cities learned from the
+  rows' own wording); its category is the item's, else the confirmed expense's, else (still to review) the suggested one; `upcoming` = the week's bill / fun /
   one-off lines the bank has not paid (ticked by hand or not) and income not received yet, by due date, so
   `leftAtEndCents = availableCents − upcoming out + upcoming income`; `projectedSavingsBalanceCents` = the savings accounts' balance −
   their bills still due this week + max(0, `leftAtEndCents`) until this week's sweep is done (null without a savings account);

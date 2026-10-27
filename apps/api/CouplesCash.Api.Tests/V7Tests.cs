@@ -213,18 +213,20 @@ public class V7Tests
         // Tuesday Nov 3 of the pay week Fri Oct 30 … Thu Nov 5. Paid so far: paycheck and Netflix on Friday, groceries Monday (pending),
         // a pending charge the bank dated Saturday ahead. Still to come: rent (Sun, unpaid → overdue), phone, internet, fun, oil change.
         var today = D(2026, 11, 3);
-        var items = new Dictionary<Guid, (string, Kind, Frequency)>
+        var streaming = Id(900);
+        var groceries = Id(901);
+        var items = new Dictionary<Guid, LedgerItem>
         {
-            [Id(4)] = ("Netflix", Kind.Subscription, Frequency.Monthly),
-            [Id(10)] = ("Paycheck", Kind.Income, Frequency.Weekly),
+            [Id(4)] = new("Netflix", Kind.Subscription, Frequency.Monthly, streaming),
+            [Id(10)] = new("Paycheck", Kind.Income, Frequency.Weekly),
         };
-        LedgerTransaction Tx(int n, DateOnly on, long cents, string name, bool pending = false, int? item = null, DateOnly? due = null) =>
-            new(Id(100 + n), on, cents, name, pending, false, item is { } i ? Id(i) : null, due);
+        LedgerTransaction Tx(int n, DateOnly on, long cents, string name, bool pending = false, int? item = null, DateOnly? due = null, Guid? category = null) =>
+            new(Id(100 + n), on, cents, name, pending, false, item is { } i ? Id(i) : null, due, category);
         var txs = new[]
         {
             Tx(1, D(2026, 10, 30), 150_000, "ACME PAYROLL", item: 10, due: D(2026, 10, 30)),
             Tx(2, D(2026, 10, 30), -1_549, "NETFLIX.COM", item: 4, due: D(2026, 10, 30)),
-            Tx(3, D(2026, 11, 2), -8_412, "HY-VEE", pending: true),
+            Tx(3, D(2026, 11, 2), -8_412, "HY-VEE", pending: true, category: groceries),
             Tx(4, D(2026, 11, 7), -500, "PARKING", pending: true), // dated ahead by the bank: listed today
             Tx(5, D(2026, 10, 29), -999, "LAST WEEK"),                // before the week: not in it
         };
@@ -232,13 +234,16 @@ public class V7Tests
         var classified = Week.Select(o => (o, PlanEngine.Classify(o, UsBank, Roles))).ToList();
         var ledger = PlanLedger.Build(PayWeek, today, available, txs, classified, items);
 
-        Assert.Equal(available - (150_000 - 1_549 - 8_412 - 500), ledger.StartCents);
+        // the paycheck that landed on payday is where the week starts from, not a line of Friday
+        Assert.Equal(available - (-1_549 - 8_412 - 500), ledger.StartCents);
+        Assert.Equal(("Paycheck", 150_000L), (Assert.Single(ledger.StartPaychecks).Name, ledger.StartPaychecks[0].AmountCents));
         Assert.Equal(available, ledger.StartCents + ledger.Days.SelectMany(d => d.Entries).Sum(e => e.AmountCents));
         Assert.Equal([D(2026, 10, 30), D(2026, 10, 31), D(2026, 11, 1), D(2026, 11, 2), D(2026, 11, 3)], ledger.Days.Select(d => d.Date));
 
         // a matched row shows as its item, once; an unmatched one as itself
         var friday = ledger.Days[0].Entries;
-        Assert.Equal([("Paycheck", "income"), ("Netflix", "subscription")], friday.Select(e => (e.Name, e.Kind)).OrderBy(x => x.Kind));
+        Assert.Equal(("Netflix", "subscription", (Guid?)streaming), (Assert.Single(friday).Name, friday[0].Kind, friday[0].CategoryId)); // the bill's category
+        Assert.Equal(groceries, ledger.Days[3].Entries[0].CategoryId);                                                                  // the row's own
         Assert.Equal(("HY-VEE", "transaction", true), (ledger.Days[3].Entries[0].Name, ledger.Days[3].Entries[0].Kind, ledger.Days[3].Entries[0].Pending));
         Assert.Equal("PARKING", Assert.Single(ledger.Days[4].Entries).Name);
         Assert.Empty(ledger.Days[1].Entries);

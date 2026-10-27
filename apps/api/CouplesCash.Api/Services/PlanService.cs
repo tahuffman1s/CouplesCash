@@ -58,6 +58,7 @@ public sealed class PlanService(
     HouseholdRepository households,
     AccountRepository accounts,
     RecurringRepository items,
+    CategoryRepository categories,
     OccurrenceService occurrences,
     ImportRepository imports,
     BankRepository banks,
@@ -204,11 +205,26 @@ public sealed class PlanService(
         if (isCurrent && c.BillsAccount is { } ledgerAccount)
         {
             var rows = await imports.ListAccountRowsSinceAsync(conn, householdId, ledgerAccount.Id, week.Start, ct);
-            var itemsById = c.Items.ToDictionary(i => i.Id, i => (i.Name, i.Kind, i.Frequency));
+            var itemsById = c.Items.ToDictionary(i => i.Id, i => new LedgerItem(i.Name, i.Kind, i.Frequency, i.CategoryId));
+            var categoryById = (await categories.ListAsync(householdId, ct)).ToDictionary(k => k.Id);
+            // a name people read: the merchant the bank feed named (Plaid's, also for a row it brought in twice), else the card wording cleaned
+            var twinPayees = await imports.TwinPayeesAsync(conn, householdId, rows.Select(r => r.Id).ToList(), ct);
+            var cities = PayeeDisplay.LearnCities(rows.Select(r => r.Description));
+            string NameOf(ImportedTransactionRow r) =>
+                r.Source == ImportRepository.AddedSource ? r.Description
+                : twinPayees.TryGetValue(r.Id, out var twin) ? twin
+                : !string.IsNullOrWhiteSpace(r.Payee) ? r.Payee
+                : PayeeDisplay.Clean(r.Description, cities);
             var built = PlanLedger.Build(week, today, available,
-                rows.Select(r => new LedgerTransaction(r.Id, r.PostedOn, r.AmountCents, string.IsNullOrWhiteSpace(r.Payee) ? r.Description : r.Payee,
-                    r.Pending, r.Source == ImportRepository.AddedSource, r.ConfirmedItemId, r.ConfirmedDueDate)),
+                rows.Select(r => new LedgerTransaction(r.Id, r.PostedOn, r.AmountCents, NameOf(r),
+                    r.Pending, r.Source == ImportRepository.AddedSource, r.ConfirmedItemId, r.ConfirmedDueDate,
+                    r.ConfirmedCategoryId ?? (r.IsPending ? r.SuggestedCategoryId : null))),
                 lines.Select(l => (l.Plan, l.Bucket)), itemsById);
+            PlanLedgerEntryDto ToEntryDto(LedgerEntry e)
+            {
+                var category = e.CategoryId is { } cid ? categoryById.GetValueOrDefault(cid) : null;
+                return new(e.TransactionId, e.Kind, e.Name, e.AmountCents, e.Pending, e.Added, e.ItemId, e.DueDate, category?.Name, category?.Icon, category?.Color);
+            }
             var dtoByKey = lines.ToDictionary(l => (l.Dto.ItemId, l.Dto.DueDate), l => new PlanLineDto(PlanEngine.LineKind(l.Bucket, l.Dto.Kind), l.Dto));
 
             var savings = c.Accounts.Where(a => a.Role == AccountRole.Savings).ToList();
@@ -221,8 +237,8 @@ public sealed class PlanService(
 
             ledger = new PlanLedgerDto(
                 built.StartCents,
-                built.Days.Select(d => new PlanLedgerDayDto(d.Date, d.Entries
-                    .Select(e => new PlanLedgerEntryDto(e.TransactionId, e.Kind, e.Name, e.AmountCents, e.Pending, e.Added, e.ItemId, e.DueDate)).ToList())).ToList(),
+                built.StartPaychecks.Select(ToEntryDto).ToList(),
+                built.Days.Select(d => new PlanLedgerDayDto(d.Date, d.Entries.Select(ToEntryDto).ToList())).ToList(),
                 built.AvailableCents,
                 built.Upcoming.Select(o => dtoByKey[(o.ItemId, o.DueDate)]).ToList(),
                 savingsProjected);
