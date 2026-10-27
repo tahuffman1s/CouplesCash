@@ -1067,4 +1067,11 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   (`MatchingRules.NameContained`). Plaid rows carry `merchant_name` as payee next to the bank's wording; rules and names learned
   from SimpleFIN rows keep auto-matching them. "Re-check matches now" (`POST /inbox/rematch`) applies this to rows already in
   To review.
+- **Provider categories** (migration `0011_provider_category.sql`): `imported_transactions.provider_category` /
+  `provider_category_confidence` hold Plaid's `personal_finance_category.detailed` (else `primary`) and `confidence_level`
+  (`/transactions/get` with `include_personal_finance_category`). `Domain/ProviderCategories.cs` maps a code prefix to household
+  category names in order of preference; built-in suggestion order: learned transfer payee → learned category → provider category
+  (VERY_HIGH 82, HIGH 74, MEDIUM 55; LOW / UNKNOWN none) → transfer keyword → category keyword. A VERY_HIGH provider category on a
+  money-out row with no learned rule is auto-categorized at level `all` (`transaction.autocategorized`, `match_detail.reason`
+  "bank category: food and drink coffee (very high)"), on the built-in path and as the fallback when the fuzzy matcher finds nothing.
 

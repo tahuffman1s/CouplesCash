@@ -610,7 +610,7 @@ public class V7DbTests
     }
 
     [DbFact]
-    public async Task A_bill_learned_from_simplefin_wording_is_auto_matched_from_plaids_wording()
+    public async Task Plaid_rows_auto_match_bills_learned_from_simplefin_wording_and_file_themselves_by_plaids_category()
     {
         var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
         var plaid = new FakePlaid();
@@ -650,17 +650,31 @@ public class V7DbTests
                                   "balances": { "available": 2345.67, "current": 2408.07, "iso_currency_code": "USD" } } ],
                   "transactions": [
                     { "transaction_id": "t-netflix", "account_id": "acc-chk", "amount": 15.49, "date": "{{today:yyyy-MM-dd}}", "name": "Netflix",
-                      "merchant_name": "Netflix", "original_description": "NETFLIX.COM 866-579-7172 CA", "pending": false }
+                      "merchant_name": "Netflix", "original_description": "NETFLIX.COM 866-579-7172 CA", "pending": false },
+                    { "transaction_id": "t-coffee", "account_id": "acc-chk", "amount": 6.50, "date": "{{today:yyyy-MM-dd}}", "name": "Blue Bottle",
+                      "merchant_name": "Blue Bottle Coffee", "original_description": "SQ *BLUE BOTTLE 0042", "pending": false,
+                      "personal_finance_category": { "primary": "FOOD_AND_DRINK", "detailed": "FOOD_AND_DRINK_COFFEE", "confidence_level": "VERY_HIGH" } },
+                    { "transaction_id": "t-market", "account_id": "acc-chk", "amount": 42.10, "date": "{{today:yyyy-MM-dd}}", "name": "Corner Market",
+                      "original_description": "CORNER MKT 118", "pending": false,
+                      "personal_finance_category": { "primary": "FOOD_AND_DRINK", "detailed": "FOOD_AND_DRINK_GROCERIES", "confidence_level": "HIGH" } }
                   ],
-                  "total_transactions": 1
+                  "total_transactions": 3
                 }
                 """;
             await sync.PlaidLinkAsync(householdId, user.Id, "Tester", "public-good", "U.S. Bank", ct);
 
             await using var conn = await db.OpenConnectionAsync(ct);
-            var row = Assert.Single(await conn.QueryAsync<Guid>("SELECT id FROM imported_transactions WHERE household_id = @Id AND source = 'plaid'", new { Id = householdId }));
-            var matched = (await imports.GetAsync(conn, householdId, row, ct))!;
+            async Task<ImportedTransactionRow> Row(string externalId) => (await imports.GetAsync(conn, householdId,
+                await conn.ExecuteScalarAsync<Guid>("SELECT id FROM imported_transactions WHERE household_id = @Id AND external_id = @X", new { Id = householdId, X = externalId }), ct))!;
+            var matched = await Row("t-netflix");
             Assert.Equal(("confirmed", (Guid?)streaming.Id, true), (matched.Status, matched.ConfirmedItemId, matched.ConfirmedAuto));
+
+            // Plaid's own category: VERY_HIGH coffee is filed under Fun by itself; HIGH groceries only waits as a suggestion.
+            var coffee = await Row("t-coffee");
+            Assert.Equal(("confirmed", true, "Fun", "FOOD_AND_DRINK_COFFEE"), (coffee.Status, coffee.ConfirmedAuto, coffee.ConfirmedCategoryName, coffee.ProviderCategory));
+            var market = await Row("t-market");
+            Assert.Equal(("pending", "Groceries", 74), (market.Status, market.SuggestedCategoryName, market.Confidence));
+            Assert.Contains("bank category: food and drink groceries", market.MatchDetail);
         }
         finally
         {

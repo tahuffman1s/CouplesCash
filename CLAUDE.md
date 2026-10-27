@@ -46,7 +46,7 @@ Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` 
 | **Encryption at rest** (AES-256-GCM, `Security__DataKey`) | `apps/api/CouplesCash.Api/Security/DataProtector.cs` |
 | **Banks / inbox / CSV endpoints** | `Endpoints/BankEndpoints.cs`, `Endpoints/InboxEndpoints.cs`, `Endpoints/ImportEndpoints.cs` |
 | Background job (autopay, reminders, hygiene, **bank sync + auto-match**) | `apps/api/CouplesCash.Api/Scheduler/` (`SchedulerService` hosted service; selection logic lives in `Domain/SchedulerRules.cs`) |
-| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4, `0005_transactions.sql` = v5, `0009_manual_transactions.sql` = added-by-hand rows, `0010_plaid.sql` = Plaid) |
+| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4, `0005_transactions.sql` = v5, `0009_manual_transactions.sql` = added-by-hand rows, `0010_plaid.sql` = Plaid, `0011_provider_category.sql` = Plaid categories) |
 | API tests | `apps/api/CouplesCash.Api.Tests/` (xunit) |
 | Routes (pages + form actions) | `apps/web/src/routes/**/+page.svelte`, `+page.server.ts` |
 | API client + types | `apps/web/src/lib/server/api.ts`, `apps/web/src/lib/types.ts` |
@@ -134,7 +134,8 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   token goes through the same `DataProtector`, never logged/returned; `PlaidParser` turns Plaid responses into the SimpleFIN
   feed shape so both share one reconcile/matching pipeline (rows `source = 'plaid'`); sign-in errors set `needs_reconnect`
   (Reconnect = Link update mode). The same bank via both providers is deduplicated (`Domain/ProviderTwins.cs`: posted, exact
-  amount, ≤ 3 days). Unlinking drops the link's pending rows.
+  amount, ≤ 3 days). Unlinking drops the link's pending rows. Plaid's own merchant category rides on each row
+  (`provider_category`); `Domain/ProviderCategories.cs` maps it to household categories (VERY_HIGH auto-categorizes).
 - **Friday plan (v7)**: the week is the **pay week** (`households.payday_weekday` → day before next payday). Only the
   account with `role = 'bills'` counts: available = bank `availableCents` else `balanceCents − pendingOutCents` (never
   sum other checking accounts). Fun-money accounts (`role = 'fun'`, one owner each) never enter To review. Fun money is

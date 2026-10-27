@@ -140,7 +140,7 @@ public sealed class MatchingService(
                 continue;
             }
 
-            decisions.Add(FromBuiltin(row, tx, level, builtin.GetValueOrDefault(row.Id) ?? Suggestion.None, unpaid, itemsById, rulesByNorm));
+            decisions.Add(FromBuiltin(row, tx, level, builtin.GetValueOrDefault(row.Id) ?? Suggestion.None, unpaid, itemsById, rulesByNorm, categoriesByName));
         }
 
         foreach (var d in decisions.Where(d => !Unchanged(d)))
@@ -360,11 +360,35 @@ public sealed class MatchingService(
             return new Decision(row, Suggestion.Category(categoryId, score), score, detail, false, auto);
         }
 
-        // Nothing from the matcher: keep the built-in transfer keyword / learned / keyword category suggestion (never auto).
+        // Nothing from the matcher: keep the built-in transfer keyword / learned / bank feed / keyword category suggestion (only a
+        // very sure bank-feed category is applied automatically).
         var fallback = TransactionMatcher.SuggestWithoutOccurrence(tx, rulesByNorm, categoriesByName);
         return fallback.Kind == SuggestionKind.Category
-            ? new Decision(row, fallback, fallback.Confidence, MatchingRules.BuiltinCategoryDetail(fallback, TransactionMatcher.FindRule(rulesByNorm, tx.Payee, tx.Description)), false, false)
+            ? BuiltinCategoryDecision(row, tx, level, fallback, rulesByNorm, categoriesByName)
             : new Decision(row, fallback, null, null, false, false);
+    }
+
+    /// <summary>
+    /// A built-in category suggestion with its reason; applied automatically (level all, money out) only when it is the bank feed's own
+    /// category at VERY_HIGH confidence and no learned rule says otherwise.
+    /// </summary>
+    private static Decision BuiltinCategoryDecision(
+        ImportedTransactionRow row,
+        MatchTransaction tx,
+        AutoMatchLevel level,
+        Suggestion suggestion,
+        IReadOnlyDictionary<string, PayeeRule> rulesByNorm,
+        IReadOnlyDictionary<string, Guid> categoriesByName)
+    {
+        var rule = TransactionMatcher.FindRule(rulesByNorm, tx.Payee, tx.Description);
+        var provider = ProviderCategories.Suggest(tx.ProviderCategory, tx.ProviderConfidence, tx.IsOutflow, categoriesByName);
+        var fromProvider = rule?.CategoryId is null && provider is not null && provider.CategoryId == suggestion.CategoryId;
+        var detail = fromProvider
+            ? new MatchDetail(provider!.Confidence, 0, 0, provider.Reason, MatchDetail.Builtin)
+            : MatchingRules.BuiltinCategoryDetail(suggestion, rule);
+        var auto = fromProvider && provider!.Confidence >= ProviderCategories.AutoConfidence
+            && MatchingRules.AutoAppliesCategories(level) && row.IsOutflow && !row.AutoBlocked;
+        return new Decision(row, suggestion, suggestion.Confidence, detail, false, auto);
     }
 
     private static Decision FromBuiltin(
@@ -374,7 +398,8 @@ public sealed class MatchingService(
         Suggestion suggestion,
         IReadOnlyList<MatchableOccurrence> unpaid,
         IReadOnlyDictionary<Guid, RecurringItemRow> itemsById,
-        IReadOnlyDictionary<string, PayeeRule> rulesByNorm)
+        IReadOnlyDictionary<string, PayeeRule> rulesByNorm,
+        IReadOnlyDictionary<string, Guid> categoriesByName)
     {
         switch (suggestion.Kind)
         {
@@ -391,8 +416,7 @@ public sealed class MatchingService(
                 }
 
             case SuggestionKind.Category:
-                return new Decision(row, suggestion, suggestion.Confidence,
-                    MatchingRules.BuiltinCategoryDetail(suggestion, TransactionMatcher.FindRule(rulesByNorm, tx.Payee, tx.Description)), false, false);
+                return BuiltinCategoryDecision(row, tx, level, suggestion, rulesByNorm, categoriesByName);
 
             default:
                 return new Decision(row, suggestion, null, null, false, false);

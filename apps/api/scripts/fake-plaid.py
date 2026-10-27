@@ -50,7 +50,8 @@ def transactions(today):
          "pending": False, "pending_transaction_id": None},
         {"transaction_id": "t-coffee", "account_id": "acc-chk", "amount": 4.25, "date": day(today, 0), "name": "Blue Bottle",
          "merchant_name": "Blue Bottle Coffee", "original_description": "SQ *BLUE BOTTLE 0042", "pending": False,
-         "pending_transaction_id": None},
+         "pending_transaction_id": None,
+         "personal_finance_category": {"primary": "FOOD_AND_DRINK", "detailed": "FOOD_AND_DRINK_COFFEE", "confidence_level": "VERY_HIGH"}},
     ]
     if STATE["phase"] < 2:
         rows.append({"transaction_id": "p-diner", "account_id": "acc-chk", "amount": 40.00, "date": day(today, 0),

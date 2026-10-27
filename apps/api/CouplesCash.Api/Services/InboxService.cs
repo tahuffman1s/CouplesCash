@@ -644,7 +644,8 @@ public sealed class InboxService(
         }
     }
 
-    public static MatchTransaction ToMatch(ImportedTransactionRow r) => new(r.Id, r.AccountId, r.PostedOn, r.AmountCents, r.Description, r.Payee);
+    public static MatchTransaction ToMatch(ImportedTransactionRow r) =>
+        new(r.Id, r.AccountId, r.PostedOn, r.AmountCents, r.Description, r.Payee, r.ProviderCategory, r.ProviderCategoryConfidence);
 
     public static PayeeRule ToRule(PayeeRuleRow r) => new(r.PayeeNorm, r.CategoryId, r.ItemId, r.Hits, r.IsTransfer);
 

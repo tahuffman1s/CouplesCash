@@ -229,3 +229,75 @@ public class ProviderWordingTests
         Assert.False(MatchingRules.NameContained("Netflix", "NETFLIX.COM", []));
     }
 }
+
+/// <summary>v7: Plaid's own merchant category → the household's categories.</summary>
+public class ProviderCategoryTests
+{
+    private static readonly Guid Fun = Guid.CreateVersion7();
+    private static readonly Guid Groceries = Guid.CreateVersion7();
+    private static readonly Guid Subscriptions = Guid.CreateVersion7();
+    private static readonly Guid Income = Guid.CreateVersion7();
+    private static readonly Guid Dining = Guid.CreateVersion7();
+
+    private static readonly Dictionary<string, Guid> Defaults = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Fun"] = Fun,
+        ["Groceries"] = Groceries,
+        ["Subscriptions"] = Subscriptions,
+        ["Income"] = Income,
+    };
+
+    [Fact]
+    public void Codes_map_to_the_households_categories_by_preference()
+    {
+        Assert.Equal((Groceries, 82), Pick(ProviderCategories.Suggest("FOOD_AND_DRINK_GROCERIES", "VERY_HIGH", true, Defaults)));
+        Assert.Equal((Fun, 74), Pick(ProviderCategories.Suggest("FOOD_AND_DRINK_COFFEE", "HIGH", true, Defaults)));
+        // a household that made a Dining category gets it for restaurants instead of Fun
+        var withDining = new Dictionary<string, Guid>(Defaults, StringComparer.OrdinalIgnoreCase) { ["dining"] = Dining };
+        Assert.Equal(Dining, ProviderCategories.Suggest("FOOD_AND_DRINK_RESTAURANT", "HIGH", true, withDining)!.CategoryId);
+        Assert.Equal(Subscriptions, ProviderCategories.Suggest("ENTERTAINMENT_TV_AND_MOVIES", "VERY_HIGH", true, Defaults)!.CategoryId);
+        Assert.Equal((Income, 55), Pick(ProviderCategories.Suggest("INCOME_WAGES", "MEDIUM", false, Defaults)));
+        Assert.Contains("food and drink coffee (high)", ProviderCategories.Suggest("FOOD_AND_DRINK_COFFEE", "HIGH", true, Defaults)!.Reason);
+    }
+
+    [Fact]
+    public void Nothing_for_transfers_card_payments_refunds_low_confidence_or_a_category_the_household_lacks()
+    {
+        Assert.Null(ProviderCategories.Suggest("TRANSFER_OUT_ACCOUNT_TRANSFER", "VERY_HIGH", true, Defaults));
+        Assert.Null(ProviderCategories.Suggest("LOAN_PAYMENTS_CREDIT_CARD_PAYMENT", "VERY_HIGH", true, Defaults));
+        Assert.Null(ProviderCategories.Suggest("FOOD_AND_DRINK_COFFEE", "VERY_HIGH", false, Defaults));
+        Assert.Null(ProviderCategories.Suggest("FOOD_AND_DRINK_COFFEE", "LOW", true, Defaults));
+        Assert.Null(ProviderCategories.Suggest("FOOD_AND_DRINK_COFFEE", null, true, Defaults));
+        Assert.Null(ProviderCategories.Suggest("GENERAL_MERCHANDISE_CLOTHING_AND_ACCESSORIES", "VERY_HIGH", true, Defaults));
+        Assert.Null(ProviderCategories.Suggest(null, "VERY_HIGH", true, Defaults));
+    }
+
+    [Fact]
+    public void A_learned_rule_beats_the_bank_category_and_the_bank_category_beats_the_keyword_table()
+    {
+        var tx = new MatchTransaction(Guid.CreateVersion7(), null, new DateOnly(2026, 10, 27), -650, "STARBUCKS 0091", "Starbucks", "FOOD_AND_DRINK_COFFEE", "VERY_HIGH");
+        var none = new Dictionary<string, PayeeRule>(StringComparer.Ordinal);
+        var suggestion = TransactionMatcher.SuggestWithoutOccurrence(tx, none, Defaults);
+        Assert.Equal((Fun, 82), (suggestion.CategoryId!.Value, suggestion.Confidence));
+
+        // Walmart: the keyword table says Groceries; Plaid says general merchandise, which this household has no category for
+        var walmart = tx with { Description = "WALMART SUPERCENTER", Payee = "Walmart", ProviderCategory = "GENERAL_MERCHANDISE_SUPERSTORES" };
+        Assert.Equal(Groceries, TransactionMatcher.SuggestWithoutOccurrence(walmart, none, Defaults).CategoryId);
+
+        var rules = new Dictionary<string, PayeeRule>(StringComparer.Ordinal) { ["starbucks"] = new("starbucks", Groceries, null, 2) };
+        Assert.Equal(Groceries, TransactionMatcher.SuggestWithoutOccurrence(tx, rules, Defaults).CategoryId);
+    }
+
+    [Fact]
+    public void Plaids_category_rides_along_on_each_transaction()
+    {
+        using var doc = JsonDocument.Parse("""
+            { "transaction_id": "t1", "amount": 4.25, "date": "2026-10-27", "name": "Blue Bottle", "pending": false,
+              "personal_finance_category": { "primary": "FOOD_AND_DRINK", "detailed": "FOOD_AND_DRINK_COFFEE", "confidence_level": "VERY_HIGH" } }
+            """);
+        var tx = PlaidParser.ParseTransaction(doc.RootElement, new DateOnly(2026, 10, 27))!;
+        Assert.Equal(("FOOD_AND_DRINK_COFFEE", "VERY_HIGH"), (tx.Category, tx.CategoryConfidence));
+    }
+
+    private static (Guid, int) Pick(ProviderCategorySuggestion? s) => (s!.CategoryId, s.Confidence);
+}

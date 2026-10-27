@@ -690,6 +690,12 @@ public sealed class ImportedTransactionRow
     /// <summary>A person sent this row back to review; automatic matching never applies it again.</summary>
     public bool AutoBlocked { get; init; }
 
+    /// <summary>v7: the bank feed's own category (Plaid <c>personal_finance_category.detailed</c>, e.g. FOOD_AND_DRINK_COFFEE).</summary>
+    public string? ProviderCategory { get; init; }
+
+    /// <summary>v7: its confidence (VERY_HIGH | HIGH | MEDIUM | LOW | UNKNOWN).</summary>
+    public string? ProviderCategoryConfidence { get; init; }
+
     public bool IsHidden => IgnoreReason is "dropped" or "superseded";
 
     public bool IsTransfer => Status == "ignored" && IgnoreReason == "transfer";

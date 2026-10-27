@@ -972,6 +972,8 @@ plaid_flow() {
   request GET "/v1/accounts/$PACC/transactions?filter=all" "$P_TOKEN"; expect 200 "the account's transactions"
   v6check "Plaid rows: money out negative, the bank's wording, the merchant as payee" \
     'any(.items[]; .source=="plaid" and .description=="SQ *BLUE BOTTLE 0042" and .payee=="Blue Bottle Coffee" and .amountCents==-425) and any(.items[]; .description=="ACME CORP PAYROLL" and .amountCents==150000)'
+  v6check "Plaid's VERY_HIGH coffee category filed it under Fun by itself" \
+    '.items[] | select(.description=="SQ *BLUE BOTTLE 0042") | .status=="confirmed" and (.matchDetail.reason|test("bank category: food and drink coffee"))'
   PDINER="$(echo "$BODY" | jq -r '.items[] | select(.description=="SQ *DINER") | .id')"
   v6check "the pending diner is dated by its authorization" ".items[] | select(.id==\"$PDINER\") | .pending==true and .amountCents==-4000 and .postedOn==\"$(date -u -d "$TODAY_UTC -1 day" +%F)\""
 

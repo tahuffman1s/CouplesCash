@@ -577,7 +577,7 @@ public sealed class BankSyncService(
             var tx = byExternalId[fresh.ExternalId];
             // v7: personal fun money never enters To review — stored confirmed with nothing attached (still listed on the account).
             var row = new NewImportedTransaction(source, external.Id, external.AccountId, tx.Id, fingerprints[tx.Id], tx.PostedOn, tx.AmountCents,
-                fresh.Description, tx.Payee, tx.Memo, tx.Pending, funAccount ? "confirmed" : "pending");
+                fresh.Description, tx.Payee, tx.Memo, tx.Pending, funAccount ? "confirmed" : "pending", tx.Category, tx.CategoryConfidence);
             if (await imports.InsertAsync(conn, householdId, row, now, ct) is { } id)
             {
                 newIds.Add(id);

@@ -19,6 +19,7 @@ public sealed record PlaidTransactionsPage(IReadOnlyList<JsonElement> Accounts, 
 /// <item>A pending transaction is dated by <c>authorized_date</c> (else <c>date</c>), never after today; a posted one by <c>date</c>.</item>
 /// <item>The description is the bank's own wording (<c>original_description</c>) when Plaid sends it, else <c>name</c>; the payee is
 /// <c>merchant_name</c>. A posted transaction's <c>pending_transaction_id</c> names the pending row it replaces.</item>
+/// <item><c>personal_finance_category</c> (detailed, else primary) and its <c>confidence_level</c> ride along as the row's provider category.</item>
 /// </list>
 /// </summary>
 public static class PlaidParser
@@ -152,6 +153,7 @@ public static class PlaidParser
 
         var description = Str(tx, "original_description") ?? Str(tx, "name") ?? Str(tx, "merchant_name") ?? "Transaction";
         var payee = Str(tx, "merchant_name");
+        tx.TryGetProperty("personal_finance_category", out var category);
         return new SimpleFinTransaction(
             id,
             postedOn,
@@ -160,7 +162,9 @@ public static class PlaidParser
             payee is not null && !string.Equals(payee, description, StringComparison.OrdinalIgnoreCase) ? payee : null,
             null,
             pending,
-            pending ? null : Str(tx, "pending_transaction_id"));
+            pending ? null : Str(tx, "pending_transaction_id"),
+            Str(category, "detailed") ?? Str(category, "primary"),
+            Str(category, "confidence_level"));
     }
 
     private static IReadOnlyList<JsonElement> Array(JsonElement root, string name) =>

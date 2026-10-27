@@ -122,6 +122,13 @@ then checks every 3 minutes for 20 minutes, since Plaid fetches from the bank in
 A posted transaction names the pending one it replaces (`pending_transaction_id`), so the pending row
 is updated in place even when the tip or the wording changed.
 
+**Categories from Plaid:** every Plaid transaction carries Plaid's own merchant category
+(`personal_finance_category`, e.g. *Food and drink → Coffee*) with a confidence. It is stored on the row and mapped to
+your categories by name (Groceries, Fun, Transportation, Utilities, Housing, Health, Insurance, Debt, Subscriptions,
+Income — and Dining, Shopping, Travel, … if you create them). Learned payee rules still come first. **Very high**
+confidence files a money-out transaction under that category by itself (auto-match level *all*; undo puts it back in
+To review), **high** and **medium** only suggest it, low suggests nothing. Transfers and card payments never get a category.
+
 **When the bank wants a new sign-in** (`ITEM_LOGIN_REQUIRED`, a new password, MFA…): the link card
 says so and shows **Reconnect**, which opens Plaid in update mode for that bank; the scheduler stops
 trying until then. **Unlink** also revokes the access token at Plaid (`/item/remove`).

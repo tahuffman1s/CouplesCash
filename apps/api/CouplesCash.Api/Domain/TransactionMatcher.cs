@@ -1,7 +1,9 @@
 namespace CouplesCash.Api.Domain;
 
 /// <summary>An imported transaction as the matcher sees it. <paramref name="AmountCents"/> is signed (negative = outflow).</summary>
-public sealed record MatchTransaction(Guid Id, Guid? AccountId, DateOnly PostedOn, long AmountCents, string Description, string? Payee)
+/// <param name="ProviderCategory">v7: the bank feed's own category (Plaid detailed code), with <paramref name="ProviderConfidence"/>.</param>
+public sealed record MatchTransaction(Guid Id, Guid? AccountId, DateOnly PostedOn, long AmountCents, string Description, string? Payee,
+    string? ProviderCategory = null, string? ProviderConfidence = null)
 {
     public bool IsOutflow => AmountCents < 0;
 
@@ -419,7 +421,7 @@ public static class TransactionMatcher
 
     /// <summary>
     /// v6: what the built-in engine suggests when there is no occurrence match (the fuzzy matcher found none, or only categories are
-    /// wanted): learned transfer payee (85) → learned category (70 + hits) → transfer keyword (60) → category keyword (40) → none.
+    /// wanted): learned transfer payee (85) → learned category (70 + hits) → bank feed category → transfer keyword (60) → category keyword (40) → none.
     /// </summary>
     public static Suggestion SuggestWithoutOccurrence(MatchTransaction tx, IReadOnlyDictionary<string, PayeeRule> rulesByNorm, IReadOnlyDictionary<string, Guid> categoriesByName)
     {
@@ -427,8 +429,8 @@ public static class TransactionMatcher
     }
 
     /// <summary>
-    /// After recurring and pair-transfer checks: learned transfer payee (85) → learned category (70 + hits) → transfer keyword (60)
-    /// → category keyword (40) → none.
+    /// After recurring and pair-transfer checks: learned transfer payee (85) → learned category (70 + hits) → the bank feed's category
+    /// (Plaid: 82 / 74 / 55 by its confidence) → transfer keyword (60) → category keyword (40) → none.
     /// </summary>
     private static Suggestion SuggestCategory(MatchTransaction tx, PayeeRule? rule, IReadOnlyDictionary<string, Guid> categoriesByName)
     {
@@ -440,6 +442,12 @@ public static class TransactionMatcher
         if (rule?.CategoryId is { } ruleCategory)
         {
             return Suggestion.Category(ruleCategory, RuleConfidence + Math.Clamp(rule.Hits, 0, RuleMaxHits));
+        }
+
+        // v7: the bank feed's own category (Plaid's merchant database), when the household has a matching category
+        if (ProviderCategories.Suggest(tx.ProviderCategory, tx.ProviderConfidence, tx.IsOutflow, categoriesByName) is { } provider)
+        {
+            return Suggestion.Category(provider.CategoryId, provider.Confidence);
         }
 
         if (IsTransferKeyword(tx.Description, tx.Payee, tx.IsOutflow))

@@ -140,6 +140,7 @@ public sealed class PlaidClient(IHttpClientFactory httpClientFactory, PlaidOptio
                         ["count"] = PageSize,
                         ["offset"] = transactions.Count,
                         ["include_original_description"] = true,
+                        ["include_personal_finance_category"] = true,
                     },
                 };
                 var parsed = PlaidParser.ParseTransactionsPage(await PostAsync("/transactions/get", body, ct));

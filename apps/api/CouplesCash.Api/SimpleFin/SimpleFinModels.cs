@@ -81,6 +81,7 @@ public sealed record SimpleFinAccount(
 /// <summary>
 /// <paramref name="AmountCents"/> is signed: negative = money out (deposits are positive in the protocol).
 /// <paramref name="ReplacesId"/> (Plaid's <c>pending_transaction_id</c>): this posted transaction is the pending one with that id.
+/// <paramref name="Category"/> / <paramref name="CategoryConfidence"/>: the feed's own category (Plaid's <c>personal_finance_category</c>).
 /// </summary>
 public sealed record SimpleFinTransaction(
     string Id,
@@ -90,4 +91,6 @@ public sealed record SimpleFinTransaction(
     string? Payee,
     string? Memo,
     bool Pending,
-    string? ReplacesId = null);
+    string? ReplacesId = null,
+    string? Category = null,
+    string? CategoryConfidence = null);

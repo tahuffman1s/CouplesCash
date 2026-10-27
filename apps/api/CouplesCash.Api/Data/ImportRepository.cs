@@ -18,7 +18,9 @@ public sealed record NewImportedTransaction(
     string? Payee,
     string? Memo,
     bool Pending,
-    string Status = "pending");
+    string Status = "pending",
+    string? ProviderCategory = null,
+    string? ProviderCategoryConfidence = null);
 
 /// <summary>
 /// v5 per-account transaction list. <paramref name="Filter"/>: all | pending | review | matched | transfers (validated by the endpoint).
@@ -44,6 +46,7 @@ public sealed class ImportRepository(NpgsqlDataSource db)
                u.display_name AS reviewed_by_name, cc.name AS confirmed_category_name, ci.name AS confirmed_item_name,
                ci.kind AS confirmed_item_kind, ex.category_id AS confirmed_category_id, pt.account_id AS peer_account_id, pa.name AS peer_account_name,
                t.match_score, t.match_detail::text AS match_detail, t.auto_blocked,
+               t.provider_category, t.provider_category_confidence,
                'bank' AS kind
         FROM imported_transactions t
         LEFT JOIN accounts a ON a.id = t.account_id
@@ -74,6 +77,7 @@ public sealed class ImportRepository(NpgsqlDataSource db)
                u.display_name AS reviewed_by_name, cc.name AS confirmed_category_name, NULL::text AS confirmed_item_name,
                NULL::text AS confirmed_item_kind, e.category_id AS confirmed_category_id, NULL::uuid AS peer_account_id, NULL::text AS peer_account_name,
                NULL::smallint AS match_score, NULL::text AS match_detail, false AS auto_blocked,
+               NULL::text AS provider_category, NULL::text AS provider_category_confidence,
                'manual' AS kind
         FROM expenses e
         LEFT JOIN accounts a ON a.id = e.account_id
@@ -99,9 +103,10 @@ public sealed class ImportRepository(NpgsqlDataSource db)
         conn.QuerySingleOrDefaultAsync<Guid?>(Cmd(
             """
             INSERT INTO imported_transactions (id, household_id, source, external_account_id, account_id, external_id, fingerprint, posted_on,
-                                               amount_cents, description, payee, memo, pending, status, created_at)
+                                               amount_cents, description, payee, memo, pending, status, created_at,
+                                               provider_category, provider_category_confidence)
             VALUES (@Id, @HouseholdId, @Source, @ExternalAccountId, @AccountId, @ExternalId, @Fingerprint, @PostedOn,
-                    @AmountCents, @Description, @Payee, @Memo, @Pending, @Status, @Now)
+                    @AmountCents, @Description, @Payee, @Memo, @Pending, @Status, @Now, @ProviderCategory, @ProviderCategoryConfidence)
             ON CONFLICT (household_id, fingerprint) DO UPDATE
             SET pending = EXCLUDED.pending, posted_on = EXCLUDED.posted_on, amount_cents = EXCLUDED.amount_cents,
                 description = EXCLUDED.description, payee = EXCLUDED.payee, memo = EXCLUDED.memo
@@ -125,6 +130,8 @@ public sealed class ImportRepository(NpgsqlDataSource db)
                 t.Pending,
                 t.Status,
                 Now = now,
+                t.ProviderCategory,
+                t.ProviderCategoryConfidence,
             }, ct));
 
     // ---------------------------------------------------------------------------------------------
