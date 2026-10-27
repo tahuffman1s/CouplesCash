@@ -182,7 +182,8 @@ public class V7Tests
         var available = WeekEngine.BillsAvailable(234_567, 240_807, 6_240);
         var totals = PlanEngine.Totals(PayWeek, available, Week, UsBank, Roles);
 
-        Assert.Equal(199_250, totals.BillsOutCents);   // − Bills before next Friday $1,992.50
+        Assert.Equal(200_799, totals.BillsOutCents);   // − Bills before next Friday $2,007.99 (every bill of the week, Netflix paid too)
+        Assert.Equal(1_549, totals.PaidThisWeekCents);  // + Already paid this week $15.49 (Netflix left the bank already)
         Assert.Equal(4_000, totals.FunOutCents);       // − Fun money $40.00
         Assert.Equal(6_000, totals.OneOffOutCents);    // − One-offs $60.00
         Assert.Equal(0, totals.IncomeInCents);         // this payday's paycheck already posted; next payday's is the new week
@@ -201,7 +202,8 @@ public class V7Tests
         // The bank row arrives at $1,862.40: available drops by it and the line is paid from the bank → left moves only by the difference.
         var fromBank = Week.Select(o => o.ItemId == Id(1) ? o with { PaidCents = 186_240, PaidFromBank = true } : o).ToList();
         var posted = PlanEngine.Totals(PayWeek, 234_567 - 186_240, fromBank, UsBank, Roles);
-        Assert.Equal(199_250 - 185_000, posted.BillsOutCents);
+        Assert.Equal(200_799 + 1_240, posted.BillsOutCents);       // still in the bills, at the bank's amount
+        Assert.Equal(1_549 + 186_240, posted.PaidThisWeekCents);  // and added back on top of the balance
         Assert.Equal(25_317 - 1_240, posted.LeftAtEndCents);
     }
 

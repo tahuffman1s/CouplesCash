@@ -41,8 +41,11 @@ public sealed record PlanOccurrence(
     public bool IsPaid => PaidCents is not null;
 }
 
-/// <summary>The plan's sums over the unpaid occurrences of the pay week and the number she writes down.</summary>
-public readonly record struct PlanTotals(long BillsOutCents, long FunOutCents, long OneOffOutCents, long IncomeInCents, long LeftAtEndCents);
+/// <summary>
+/// The plan's sums over every occurrence of the pay week, paid or not, and the number she writes down. <see cref="PaidThisWeekCents"/> is
+/// what the bank already paid for those lines, added back on top of the balance so nothing counts twice.
+/// </summary>
+public readonly record struct PlanTotals(long BillsOutCents, long FunOutCents, long OneOffOutCents, long IncomeInCents, long LeftAtEndCents, long PaidThisWeekCents = 0);
 
 /// <summary>A bank row that may be the bills-account side of a planned transfer or of the savings sweep.</summary>
 /// <param name="AmountCents">Signed (negative = money out of <paramref name="AccountId"/>).</param>
@@ -163,34 +166,49 @@ public static class PlanEngine
         bucket == PlanBucket.OneOff ? "oneoff" : kind.ToDb();
 
     /// <summary>
-    /// Sums of the occurrences due in <paramref name="week"/> whose money has not moved through the bank yet, per bucket, and
-    /// <c>leftAtEnd = available − bills − fun − one-offs + income</c> (savings bills and unrelated items never count). A line paid from a
-    /// bank transaction is already in <c>available</c>; one ticked by hand or by autopay keeps counting until its bank row arrives (it then
-    /// takes the payment over), so ticking never moves the number — only the bank does.
+    /// Sums of every bill, fun-money and one-off occurrence due in <paramref name="week"/> — paid or not; ticks are a to-do list — plus income
+    /// not received yet, and
+    /// <c>leftAtEnd = available + paidThisWeek − bills − fun − one-offs + income</c> (savings bills and unrelated items never count). A line paid
+    /// from a bank transaction counts at the bank's amount and that money is already gone from <c>available</c>, so it is added back as
+    /// <c>paidThisWeek</c>; one ticked by hand or by autopay is still in <c>available</c>. Either way ticking never moves the number.
     /// </summary>
     public static PlanTotals Totals(WeekWindow week, long availableCents, IEnumerable<(PlanOccurrence Occurrence, PlanBucket Bucket)> lines)
     {
-        long bills = 0, fun = 0, oneOff = 0, income = 0;
-        foreach (var (o, bucket) in lines.Where(l => !l.Occurrence.PaidFromBank && week.Contains(l.Occurrence.DueDate)))
+        long bills = 0, fun = 0, oneOff = 0, income = 0, moved = 0;
+        foreach (var (o, bucket) in lines.Where(l => week.Contains(l.Occurrence.DueDate)))
         {
+            // Income still counts only until it arrives: this payday's paycheck is already the balance she starts from.
+            if (bucket == PlanBucket.Income && o.PaidFromBank)
+            {
+                continue;
+            }
+
+            var amount = o.PaidFromBank ? o.PaidCents ?? o.AmountCents : o.AmountCents;
             switch (bucket)
             {
                 case PlanBucket.Bill:
-                    bills += o.AmountCents;
+                    bills += amount;
                     break;
                 case PlanBucket.FunMoney:
-                    fun += o.AmountCents;
+                    fun += amount;
                     break;
                 case PlanBucket.OneOff:
-                    oneOff += o.AmountCents;
+                    oneOff += amount;
                     break;
                 case PlanBucket.Income:
-                    income += o.AmountCents;
+                    income += amount;
                     break;
+                default:
+                    continue;
+            }
+
+            if (o.PaidFromBank)
+            {
+                moved += amount;
             }
         }
 
-        return new PlanTotals(bills, fun, oneOff, income, availableCents - bills - fun - oneOff + income);
+        return new PlanTotals(bills, fun, oneOff, income, availableCents + moved - bills - fun - oneOff + income, moved);
     }
 
     /// <summary>Classify + <see cref="Totals"/> in one go.</summary>

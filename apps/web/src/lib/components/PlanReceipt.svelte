@@ -9,6 +9,7 @@
 	import {
 		bankDataAge,
 		leftLabel,
+		PROJECTED_LABEL,
 		pendingLine,
 		receiptLines,
 		savingsNote,
@@ -18,7 +19,7 @@
 	/**
 	 * v7 Friday plan: the calculation she does in her notes app, as a receipt. Monospace amounts,
 	 * every line expands (pending, each bill with its tick, fun money per person, one-offs), and
-	 * the hero "= Left on Thursday" with Copy. Under it, the bottom line: on Thursday what is left
+	 * the green hero "= Projected Savings Amount" (what is left on the week's last day) with Copy. Under it, the bottom line: on Thursday what is left
 	 * moves to savings (Copy / Done; ticks itself when the bank shows it). Savings bills sit under
 	 * it, not in it.
 	 */
@@ -42,6 +43,7 @@
 	const amount = (key: string, cents: number) =>
 		key === 'available' ? formatMoney(cents) : signedMoney(cents);
 	const emptyText: Record<string, string> = {
+		paid: '',
 		bills: 'Nothing else due before payday.',
 		fun: 'No fun money this week.',
 		oneoffs: 'No one-offs planned.',
@@ -122,10 +124,15 @@
 								<PlanLineRow line={pl} today={plan.today} />
 							{/each}
 						</ul>
-						{#if l.key === 'bills' || l.key === 'oneoffs' || l.key === 'fun'}
+						{#if l.key === 'paid'}
 							<p class="mt-1 text-xs text-base-content/55">
-								A bill counts until the bank shows it, so ticking one early never changes the
-								number. Bills tick themselves when the bank shows them.
+								The bank already took these out of the balance above. They're added back here
+								because every bill of the week is subtracted below, so nothing counts twice.
+							</p>
+						{:else if l.key === 'bills' || l.key === 'oneoffs' || l.key === 'fun'}
+							<p class="mt-1 text-xs text-base-content/55">
+								Every bill due this week counts, paid or not: the ticks are your to-do list and
+								never change the number. Bills tick themselves when the bank shows them.
 							</p>
 						{/if}
 					{/if}
@@ -136,17 +143,19 @@
 	<div
 		class="flex flex-wrap items-center gap-x-3 gap-y-2 border-t-2 border-base-content/70 px-4 py-4 {negative
 			? 'bg-error/10'
-			: 'bg-primary/5'}"
+			: 'bg-success/15'}"
+		data-testid="projected"
 	>
 		<div class="min-w-0 flex-1">
 			<p class="text-sm font-semibold">
 				<span class="font-mono text-base-content/60" aria-hidden="true">=</span>
-				{leftLabel(plan.end)}
+				{PROJECTED_LABEL}
 			</p>
+			<p class="text-xs text-base-content/60">{leftLabel(plan.end)}</p>
 			<p
 				class="font-mono text-4xl leading-tight font-bold tracking-tight tabular {negative
 					? 'text-error'
-					: ''}"
+					: 'text-success'}"
 				data-testid="left-on"
 			>
 				{formatMoney(plan.leftAtEndCents)}

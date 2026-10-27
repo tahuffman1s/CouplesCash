@@ -281,10 +281,12 @@ describe('receiptLines', () => {
 			[
 				'US Bank, available now  $2,345.67',
 				'− Bills before next Friday  −$1,992.50',
-				'= Left on Thursday  $353.17'
+				'= Projected Savings Amount  $353.17'
 			].join('\n')
 		);
-		expect(noteText(plan({ leftAtEndCents: -4210 }))).toContain('= Left on Thursday  -$42.10');
+		expect(noteText(plan({ leftAtEndCents: -4210 }))).toContain(
+			'= Projected Savings Amount  -$42.10'
+		);
 	});
 });
 

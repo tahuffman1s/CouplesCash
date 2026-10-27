@@ -843,7 +843,7 @@ v7_friday_flow() {
   v7check "available now = US Bank available \$2,345.67 (bank-reported), 3 pending −\$62.40 informational" \
     ".billsAccount.id==\"$USB\" and .billsAccount.availableCents==234567 and .billsAccount.availableFromBank==true and .billsAccount.balanceCents==240807 and (.billsAccount.pending|length==3) and .billsAccount.pendingOutCents==6240"
   v7check "bills before next payday \$1,992.50 (Rent, Phone, Internet), fun money \$40.00, one-offs \$60.00, no income still to come" \
-    '.billsOutCents==199250 and .funOutCents==4000 and .oneOffOutCents==6000 and .incomeInCents==0 and ([.bills[].occurrence.name]|sort)==["Internet","Phone","Rent"] and (.funMoney|length==2) and (.oneOffs|length==1) and .oneOffs[0].kind=="oneoff"'
+    '.billsOutCents==199250 and .funOutCents==4000 and .oneOffOutCents==6000 and .incomeInCents==0 and .paidThisWeekCents==0 and ([.bills[].occurrence.name]|sort)==["Internet","Phone","Rent"] and (.funMoney|length==2) and (.oneOffs|length==1) and .oneOffs[0].kind=="oneoff"'
   v7check "student loan is a savings bill (shown, not in the math); paycheck line ticked" \
     "(.savingsBills|length==1) and .savingsBills[0].occurrence.itemId==\"$LOAN7\" and (.income|length==1) and .income[0].occurrence.paid!=null"
   v7check "pay week = payday … payday + 6, isPayday, accounts strip bills · savings · fun · fun" \
@@ -865,8 +865,8 @@ v7_friday_flow() {
   # Friday: Travis moves $20 to each fun account → the bank feed shows both legs → the planned transfers tick themselves.
   curl -fs -X POST "$FAKE/__phase/v7/2" >/dev/null || fail "phase v7/2"
   v7wait "fun transfers auto-paid from the bank feed (transfer pairs to each fun account)" /v1/plan \
-    '.funOutCents==0 and ([.funMoney[] | select(.occurrence.paid.source=="bank" and .occurrence.paid.auto==true)] | length==2)'
-  v7check "left on Thursday unchanged (\$40 left the account and the plan), available \$2,305.67" '.leftAtEndCents==25317 and .billsAccount.availableCents==230567'
+    '([.funMoney[] | select(.occurrence.paid.source=="bank" and .occurrence.paid.auto==true)] | length==2)'
+  v7check "projected savings unchanged: fun money still \$40 in the plan, added back as already paid; available \$2,305.67" '.leftAtEndCents==25317 and .funOutCents==4000 and .paidThisWeekCents==4000 and .billsAccount.availableCents==230567'
   v7check "checklist: both fun transfers ticked automatically with their transactions" '[.checklist[] | select(.key=="fun" and .done==true and .auto==true and .transactionId!=null)] | length==2'
   request GET "/v1/accounts/$USB/transactions?filter=transfers" "$T_TOKEN"; expect 200 "US Bank transfers"
   v7check "both −\$20 rows are ignored transfers paired with a fun account and linked to their planned transfer" \
@@ -1365,7 +1365,8 @@ if [[ -n "${SMOKE_SIMPLEFIN_PORT:-}" ]]; then
     request GET "/v1/calendar?from=$TODAY_UTC&to=$TODAY_UTC" "$A_TOKEN"
     check "occurrence paid from the bank at 48.00" ".occurrences[] | select(.itemId==\"$DINER_BILL\") | .paid.amountCents==4800 and .paid.source==\"bank\" and .varianceCents==0"
     request GET "/v1/inbox/$TX_DINER/candidates" "$A_TOKEN"
-    check "candidates mark the occurrence paidByThis" ".occurrences[] | select(.itemId==\"$DINER_BILL\") | .paidByThis==true and .paid!=null"
+    # (the bill's earlier date, before it started, is listed too — unpaid)
+    check "candidates mark the occurrence paidByThis" "[.occurrences[] | select(.itemId==\"$DINER_BILL\" and .paidByThis)] | length==1 and .[0].paid!=null and .[0].dueDate==\"$TODAY_UTC\""
     request POST "/v1/inbox/$TX_DINER/unmatch" "$A_TOKEN"; expect 200 "unmatch"
     check "back to To review" '.status=="pending" and .match==null and .expense==null and .confirmed==null'
     request GET "/v1/calendar?from=$TODAY_UTC&to=$TODAY_UTC" "$A_TOKEN"

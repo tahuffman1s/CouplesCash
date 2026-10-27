@@ -237,7 +237,8 @@ public sealed class PlanService(
             Checklist: checklist,
             Sweep: sweep?.ToDto(),
             ToReviewCount: await imports.CountPendingAsync(conn, householdId, ct),
-            Setup: setup);
+            Setup: setup,
+            PaidThisWeekCents: totals.PaidThisWeekCents);
     }
 }
 

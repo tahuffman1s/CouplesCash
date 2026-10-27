@@ -575,6 +575,7 @@ public sealed record PlanDto(
     IReadOnlyList<ChecklistItemDto> Checklist,
     SweepDto? Sweep,
     int ToReviewCount,
-    PlanSetupDto Setup);
+    PlanSetupDto Setup,
+    long PaidThisWeekCents = 0);
 
 public sealed record RecurringBulkResponse(IReadOnlyList<RecurringItemDto> Items);

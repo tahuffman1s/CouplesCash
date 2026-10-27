@@ -34,18 +34,20 @@ Reads top-to-bottom like her note, every line tappable to expand:
 ```
 US Bank, available now             $2,345.67   ← bank available balance (already after pending)
    3 pending                         −$62.40   ← list; informational when the bank gives "available"
-− Bills before next Friday        −$1,992.50   ← each bill; ticks to Paid when the bank transaction matches
++ Already paid this week             +$15.49   ← only when the bank already paid some of this week's lines (added back)
+− Bills before next Friday        −$2,007.99   ← every bill of the week, paid or not; ticks are a to-do list
 − Fun money                           −$40.00   ← $20 Travis · $20 <wife>; +$300 on the first one of the month
 − One-offs                            −$60.00   ← planned with + ("oil change 60 friday")
 ─────────────────────────────────────────────
-= Left on Thursday                    $253.17   ← the number she writes down
+= Projected Savings Amount            $253.17   ← the number she writes down (left on Thursday; green)
 → Move $253.17 to savings today   [Copy][Done]  ← the bottom line, on Thursday; "Moved … ✓" once the bank shows it
 ```
 - **Move to savings** is the bottom line, not a line in the sum: on Thursday what is left moves to savings. Before Thursday it
   reads "On Thursday, move what's left to savings"; on Thursday "Move $X to savings today" (X = Left on Thursday, Copy / Done);
   once the transfer shows up (or she taps Done) "Moved $X to savings ✓" and Left on Thursday drops to what stays.
-- **Left on Thursday is the balance after everything is paid**, so a tick never moves it: a bill paid from the bank is
-  already out of `available`; a bill ticked by hand (or by autopay) still counts until the bank shows it, and that bank
+- **Left on Thursday (the Projected Savings Amount) is the balance after everything is paid**, so a tick never moves it. Every bill
+  of the week is in the bills line, paid or not; one the bank already paid is out of `available`, so it is added back as
+  "Already paid this week"; one ticked by hand (or by autopay) is still in `available` until the bank shows it, and that bank
   transaction then takes the tick over. It moves only when the bank does, by the difference between paid and planned.
 - **Available now** = the bills account's bank `availableCents`; when the bank doesn't report it,
   `balanceCents − pendingOutCents` (so pending is never ignored and never double-counted).

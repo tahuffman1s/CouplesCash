@@ -60,7 +60,11 @@ test('the plan reads like her note and its math follows bills paid and one-offs 
 	await expect(receipt.getByTestId('plan-row-bills')).toContainText('Bills before next Friday');
 	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$60.00');
 	await expect(page.getByTestId('plan-amount-fun')).toHaveText(`−${usd(fun)}`);
+	await expect(page.getByTestId('projected')).toContainText('Projected Savings Amount');
+	await expect(page.getByTestId('projected')).toHaveClass(/bg-success/);
 	await expect(receipt).toContainText('Left on Thursday');
+	// nothing paid by the bank yet: no "already paid" line
+	await expect(receipt.getByTestId('plan-row-paid')).toHaveCount(0);
 	await expect(page.getByTestId('left-on')).toHaveText(usd(left));
 	await expect(page.getByTestId('review-line')).toContainText('to review');
 

@@ -117,7 +117,9 @@ test('a transaction added by hand can pay a bill, so it is counted once', async 
 	await expect(row()).toContainText('Water · added');
 	await page.goto('/week');
 	await expect(left).toHaveText(usd(before));
-	await expect(page.getByTestId('plan-amount-bills')).toHaveText('$0.00');
+	// still one of the week's bills, and added back on top of the balance it already left
+	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$61.37');
+	await expect(page.getByTestId('plan-amount-paid')).toHaveText('+$61.37');
 
 	// unlink: the bill is unpaid again (and counted again)
 	await page.goto('/transactions');

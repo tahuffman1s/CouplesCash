@@ -74,7 +74,10 @@ export function planRangeLabel(start: ISODate, end: ISODate): string {
 	return `${shortDay(start)} – ${shortDay(end)}`;
 }
 
-/** "= Left on Thursday": named for the last day of the pay week. */
+/** The receipt's bottom line: what is projected to be left for savings on the last day of the pay week. */
+export const PROJECTED_LABEL = 'Projected Savings Amount';
+
+/** "Left on Thursday": named for the last day of the pay week. */
 export function leftLabel(end: ISODate): string {
 	return `Left on ${weekdayName(weekday(end))}`;
 }
@@ -155,7 +158,7 @@ export function pendingLine(
 }
 
 export type ReceiptLine = {
-	key: 'available' | 'bills' | 'fun' | 'oneoffs' | 'income';
+	key: 'available' | 'paid' | 'bills' | 'fun' | 'oneoffs' | 'income';
 	/** the operator in front of the label, like her note: "", "−", "+" */
 	op: '' | '−' | '+';
 	label: string;
@@ -179,6 +182,19 @@ export function receiptLines(plan: Plan): ReceiptLine[] {
 			cents: b.availableCents,
 			lines: []
 		},
+		...(plan.paidThisWeekCents
+			? [
+					<ReceiptLine>{
+						key: 'paid',
+						op: '+',
+						label: 'Already paid this week',
+						cents: plan.paidThisWeekCents,
+						lines: [...plan.bills, ...plan.funMoney, ...plan.oneOffs].filter(
+							(l) => l.occurrence.paid?.source === 'bank'
+						)
+					}
+				]
+			: []),
 		{
 			key: 'bills',
 			op: '−',
@@ -219,7 +235,7 @@ export function noteText(plan: Plan): string {
 	const rows = receiptLines(plan).map(
 		(l) => `${l.op ? `${l.op} ` : ''}${l.label}  ${signedOrBalance(l)}`
 	);
-	return [...rows, `= ${leftLabel(plan.end)}  ${formatMoney(plan.leftAtEndCents)}`].join('\n');
+	return [...rows, `= ${PROJECTED_LABEL}  ${formatMoney(plan.leftAtEndCents)}`].join('\n');
 }
 const signedOrBalance = (l: ReceiptLine) =>
 	l.key === 'available' ? formatMoney(l.cents) : signedMoney(l.cents);

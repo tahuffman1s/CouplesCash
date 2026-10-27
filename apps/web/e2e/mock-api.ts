@@ -3344,17 +3344,26 @@ function planFor(hh: string, date: string) {
 			else lines.bills.push({ kind: o.kind, occurrence: o });
 		}
 	}
-	// a tick by hand or by autopay keeps counting until the bank shows it (the money is still in available)
-	const unpaid = (l: PlanLine[]) =>
-		l
-			.filter((x) => x.occurrence.paid?.source !== 'bank')
-			.reduce((s, x) => s + x.occurrence.amountCents, 0);
-	const billsOutCents = unpaid(lines.bills);
-	const funOutCents = unpaid(lines.funMoney);
-	const oneOffOutCents = unpaid(lines.oneOffs);
-	// unpaid income due inside the pay week counts (the next payday's belongs to the next week)
-	const incomeInCents = unpaid(lines.income);
-	let leftAtEndCents = available - billsOutCents - funOutCents - oneOffOutCents + incomeInCents;
+	// every bill / fun / one-off of the week counts, paid or not (ticks are a to-do list); one the bank already paid counts at the
+	// bank's amount and is added back on top of available (it already left the account)
+	const fromBank = (x: PlanLine) => x.occurrence.paid?.source === 'bank';
+	const amount = (x: PlanLine) =>
+		fromBank(x)
+			? (x.occurrence.paid?.amountCents ?? x.occurrence.amountCents)
+			: x.occurrence.amountCents;
+	const sum = (l: PlanLine[]) => l.reduce((s, x) => s + amount(x), 0);
+	const billsOutCents = sum(lines.bills);
+	const funOutCents = sum(lines.funMoney);
+	const oneOffOutCents = sum(lines.oneOffs);
+	const paidThisWeekCents = sum(
+		[...lines.bills, ...lines.funMoney, ...lines.oneOffs].filter(fromBank)
+	);
+	// income counts until it arrives (the next payday's belongs to the next week)
+	const incomeInCents = lines.income
+		.filter((x) => !fromBank(x))
+		.reduce((s, x) => s + x.occurrence.amountCents, 0);
+	let leftAtEndCents =
+		available + paidThisWeekCents - billsOutCents - funOutCents - oneOffOutCents + incomeInCents;
 
 	// The sweep is the week's bottom line: frozen on its last day (the sweep day) from Left on <day>.
 	const key = `${hh}:${start}`;
@@ -3451,6 +3460,7 @@ function planFor(hh: string, date: string) {
 		funOutCents,
 		oneOffOutCents,
 		incomeInCents,
+		paidThisWeekCents,
 		leftAtEndCents,
 		checklist,
 		sweep: sweep ? sweepView(sweep) : null,

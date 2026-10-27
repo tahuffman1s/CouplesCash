@@ -840,8 +840,10 @@ type Plan = {
                   balanceAt: string | null } | null;   // null → setup needed; balanceAt = the Bridge's balance-date
   accounts: { id: string; name: string; role: AccountRole; ownerName: string | null; balanceCents: number; availableCents: number | null }[];
   bills: PlanLine[]; funMoney: PlanLine[]; oneOffs: PlanLine[]; income: PlanLine[];
-  billsOutCents: number; funOutCents: number; oneOffOutCents: number; incomeInCents: number;  // unpaid remainders
-  leftAtEndCents: number;        // availableCents − bills − fun − one-offs (+ unpaid income only when it lands before end)
+  billsOutCents: number; funOutCents: number; oneOffOutCents: number;  // every line of the week, paid or not (bank-paid at the bank's amount)
+  incomeInCents: number;         // income still to come this week
+  paidThisWeekCents: number;     // what the bank already paid for this week's bills / fun / one-offs (added back)
+  leftAtEndCents: number;        // "Projected Savings Amount": available + paidThisWeek − bills − fun − one-offs + incomeIn
   savingsBills: PlanLine[];      // e.g. student loans from savings — shown, not in the math
   checklist: ChecklistItem[];    // payday only (empty otherwise): paycheck and fun money
   sweep: Sweep | null; toReviewCount: number; setup: { banksLinked: boolean; rolesSet: boolean; paycheckKnown: boolean; billsAdded: boolean; partnerJoined: boolean } };
@@ -957,10 +959,12 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   never in the math); on any other account → not listed. Income on the bills account or unassigned → `income`. Transfers: from the bills
   account to a `fun` account → `funMoney`; from the bills account elsewhere → `bills` (line kind `transfer`); into the bills account →
   `income`; between two other accounts → not listed. Before setup (no bills account) every account that is not savings / fun counts as the
-  bills side. Lines paid from a bank transaction (`paid.source = 'bank'`) are listed (ticked) and not counted — their money is
-  already in `available`; lines ticked by hand or by autopay are listed as paid but **keep counting** until their bank transaction
-  arrives and takes the payment over, so a tick never moves `leftAtEndCents` (only the bank does, by the paid − planned difference). `billsOutCents` / `funOutCents` / `oneOffOutCents` / `incomeInCents` are
-  the unpaid planned amounts; **`leftAtEndCents = available − billsOut − funOut − oneOffOut + incomeIn`** where unpaid income counts only
+  bills side. Every bill / fun / one-off line of the week counts, paid or not (the ticks are a to-do list). A line paid from a bank transaction
+  (`paid.source = 'bank'`) counts at the bank's amount, and since that money already left `available` it is added back as
+  `paidThisWeekCents`; a line ticked by hand or by autopay counts at its planned amount and its money is still in `available`. So a tick never
+  moves `leftAtEndCents` (only the bank does, by the paid − planned difference). `billsOutCents` / `funOutCents` / `oneOffOutCents` are those
+  sums, `incomeInCents` the income not received yet;
+  **`leftAtEndCents = available + paidThisWeek − billsOut − funOut − oneOffOut + incomeIn`** (shown as "Projected Savings Amount") where unpaid income counts only
   when due inside the pay week (≤ end = the day before the next payday): the next payday's paycheck belongs to the new week, and this
   week's paycheck, once it posts, is paid and already in available — it is never added twice. For a past week `leftAtEndCents` is the
   number frozen for its own sweep (`left_cents`, its Left on Thursday before the move) when there is one; a future week uses today's available (a rough

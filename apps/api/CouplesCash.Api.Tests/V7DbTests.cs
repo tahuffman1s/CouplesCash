@@ -378,7 +378,7 @@ public class V7DbTests
             // … linked to the bill it is counted once: the bill is paid (source bank), the added row stays added (confirmed, pending).
             Assert.Null(await Match(paid.Id, netflix));
             var plan = await Plan();
-            Assert.Equal((4_000L, before.LeftAtEndCents), (plan.BillsOutCents, plan.LeftAtEndCents));
+            Assert.Equal((1_549L + 4_000, 1_549L, before.LeftAtEndCents), (plan.BillsOutCents, plan.PaidThisWeekCents, plan.LeftAtEndCents));
             Assert.Equal(PaymentSource.Bank, (await Payment(netflix.Id))!.Source);
             var linked = (await imports.GetAsync(householdId, paid.Id, ct))!;
             Assert.Equal(("added", "confirmed", (Guid?)netflix.Id), (linked.Source, linked.Status, linked.ConfirmedItemId));
@@ -409,15 +409,15 @@ public class V7DbTests
 
             Assert.Equal(PaymentSource.Bank, (await Payment(netflix.Id))!.Source);
             Assert.Contains((await items.GetAsync(householdId, netflix.Id, ct))!.BankNamesLearned, n => n.Contains("netflix", StringComparison.OrdinalIgnoreCase));
-            Assert.Equal(4_000, (await Plan()).BillsOutCents);
+            Assert.Equal((5_549L, 1_549L), ((await Plan()).BillsOutCents, (await Plan()).PaidThisWeekCents));
 
             // A linked added row that is deleted leaves its bill unpaid.
             var gymPaid = (await added.AddAsync(householdId, user.Id, "Tester", checking.Id, -4_000, "Gym", today, force: false, ct)).Row!;
             Assert.Null(await Match(gymPaid.Id, gym));
-            Assert.Equal(0, (await Plan()).BillsOutCents);
+            Assert.Equal((5_549L, 5_549L), ((await Plan()).BillsOutCents, (await Plan()).PaidThisWeekCents));
             Assert.True(await added.DeleteAsync(householdId, user.Id, "Tester", gymPaid.Id, ct));
             Assert.Null(await Payment(gym.Id));
-            Assert.Equal(4_000, (await Plan()).BillsOutCents);
+            Assert.Equal((5_549L, 1_549L), ((await Plan()).BillsOutCents, (await Plan()).PaidThisWeekCents));
         }
         finally
         {

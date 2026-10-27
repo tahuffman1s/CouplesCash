@@ -62,7 +62,10 @@ test('payday: Done by hand, then the bank ticks the paycheck and fun money', asy
 	await funRow.locator('summary').click();
 	for (const s of await funRow.getByTestId('plan-status').all())
 		await expect(s).toContainText('Paid · auto');
-	await expect(page.getByTestId('plan-amount-fun')).toHaveText(usd(0));
+	// … and still counted in the plan (every line of the week counts), added back as already paid
+	const funText = (await page.getByTestId('plan-amount-fun').textContent())!.trim();
+	expect(funText.startsWith('−')).toBe(true);
+	await expect(page.getByTestId('plan-amount-paid')).toHaveText(funText.replace('−', '+'));
 
 	// every pending row is listed: the 3 card holds plus today's still-pending fun transfers,
 	// in the plan (the "after N pending" line and its list) and in Transactions → Pending

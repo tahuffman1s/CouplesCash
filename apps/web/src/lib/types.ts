@@ -802,12 +802,15 @@ export type Plan = {
 	funMoney: PlanLine[];
 	oneOffs: PlanLine[];
 	income: PlanLine[];
-	/** unpaid remainders */
+	/** every line of the week, paid or not (a bank-paid line at the bank's amount) */
 	billsOutCents: number;
 	funOutCents: number;
 	oneOffOutCents: number;
+	/** income still to come this week */
 	incomeInCents: number;
-	/** available − bills − fun − one-offs (+ unpaid income only when it lands before the end) */
+	/** what the bank already paid for this week's bills / fun / one-offs (added back on top of available); older API → absent */
+	paidThisWeekCents?: number;
+	/** projected savings: available + paidThisWeek − bills − fun − one-offs + income still to come */
 	leftAtEndCents: number;
 	/** e.g. student loans from savings: shown, not in the math */
 	savingsBills: PlanLine[];
