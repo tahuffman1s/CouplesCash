@@ -272,11 +272,17 @@
 									data-testid="payment-row"
 									data-date={p.dueDate}
 									data-paid={p.paid ? 'true' : 'false'}
+									data-earlier={p.earlier ? 'true' : undefined}
 								>
 									<div class="min-w-0 flex-1">
 										<p class="flex items-center gap-1.5 text-sm font-medium">
 											{formatDate(p.dueDate)}
-											{#if !p.paid}
+											{#if p.earlier}
+												<span
+													class="badge border-0 bg-base-200 px-1.5 badge-xs text-[0.65rem] text-base-content/70"
+													>Before it started</span
+												>
+											{:else if !p.paid}
 												<span
 													class="badge border-0 px-1.5 badge-xs text-[0.65rem] {p.dueDate < today()
 														? 'bg-error/15 text-error'
@@ -301,6 +307,8 @@
 													{paymentSource(p)}
 												</p>
 											{/if}
+										{:else if p.earlier}
+											<p class="text-xs text-base-content/60">An older payment? Link it here.</p>
 										{:else}
 											<p class="text-xs text-base-content/60">
 												Planned {formatMoney(p.plannedCents)}

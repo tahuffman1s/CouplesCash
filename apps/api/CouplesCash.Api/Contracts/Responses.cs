@@ -446,7 +446,7 @@ public sealed record FromTransactionResponse(RecurringItemDto Item, InboxItemDto
 
 public sealed record BillPaymentTransactionDto(Guid Id, DateOnly PostedOn, long AmountCents, string Description, string? AccountName);
 
-public sealed record BillPaymentDto(DateOnly DueDate, long PlannedCents, PaidInfo? Paid, long? VarianceCents, BillPaymentTransactionDto? Transaction);
+public sealed record BillPaymentDto(DateOnly DueDate, long PlannedCents, PaidInfo? Paid, long? VarianceCents, BillPaymentTransactionDto? Transaction, bool Earlier = false);
 
 public sealed record TransferSideDto(Guid? AccountId, string Name, Guid TransactionId);
 

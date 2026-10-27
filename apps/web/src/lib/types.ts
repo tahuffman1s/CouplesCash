@@ -634,6 +634,8 @@ export type TransferReport = {
 export type BillPayment = {
 	dueDate: string;
 	plannedCents: number;
+	/** The date just before the bill started, for an older payment (linking one moves the start there). */
+	earlier?: boolean;
 	paid: Paid | null;
 	varianceCents: number | null;
 	transaction: {

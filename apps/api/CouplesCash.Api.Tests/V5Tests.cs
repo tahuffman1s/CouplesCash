@@ -234,6 +234,35 @@ public class V5Tests
         Assert.Equal([new DateOnly(2026, 3, 1), new DateOnly(2026, 2, 1)], ended);
     }
 
+    [Fact]
+    public void A_payment_from_before_an_item_started_goes_on_the_date_one_step_before_its_start()
+    {
+        DateOnly D(int m, int d) => new(2026, m, d);
+        var monthly = new Recurrence(Frequency.Monthly, D(10, 23), null);
+        Assert.Equal(D(9, 23), RecurrenceEngine.EarlierDate(monthly));
+        Assert.True(RecurrenceEngine.IsLinkable(monthly, D(9, 23)));
+        Assert.False(RecurrenceEngine.IsLinkable(monthly, D(8, 23)));
+        Assert.True(RecurrenceEngine.IsLinkable(monthly, D(11, 23)));
+        Assert.Equal(D(10, 13), RecurrenceEngine.EarlierDate(new Recurrence(Frequency.Biweekly, D(10, 27), null)));
+        // Oct 31 → Sep 30 would move every later date to the 30th; a one-off has no earlier date
+        Assert.Null(RecurrenceEngine.EarlierDate(new Recurrence(Frequency.Monthly, D(10, 31), null)));
+        Assert.Null(RecurrenceEngine.EarlierDate(new Recurrence(Frequency.Once, D(10, 23), null)));
+
+        // the Payments list offers it once it reaches back to the start, never in the future
+        var dates = PaymentHistory.Dates(monthly, D(10, 27), 12);
+        Assert.Equal(D(9, 23), PaymentHistory.EarlierSlot(monthly, dates, D(10, 27)));
+        var old = new Recurrence(Frequency.Monthly, D(1, 5), null);
+        Assert.Null(PaymentHistory.EarlierSlot(old, PaymentHistory.Dates(old, D(10, 27), 3), D(10, 27)));
+        var future = new Recurrence(Frequency.Weekly, D(11, 10), null);
+        Assert.Null(PaymentHistory.EarlierSlot(future, PaymentHistory.Dates(future, D(10, 27), 12), D(10, 27)));
+
+        // unlinking it: the start moves forward again only when it was before the item was created
+        var moved = new Recurrence(Frequency.Monthly, D(9, 23), null);
+        Assert.Equal(D(10, 23), RecurrenceEngine.StartAfterUnlink(moved, D(9, 23), D(10, 25)));
+        Assert.Null(RecurrenceEngine.StartAfterUnlink(moved, D(9, 23), D(9, 1)));
+        Assert.Null(RecurrenceEngine.StartAfterUnlink(moved, D(10, 23), D(10, 25)));
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Spendable
     // ---------------------------------------------------------------------------------------------

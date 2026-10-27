@@ -218,6 +218,12 @@ public sealed class InboxService(
         }
 
         var reversal = await ReverseAsync(uow, householdId, userId, row, ct);
+
+        // A payment from before the item started (its earlier date): the item now starts there, so that date is a real occurrence.
+        // (Re-read: undoing this row's previous payment may have moved the start.)
+        var anchor = (await items.GetAsync(uow.Connection, householdId, item.Id, ct))?.AnchorDate ?? item.AnchorDate;
+        var startedEarlier = dueDate < anchor
+            && await items.MoveAnchorAsync(uow.Connection, householdId, item.Id, anchor, dueDate, time.Now(), ct) > 0;
         await PayAsync(uow, householdId, userId, row, item, dueDate, ct);
         if (!quiet)
         {
@@ -233,6 +239,7 @@ public sealed class InboxService(
                     reversedExpense = reversal.HadExpense,
                     reversedPayment = reversal.HadPayment,
                     unpairedPeerId = reversal.PeerId,
+                    startedEarlier,
                 }, ct, actorName);
         }
 
@@ -450,7 +457,15 @@ public sealed class InboxService(
         var rulesByNorm = await RulesByNormAsync(conn, householdId, ct);
         var rule = TransactionMatcher.FindRule(rulesByNorm, row.Payee, row.Description);
 
-        var list = await occurrences.ListAsync(householdId, itemRows, row.PostedOn.AddDays(-days), row.PostedOn.AddDays(days), ct);
+        var from = row.PostedOn.AddDays(-days);
+        var to = row.PostedOn.AddDays(days);
+        var list = await occurrences.ListAsync(householdId, itemRows, from, to, ct);
+
+        // A payment older than the item can go on the date just before its start (linking it moves the start there).
+        var today = time.Today();
+        list.AddRange(itemRows
+            .Where(i => RecurrenceEngine.EarlierDate(i.Rule) is { } e && e >= from && e <= to && e <= today)
+            .Select(i => i.ToOccurrence(RecurrenceEngine.EarlierDate(i.Rule)!.Value, null, today)));
         var candidates = list
             .Select(o =>
             {
@@ -535,10 +550,18 @@ public sealed class InboxService(
         {
             var removed = await items.DeletePaymentAsync(uow.Connection, itemId, dueDate, ct);
             hadPayment = removed is not null;
-            if (removed is not null && await items.GetAsync(uow.Connection, householdId, itemId, ct) is { AutoPay: true })
+            var item = removed is null ? null : await items.GetAsync(uow.Connection, householdId, itemId, ct);
+            if (item is { AutoPay: true })
             {
                 // The scheduler would otherwise re-pay the occurrence on its next tick.
                 await items.InsertAutopaySkipAsync(uow.Connection, itemId, dueDate, actorId, now, ct);
+            }
+
+            // It was linked before the item was created (an older payment that moved the start back): the start moves forward again,
+            // so no unpaid date from before the item counts as due.
+            if (item is not null && RecurrenceEngine.StartAfterUnlink(item.Rule, dueDate, DateOnly.FromDateTime(item.CreatedAt)) is { } start)
+            {
+                await items.MoveAnchorAsync(uow.Connection, householdId, itemId, dueDate, start, now, ct);
             }
         }
 
@@ -576,7 +599,7 @@ public sealed class InboxService(
                 : "An income payment must be money in."));
         }
 
-        if (!RecurrenceEngine.IsOccurrence(item.Rule, dueDate))
+        if (!RecurrenceEngine.IsLinkable(item.Rule, dueDate))
         {
             return (item, new InboxError("dueDate", "Not a due date of this item."));
         }

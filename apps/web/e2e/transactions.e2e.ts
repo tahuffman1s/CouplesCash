@@ -268,3 +268,35 @@ test('bills: create one from a transaction, link a transaction from the bill sid
 	await expect(page.getByText('Back in To review')).toBeVisible();
 	await expect(due).toHaveAttribute('data-paid', 'false');
 });
+
+test('bills: an older payment links to the date before the bill started, which moves the start back', async ({
+	page
+}) => {
+	await setup(page);
+	const firstOfMonth = `${todayIso().slice(0, 7)}-01`;
+	const [y, m] = todayIso().split('-').map(Number);
+	const iso = (year: number, month: number) =>
+		`${month > 12 ? year + 1 : month < 1 ? year - 1 : year}-${String(((month + 11) % 12) + 1).padStart(2, '0')}-01`;
+	const nextMonth = iso(y, m + 1);
+	const lastMonth = iso(y, m - 1);
+	// typed in from next month: this month's rent payment is older than the bill
+	const rentUrl = await addBill(page, { name: 'Rent', amount: '1800', firstDue: nextMonth });
+	await page.goto(rentUrl);
+	const earlier = page.locator(`[data-testid="payment-row"][data-date="${firstOfMonth}"]`);
+	await expect(earlier).toHaveAttribute('data-earlier', 'true');
+	await expect(earlier).toContainText('Before it started');
+	await earlier.getByRole('button', { name: /Link a transaction/ }).click();
+	await page
+		.getByRole('dialog')
+		.getByTestId('link-candidate')
+		.filter({ hasText: 'RENT PAYMENT' })
+		.click();
+	await expect(page.getByText(/Rent · .* paid from the bank/)).toBeVisible();
+
+	// the bill starts this month now: a normal paid payment, and last month is the next older slot
+	await expect(earlier).toHaveAttribute('data-paid', 'true');
+	await expect(earlier).not.toHaveAttribute('data-earlier', 'true');
+	await expect(
+		page.locator(`[data-testid="payment-row"][data-date="${lastMonth}"]`)
+	).toHaveAttribute('data-earlier', 'true');
+});

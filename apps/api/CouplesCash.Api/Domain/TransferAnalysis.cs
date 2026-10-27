@@ -137,5 +137,12 @@ public static class PaymentHistory
         return result;
     }
 
+    /// <summary>
+    /// The slot listed after <see cref="Dates"/> for a payment from before the item started: its <see cref="RecurrenceEngine.EarlierDate"/>,
+    /// once the list reaches back to the start, and not in the future. Null otherwise.
+    /// </summary>
+    public static DateOnly? EarlierSlot(Recurrence rule, IReadOnlyList<DateOnly> dates, DateOnly today) =>
+        dates.Contains(rule.AnchorDate) && RecurrenceEngine.EarlierDate(rule) is { } earlier && earlier <= today ? earlier : null;
+
     private static DateOnly Max(DateOnly a, DateOnly b) => a > b ? a : b;
 }

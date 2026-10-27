@@ -428,6 +428,84 @@ public class V7DbTests
     }
 
     [DbFact]
+    public async Task A_payment_from_before_a_bill_started_can_be_linked_and_moves_the_start_back()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
+        await using var sp = Services(connectionString, Feed);
+        Assert.True(sp.GetRequiredService<DbUpMigrator>().Run());
+
+        var ct = CancellationToken.None;
+        var now = DateTime.UtcNow;
+        var today = DateOnly.FromDateTime(now);
+        var users = sp.GetRequiredService<UserRepository>();
+        var households = sp.GetRequiredService<HouseholdRepository>();
+        var accounts = sp.GetRequiredService<AccountRepository>();
+        var imports = sp.GetRequiredService<ImportRepository>();
+        var items = sp.GetRequiredService<RecurringRepository>();
+        var db = sp.GetRequiredService<NpgsqlDataSource>();
+        var added = sp.GetRequiredService<AddedTransactionService>();
+        var inbox = sp.GetRequiredService<InboxService>();
+
+        var user = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Tester", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var household = await households.CreateAsync(user.Id, "V7 DB earlier payment", now, ct);
+        var householdId = household.Id;
+        try
+        {
+            // The phone bill was typed in starting on the latest 15th; last month's payment is older than the bill.
+            var start = new DateOnly(today.Year, today.Month, 15);
+            start = start > today ? start.AddMonths(-1) : start;
+            var earlier = start.AddMonths(-1);
+            AccountRow checking;
+            RecurringItemRow phone;
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                checking = await accounts.CreateAsync(uow.Connection, householdId, user.Id, new AccountFields("US Bank", "U.S. Bank", AccountType.Checking, 0, "#000000", "landmark", null), now, ct);
+                phone = await items.CreateAsync(uow.Connection, householdId, user.Id,
+                    new RecurringFields("Phone", Kind.Bill, 8_000, null, checking.Id, Frequency.Monthly, start, null, false, null, null), now, ct);
+                await uow.CommitAsync(ct);
+            }
+
+            var old = (await added.AddAsync(householdId, user.Id, "Tester", checking.Id, -8_000, "Phone", earlier.AddDays(1), force: false, ct)).Row!;
+            async Task<InboxError?> Act(Func<UnitOfWork, ImportedTransactionRow, Task<InboxError?>> action)
+            {
+                await using var uow = await db.BeginUnitOfWorkAsync(ct);
+                var error = await action(uow, (await imports.GetAsync(uow.Connection, householdId, old.Id, ct))!);
+                await uow.CommitAsync(ct);
+                return error;
+            }
+
+            // The transaction's candidates offer the date before the start; two months back is not a due date.
+            await using (var conn = await db.OpenConnectionAsync(ct))
+            {
+                var candidates = await inbox.CandidatesAsync(conn, householdId, (await imports.GetAsync(conn, householdId, old.Id, ct))!, 30, ct);
+                Assert.Contains(candidates.Occurrences, c => c.ItemId == phone.Id && c.DueDate == earlier && c.Paid is null);
+            }
+
+            Assert.NotNull(await Act((uow, row) => inbox.MatchAsync(uow, householdId, user.Id, "Tester", "USD", row, phone.Id, earlier.AddMonths(-1), quiet: false, ct)));
+
+            // Linked: the bill starts there now, so the payment is on a real occurrence (and the month before opens up).
+            Assert.Null(await Act((uow, row) => inbox.MatchAsync(uow, householdId, user.Id, "Tester", "USD", row, phone.Id, earlier, quiet: false, ct)));
+            var moved = (await items.GetAsync(householdId, phone.Id, ct))!;
+            Assert.Equal(earlier, moved.AnchorDate);
+            Assert.True(RecurrenceEngine.IsOccurrence(moved.Rule, start));
+            await using (var conn = await db.OpenConnectionAsync(ct))
+            {
+                Assert.Equal(8_000, (await items.GetPaymentAsync(conn, phone.Id, earlier, ct))!.AmountCents);
+            }
+
+            // Unlinked again: the start goes back, so no unpaid month from before the bill counts as due.
+            Assert.Null(await Act((uow, row) => inbox.UnmatchAsync(uow, householdId, user.Id, "Tester", "USD", row, ct)));
+            Assert.Equal(start, (await items.GetAsync(householdId, phone.Id, ct))!.AnchorDate);
+        }
+        finally
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = householdId });
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = @Id", new { Id = user.Id });
+        }
+    }
+
+    [DbFact]
     public async Task A_plaid_link_syncs_into_the_same_pipeline_and_a_posted_row_takes_over_its_pending_row()
     {
         var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;

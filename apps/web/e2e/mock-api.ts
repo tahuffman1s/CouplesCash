@@ -675,6 +675,21 @@ function expand(item: Item, from: string, to: string): string[] {
 	}
 	return out;
 }
+/** The date one step before the start, for a payment older than the item (API `RecurrenceEngine.EarlierDate`). */
+function earlierDate(item: Item): string | null {
+	if (item.frequency === 'once' || (item.endDate && item.endDate < item.anchorDate)) return null;
+	const anchor = parse(item.anchorDate);
+	if (item.frequency === 'weekly' || item.frequency === 'biweekly') {
+		const d = new Date(anchor);
+		d.setDate(anchor.getDate() - (item.frequency === 'weekly' ? 7 : 14));
+		return toIso(d);
+	}
+	const d = addMonthsClamp(
+		anchor,
+		item.frequency === 'monthly' ? -1 : item.frequency === 'quarterly' ? -3 : -12
+	);
+	return d.getDate() === anchor.getDate() ? toIso(d) : null;
+}
 function monthlyEq(amount: number, f: string): number {
 	switch (f) {
 		case 'weekly':
@@ -2990,6 +3005,8 @@ function billPayments(hh: string, i: Item, limit: number) {
 	const past = expand(i, i.anchorDate, today).slice(-limit).reverse();
 	const next = expand(i, addDaysIso(today, 1), toIso(addMonthsClamp(new Date(), 24)))[0];
 	const dates = next ? [next, ...past] : past;
+	const earlier = earlierDate(i);
+	if (earlier && earlier <= today && dates.includes(i.anchorDate)) dates.push(earlier);
 	return dates.map((d) => {
 		const paid = payments.get(`${i.id}:${d}`) ?? null;
 		const t = [...txs.values()].find(
@@ -3003,6 +3020,7 @@ function billPayments(hh: string, i: Item, limit: number) {
 		return {
 			dueDate: d,
 			plannedCents: i.amountCents,
+			earlier: d === earlier,
 			paid,
 			varianceCents: paid ? paid.amountCents - i.amountCents : null,
 			transaction:
@@ -4462,7 +4480,9 @@ const server = createServer(async (req, res) => {
 			const i = items.get(mm[1]);
 			const date = mm[2];
 			if (!i || i.householdId !== hh || i.archived) return problem(res, 404, 'Not found');
-			if (!expand(i, date, date).includes(date)) return problem(res, 404, 'Not an occurrence');
+			const before = date === earlierDate(i);
+			if (!before && !expand(i, date, date).includes(date))
+				return problem(res, 404, 'Not an occurrence');
 			if (mm[3] === 'candidates' && m === 'GET') {
 				const days = Math.min(60, Math.max(1, Number(url.searchParams.get('days') ?? 10)));
 				const income = i.kind === 'income';
@@ -4505,6 +4525,8 @@ const server = createServer(async (req, res) => {
 						'That transaction does not match the direction of this bill'
 					);
 				reverseTx(t);
+				// an older payment: the bill starts there now
+				if (before) i.anchorDate = date;
 				const err = confirmTx(hh, user, t, { as: 'occurrence', itemId: i.id, dueDate: date });
 				if (err) return problem(res, err.status, 'Cannot link', err.detail);
 				return send(res, 200, occurrence(i, date));

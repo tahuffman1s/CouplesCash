@@ -376,6 +376,12 @@ public static class RecurringEndpoints
         }
 
         var dates = PaymentHistory.Dates(item.Rule, time.Today(), limit);
+        var earlier = PaymentHistory.EarlierSlot(item.Rule, dates, time.Today());
+        if (earlier is { } e)
+        {
+            dates = [.. dates, e];
+        }
+
         if (dates.Count == 0)
         {
             return TypedResults.Ok(new List<BillPaymentDto>());
@@ -396,7 +402,8 @@ public static class RecurringEndpoints
                 item.AmountCents,
                 paid is null ? null : new PaidInfo(paid.PaidAt, paid.PaidBy, paid.AmountCents, paid.Auto, paid.Source),
                 WeekEngine.Variance(paid?.AmountCents, item.AmountCents),
-                tx is null ? null : new BillPaymentTransactionDto(tx.Id, tx.PostedOn, tx.AmountCents, tx.Description, tx.AccountName));
+                tx is null ? null : new BillPaymentTransactionDto(tx.Id, tx.PostedOn, tx.AmountCents, tx.Description, tx.AccountName),
+                Earlier: d == earlier);
         }).ToList();
         return TypedResults.Ok(result);
     }
@@ -419,7 +426,7 @@ public static class RecurringEndpoints
         var householdId = principal.GetHouseholdId();
         await using var conn = await db.OpenConnectionAsync(ct);
         var item = await items.GetAsync(conn, householdId, id, ct);
-        if (item is null || !RecurrenceEngine.IsOccurrence(item.Rule, date))
+        if (item is null || !RecurrenceEngine.IsLinkable(item.Rule, date))
         {
             return TypedResults.NotFound();
         }
@@ -446,7 +453,7 @@ public static class RecurringEndpoints
 
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         var item = await items.GetAsync(uow.Connection, householdId, id, ct);
-        if (item is null || !RecurrenceEngine.IsOccurrence(item.Rule, date))
+        if (item is null || !RecurrenceEngine.IsLinkable(item.Rule, date))
         {
             return TypedResults.NotFound();
         }

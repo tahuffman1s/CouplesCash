@@ -53,6 +53,40 @@ public static class RecurrenceEngine
     /// <summary>True when <paramref name="date"/> is a genuine occurrence of the rule.</summary>
     public static bool IsOccurrence(Recurrence rule, DateOnly date) => Expand(rule, date, date).Any();
 
+    /// <summary>
+    /// The date one step before the anchor, where a payment older than the item can be linked (the item then starts there). Null for
+    /// <c>once</c>, an item that ended before it started, and a month-end anchor the earlier month would clamp (Oct 31 → Sep 30 would move
+    /// every later date to the 30th).
+    /// </summary>
+    public static DateOnly? EarlierDate(Recurrence rule)
+    {
+        if (rule.Frequency == Frequency.Once || rule.EndDate is { } end && end < rule.AnchorDate)
+        {
+            return null;
+        }
+
+        var earlier = Nth(rule, -1);
+        return rule.Frequency is Frequency.Weekly or Frequency.Biweekly || earlier.Day == rule.AnchorDate.Day ? earlier : null;
+    }
+
+    /// <summary>A due date a transaction can be linked to: an occurrence, or the <see cref="EarlierDate"/>.</summary>
+    public static bool IsLinkable(Recurrence rule, DateOnly date) => IsOccurrence(rule, date) || EarlierDate(rule) == date;
+
+    /// <summary>
+    /// The start after the payment on <paramref name="dueDate"/> was unlinked: the next occurrence when that payment was on the start date and
+    /// the start is before the item was created (so it was only there because of the payment); null to keep the start.
+    /// </summary>
+    public static DateOnly? StartAfterUnlink(Recurrence rule, DateOnly dueDate, DateOnly createdOn)
+    {
+        if (rule.Frequency == Frequency.Once || dueDate != rule.AnchorDate || dueDate >= createdOn)
+        {
+            return null;
+        }
+
+        var next = Nth(rule, 1);
+        return rule.EndDate is { } end && next > end ? null : next;
+    }
+
     /// <summary>The first occurrence on or after <paramref name="today"/>, or null when there is none.</summary>
     public static DateOnly? NextDue(Recurrence rule, DateOnly today)
     {

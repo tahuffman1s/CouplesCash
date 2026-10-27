@@ -165,6 +165,15 @@ public sealed class RecurringRepository(NpgsqlDataSource db)
             "UPDATE recurring_items SET bank_names_learned = @Learned, updated_at = @Now WHERE id = @Id AND household_id = @HouseholdId AND archived_at IS NULL",
             new { Id = id, HouseholdId = householdId, Learned = learned.ToArray(), Now = now }, ct));
 
+    /// <summary>
+    /// Moves the item's start from <paramref name="from"/> to <paramref name="to"/> (an older payment linked before it started, or that
+    /// link undone); a no-op when the start is no longer <paramref name="from"/>.
+    /// </summary>
+    public Task<int> MoveAnchorAsync(NpgsqlConnection conn, Guid householdId, Guid id, DateOnly from, DateOnly to, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            "UPDATE recurring_items SET anchor_date = @To, updated_at = @Now WHERE id = @Id AND household_id = @HouseholdId AND anchor_date = @From",
+            new { Id = id, HouseholdId = householdId, From = from, To = to, Now = now }, ct));
+
     /// <summary>Payments of the household's items due within [from, to].</summary>
     public async Task<IReadOnlyList<PaymentRow>> ListPaymentsAsync(Guid householdId, DateOnly from, DateOnly to, CancellationToken ct)
     {

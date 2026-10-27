@@ -563,7 +563,7 @@ type TransferReport = { month: string; totalCents: number;
   flows: { fromAccountId: string | null; fromName: string; toAccountId: string | null; toName: string; totalCents: number; count: number }[];
   netByAccount: { accountId: string; name: string; inCents: number; outCents: number; netCents: number }[];
   pairs: TransferPair[]; oneSided: InboxItem[] };
-type BillPayment = { dueDate: string; plannedCents: number; paid: Paid | null; varianceCents: number | null;
+type BillPayment = { dueDate: string; plannedCents: number; earlier: boolean; paid: Paid | null; varianceCents: number | null;
   transaction: { id: string; postedOn: string; amountCents: number; description: string; accountName: string | null } | null };
 ```
 
@@ -638,8 +638,9 @@ Deviations and clarifications from the "# v5 additions" tables, as built in `app
   `date = max(0, 1 − |days| / (window + 1))`, `rule` = the row's learned payee rule names the item; an occurrence more than
   max(50 %, $10) off is left out unless the rule names it. The occurrence this row already pays is always listed (`paidByThis`). Paid
   occurrences are listed with `paid` set. Max 20, best first. `transferPeers` = rows that would pass the transfer peer check
-  (already paired to this row first), max 20.
-- **`POST /inbox/{id}/match`** (any status): `400 errors.itemId` sign/kind, `400 errors.dueDate` not an occurrence, `400 errors.status`
+  (already paired to this row first), max 20. v7: an item's **earlier date** (below) within the window and not after today is listed
+  too (unpaid), so a payment older than the item can be matched.
+- **`POST /inbox/{id}/match`** (any status): `400 errors.itemId` sign/kind, `400 errors.dueDate` not an occurrence (nor the earlier date), `400 errors.status`
   for dropped/superseded rows, `409` (problem title "Occurrence already paid") when the occurrence is paid by another transaction
   (v7: a tick by hand or by autopay is taken over by this transaction, no 409; confirm-as-occurrence likewise). Matching the occurrence the row already pays is a no-op. Payment: `source 'bank'`, `auto false`, `paidBy` = caller,
   amount = |bank amount|; learns payee → item. Event `transaction.matched` (`data.previousStatus`, `reversedExpense`, `reversedPayment`,
@@ -658,8 +659,13 @@ Deviations and clarifications from the "# v5 additions" tables, as built in `app
   One `recurring.from_transaction` event. `201 { item, transaction }`.
 - **`GET /recurring/{id}/payments?limit=12`** (1–60): the next occurrence after today (unpaid) first, then the last `limit` occurrences
   on or before today (an ended item counts back from its end date), newest first. `transaction` = the confirmed row paying that date.
+  v7: once the list reaches the item's start, its **earlier date** follows last (`earlier: true`, unpaid, never after today): the
+  date one step before the start (`RecurrenceEngine.EarlierDate`; none for `once` or a month-end start the earlier month would clamp,
+  e.g. Oct 31 → Sep 30). Matching or linking a transaction there moves the item's `anchorDate` back to it (a real occurrence from then
+  on; activity `startedEarlier: true`), and the date before that becomes the new earlier date. Unmatching a payment on the start date
+  when the start is before the item was created moves the start one step forward again (no unpaid date from before the item is due).
 - **`GET /recurring/{id}/occurrences/{date}/candidates?days=10`** (1–60): visible rows within ±days that are to review or confirmed as an
-  expense (not paying an occurrence, not transfers), ranked by the candidate score. 404 when `{date}` is not an occurrence.
+  expense (not paying an occurrence, not transfers), ranked by the candidate score. 404 when `{date}` is not an occurrence or the earlier date.
 - **`POST /recurring/{id}/occurrences/{date}/link`** = `match` from the other side: `400 errors.transactionId` unknown / dropped /
   sign mismatch, `409` already paid, `200 Occurrence`.
 - **`GET /transfers?month=`** (default this UTC month): pairs are dated and counted by their outflow leg (a pair whose outflow is in
