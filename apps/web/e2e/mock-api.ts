@@ -3293,7 +3293,8 @@ function planFor(hh: string, date: string) {
 			pending: pending.map(txView),
 			pendingOutCents,
 			addedCents,
-			feed: ext?.lastFeed ?? null
+			feed: ext?.lastFeed ?? null,
+			balanceAt: ext?.balanceAt ?? null
 		};
 	}
 	const savingsIds = new Set(mine.filter((a) => a.role === 'savings').map((a) => a.id));

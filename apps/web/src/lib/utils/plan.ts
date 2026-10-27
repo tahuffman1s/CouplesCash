@@ -11,7 +11,7 @@ import type {
 	PlanBillsAccount,
 	PlanLine
 } from '#lib/types.ts';
-import { addDays, parseISODate, weekday, type ISODate } from './dates.ts';
+import { addDays, formatTimestamp, parseISODate, weekday, type ISODate } from './dates.ts';
 import { formatMoney, signedMoney } from './money.ts';
 
 export const WEEKDAYS_LONG = [
@@ -321,6 +321,27 @@ export function lineStatus(line: PlanLine, today: ISODate): 'Paid' | 'Late' | 'P
  * Settings → Banks pending diagnostics: "sent 1 pending, 47 posted · available balance reported".
  * null before the first v7 sync.
  */
+/** SimpleFIN refreshes a bank about once a day: older than this, the plan says how old the bank's numbers are. */
+export const BANK_DATA_STALE_HOURS = 20;
+
+/**
+ * "Bank data as of Oct 26, 6:14 AM" (SimpleFIN's `balance-date`), and whether it is old enough to say so on the plan.
+ * Null without a date.
+ */
+export function bankDataAge(
+	balanceAt: string | null | undefined,
+	now: Date = new Date()
+): { label: string; stale: boolean } | null {
+	if (!balanceAt) return null;
+	const at = new Date(balanceAt);
+	if (Number.isNaN(at.getTime())) return null;
+	const hours = (now.getTime() - at.getTime()) / 3_600_000;
+	return {
+		label: `Bank data as of ${formatTimestamp(balanceAt)}`,
+		stale: hours > BANK_DATA_STALE_HOURS
+	};
+}
+
 export function feedSummary(
 	feed: { pending: number; posted: number; availableReported: boolean } | null | undefined
 ): string | null {

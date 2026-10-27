@@ -540,7 +540,8 @@ public sealed record PlanBillsAccountDto(
     IReadOnlyList<InboxItemDto> Pending,
     long PendingOutCents,
     long AddedCents,
-    FeedStatsDto? Feed);
+    FeedStatsDto? Feed,
+    DateTime? BalanceAt);
 
 public sealed record PlanAccountDto(Guid Id, string Name, AccountRole Role, string? OwnerName, long BalanceCents, long? AvailableCents);
 

@@ -828,7 +828,8 @@ type FeedStats = { pending: number; posted: number; availableReported: boolean; 
 type Plan = {
   start: string; end: string; nextPayday: string; isCurrent: boolean; isPayday: boolean; today: string;
   billsAccount: { id: string; name: string; availableCents: number; balanceCents: number; availableFromBank: boolean;
-                  pending: InboxItem[]; pendingOutCents: number; addedCents: number; feed: FeedStats } | null;   // null → setup needed
+                  pending: InboxItem[]; pendingOutCents: number; addedCents: number; feed: FeedStats;
+                  balanceAt: string | null } | null;   // null → setup needed; balanceAt = the Bridge's balance-date
   accounts: { id: string; name: string; role: AccountRole; ownerName: string | null; balanceCents: number; availableCents: number | null }[];
   bills: PlanLine[]; funMoney: PlanLine[]; oneOffs: PlanLine[]; income: PlanLine[];
   billsOutCents: number; funOutCents: number; oneOffOutCents: number; incomeInCents: number;  // unpaid remainders
@@ -939,7 +940,7 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   number frozen for its own sweep (`left_cents`, its Left on Thursday before the move) when there is one; a future week uses today's available (a rough
   projection). `billsAccount`: `availableCents` as above,
   `availableFromBank` = the bank reported it, `pending` = every visible bank-pending row of the account (any review status, newest first),
-  `pendingOutCents` = Σ of their outflows, `feed` = last feed stats; `null` when no account has role `bills`. `accounts` = every active
+  `pendingOutCents` = Σ of their outflows, `feed` = last feed stats, `balanceAt` = the mapped external account's `balance-date` (when SimpleFIN last refreshed the bank; the web says "Bank data as of …" when it is over 20 h old); `null` when no account has role `bills`. `accounts` = every active
   account ordered bills, savings, fun, other, then name. `setup`: `banksLinked` (a bank link exists), `rolesSet` (a bills account exists),
   `paycheckKnown` (an active income item), `billsAdded` (an active bill / subscription), `partnerJoined` (two members). `toReviewCount` =
   household rows to review. `addedCents` = Σ of the open rows added by hand on the account (signed, − = out), already inside

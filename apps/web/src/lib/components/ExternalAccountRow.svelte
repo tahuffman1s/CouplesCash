@@ -5,7 +5,7 @@
 	import { apiFetch } from '#lib/utils/client.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 	import type { ExternalAccountMapping } from '#lib/server/api.ts';
-	import { feedSummary } from '#lib/utils/plan.ts';
+	import { bankDataAge, feedSummary } from '#lib/utils/plan.ts';
 	import MoneyText from './MoneyText.svelte';
 	import Icon from './Icon.svelte';
 
@@ -21,6 +21,7 @@
 	} = $props();
 
 	const CREATE = '__create';
+	const bankAge = $derived(bankDataAge(ext.balanceAt));
 	let selected = $derived(ext.accountId ?? '');
 	let creating = $state(false);
 	let busy = $state(false);
@@ -100,6 +101,14 @@
 	{#if ext.lastFeed}
 		<p class="text-xs text-base-content/60" data-testid="feed-line">
 			Last sync: {feedSummary(ext.lastFeed)}
+		</p>
+	{/if}
+	{#if bankAge}
+		<p
+			class="text-xs {bankAge.stale ? 'font-medium text-warning' : 'text-base-content/60'}"
+			data-testid="bank-as-of"
+		>
+			{bankAge.label}
 		</p>
 	{/if}
 	<label class="form-control">

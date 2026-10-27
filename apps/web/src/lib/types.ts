@@ -751,6 +751,8 @@ export type PlanBillsAccount = {
 	/** signed sum of transactions added by hand the bank hasn't shown yet (already in availableCents) */
 	addedCents: number;
 	feed: FeedStats;
+	/** when the bank's numbers were last refreshed by SimpleFIN (`balance-date`); null without a linked bank */
+	balanceAt: string | null;
 };
 /** POST /transactions: a transaction added by hand (amount signed, negative = money out). */
 export type AddTransactionBody = {

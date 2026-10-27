@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Occurrence, Plan, PlanLine } from '#lib/types.ts';
 import {
 	accountLabel,
+	bankDataAge,
 	billsLabel,
 	checklistProgress,
 	checklistText,
@@ -69,6 +70,7 @@ function plan(over: Partial<Plan> = {}): Plan {
 			pending: [],
 			pendingOutCents: 6240,
 			addedCents: 0,
+			balanceAt: null,
 			feed: null
 		},
 		accounts: [],
@@ -335,6 +337,15 @@ describe('checklist + sweep', () => {
 });
 
 describe('feed diagnostics', () => {
+	it('bank data age: stale after 20 hours', () => {
+		const now = new Date('2026-10-27T14:00:00Z');
+		expect(bankDataAge('2026-10-27T09:00:00Z', now)?.stale).toBe(false);
+		const old = bankDataAge('2026-10-26T06:14:00Z', now);
+		expect(old?.stale).toBe(true);
+		expect(old?.label).toMatch(/^Bank data as of Oct 26, /);
+		expect(bankDataAge(null, now)).toBeNull();
+		expect(bankDataAge('nope', now)).toBeNull();
+	});
 	it('summary', () => {
 		expect(feedSummary({ pending: 1, posted: 47, availableReported: true })).toBe(
 			'sent 1 pending, 47 posted · available balance reported'

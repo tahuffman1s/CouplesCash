@@ -170,7 +170,8 @@ public sealed class PlanService(
                 c.Pending.Select(p => p.ToDto()).ToList(),
                 c.PendingOutCents,
                 c.AddedCents,
-                MappingV3.ParseFeed(external?.LastFeed));
+                MappingV3.ParseFeed(external?.LastFeed),
+                external?.BalanceAt);
         }
 
         var checklist = new List<ChecklistItemDto>();

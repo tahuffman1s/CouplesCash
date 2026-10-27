@@ -7,6 +7,7 @@
 	import { formatDate } from '#lib/utils/dates.ts';
 	import { formatMoney, signedMoney } from '#lib/utils/money.ts';
 	import {
+		bankDataAge,
 		leftLabel,
 		pendingLine,
 		receiptLines,
@@ -34,6 +35,8 @@
 	};
 
 	const b = $derived(plan.billsAccount!);
+	// SimpleFIN's copy of the bank is refreshed about daily: say so when it is old
+	const bankAge = $derived(bankDataAge(b.balanceAt));
 	const lines = $derived(receiptLines(plan));
 	const negative = $derived(plan.leftAtEndCents < 0);
 	const amount = (key: string, cents: number) =>
@@ -65,6 +68,11 @@
 							<span class="block text-xs text-base-content/60" data-testid="pending-subline"
 								>{pendingLine(b)}</span
 							>
+							{#if bankAge?.stale}
+								<span class="block text-xs font-medium text-warning" data-testid="bank-as-of"
+									>{bankAge.label}</span
+								>
+							{/if}
 						{/if}
 					</span>
 					<span
