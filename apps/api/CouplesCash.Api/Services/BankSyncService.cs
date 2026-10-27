@@ -508,6 +508,13 @@ public sealed class BankSyncService(
                 continue;
             }
 
+            // the feed's own category (Plaid) follows its latest copy; rows imported before categories were stored get one
+            if (byExternalId[same.Incoming.ExternalId] is { Category: { } category } sent
+                && (row.ProviderCategory != category || row.ProviderCategoryConfidence != sent.CategoryConfidence))
+            {
+                await imports.SetProviderCategoryAsync(conn, householdId, row.Id, category, sent.CategoryConfidence, ct);
+            }
+
             if (row.IgnoreReason == PendingReconciler.Dropped)
             {
                 await imports.RestoreAsync(conn, householdId, row.Id, ct);
@@ -534,6 +541,11 @@ public sealed class BankSyncService(
 
             var externalId = replacement.Incoming.ExternalId;
             await ApplyPostedAsync(uow, householdId, row, replacement.Incoming, externalId, fingerprints[externalId], byExternalId, currency, now, ct);
+            if (byExternalId[externalId] is { Category: { } postedCategory } postedTx)
+            {
+                await imports.SetProviderCategoryAsync(conn, householdId, row.Id, postedCategory, postedTx.CategoryConfidence, ct);
+            }
+
             stats.Posted++;
             stats.Replaced++;
         }

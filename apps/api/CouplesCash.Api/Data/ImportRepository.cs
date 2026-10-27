@@ -544,6 +544,15 @@ public sealed class ImportRepository(NpgsqlDataSource db)
     // v5: transfers and candidates
     // ---------------------------------------------------------------------------------------------
 
+    /// <summary>The feed's category for a row it sends again (rows imported before categories were stored get one).</summary>
+    public Task<int> SetProviderCategoryAsync(NpgsqlConnection conn, Guid householdId, Guid id, string? category, string? confidence, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE imported_transactions SET provider_category = @Category, provider_category_confidence = @Confidence
+            WHERE id = @Id AND household_id = @HouseholdId
+            """,
+            new { Id = id, HouseholdId = householdId, Category = category, Confidence = confidence }, ct));
+
     /// <summary>Visible rows posted within [from, to] (transfer peers, occurrence candidates). Ranking happens in the caller.</summary>
     public async Task<IReadOnlyList<ImportedTransactionRow>> ListVisibleInWindowAsync(NpgsqlConnection conn, Guid householdId, DateOnly from, DateOnly to, CancellationToken ct)
     {

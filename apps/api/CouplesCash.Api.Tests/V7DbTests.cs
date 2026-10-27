@@ -488,14 +488,20 @@ public class V7DbTests
 
             // The diner posts with a tip under a new id and its own wording: Plaid names the pending row, so it is replaced in place.
             plaid.Page = Page($$"""
-                { "transaction_id": "t-diner", "account_id": "acc-chk", "amount": 48.00, "date": "{{D(0)}}", "name": "THE DINER LLC", "pending": false, "pending_transaction_id": "p-diner" },
-                { "transaction_id": "t-pay", "account_id": "acc-chk", "amount": -1500.00, "date": "{{D(2)}}", "name": "ACME PAYROLL", "pending": false }
+                { "transaction_id": "t-diner", "account_id": "acc-chk", "amount": 48.00, "date": "{{D(0)}}", "name": "THE DINER LLC", "pending": false, "pending_transaction_id": "p-diner",
+                  "personal_finance_category": { "detailed": "FOOD_AND_DRINK_RESTAURANT", "confidence_level": "HIGH" } },
+                { "transaction_id": "t-pay", "account_id": "acc-chk", "amount": -1500.00, "date": "{{D(2)}}", "name": "ACME PAYROLL", "pending": false,
+                  "personal_finance_category": { "detailed": "INCOME_WAGES", "confidence_level": "VERY_HIGH" } }
                 """, 2297.67m);
             var result = await sync.SyncAsync((await banks.GetLinkAsync(householdId, link.Id, ct))!, user.Id, "Tester", manual: true, ct);
             Assert.Equal(0, result.NewTransactions);
             Assert.Equal(1, plaid.Refreshes);
             var posted = (await imports.GetAsync(householdId, pending.Id, ct))!;
             Assert.Equal((false, -4_800L, "THE DINER LLC", "t-diner"), (posted.Pending, posted.AmountCents, posted.Description, posted.ExternalId));
+            Assert.Equal(("FOOD_AND_DRINK_RESTAURANT", "HIGH"), (posted.ProviderCategory, posted.ProviderCategoryConfidence));
+            // a row imported before Plaid sent a category gets it when the feed sends it again
+            var payroll = (await imports.ListAccountTransactionsAsync(householdId, new AccountTransactionQuery(checking.Id, "all", "ACME", null, null, false), null, 10, ct)).Single();
+            Assert.Equal("INCOME_WAGES", payroll.ProviderCategory);
             Assert.Equal(229_767, (await accounts.GetAsync(householdId, checking.Id, ct))!.AvailableCents);
 
             // The bank wants a new sign-in: the link says so and the scheduler leaves it alone until Reconnect.
