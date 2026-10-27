@@ -429,8 +429,11 @@ export type InboxConfirmed = {
 };
 export type InboxItem = {
 	id: string;
-	/** `manual` only appears on v5 account transactions (typed expenses). */
-	source: 'simplefin' | 'csv' | 'manual';
+	/**
+	 * `manual` only appears on v5 account transactions (typed expenses); `added` is a transaction
+	 * added by hand that waits for the bank's own copy.
+	 */
+	source: 'simplefin' | 'csv' | 'manual' | 'added';
 	accountId: string | null;
 	accountName: string | null;
 	postedOn: string;
@@ -743,8 +746,19 @@ export type PlanBillsAccount = {
 	balanceCents: number;
 	availableFromBank: boolean;
 	pending: InboxItem[];
+	/** the bank's pending outflows (not the added ones) */
 	pendingOutCents: number;
+	/** signed sum of transactions added by hand the bank hasn't shown yet (already in availableCents) */
+	addedCents: number;
 	feed: FeedStats;
+};
+/** POST /transactions: a transaction added by hand (amount signed, negative = money out). */
+export type AddTransactionBody = {
+	accountId: string;
+	amountCents: number;
+	description: string;
+	postedOn: string;
+	force?: boolean;
 };
 export type PlanAccount = {
 	id: string;

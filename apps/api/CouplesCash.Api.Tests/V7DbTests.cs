@@ -1,4 +1,5 @@
 using System.Globalization;
+using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
@@ -83,7 +84,7 @@ public class V7DbTests
             """;
     }
 
-    private static ServiceProvider Services(string connectionString)
+    private static ServiceProvider Services(string connectionString, Func<string>? feed = null)
     {
         var services = new ServiceCollection();
         services.AddLogging(b => b.SetMinimumLevel(LogLevel.Warning));
@@ -93,13 +94,14 @@ public class V7DbTests
         services.AddSingleton(new SyncOptions());
         services.AddSingleton(new MatcherOptions());
         services.AddSingleton<IMatcherClient>(sp => new MatcherClient(new HttpClient(), sp.GetRequiredService<MatcherOptions>()));
-        services.AddSingleton<ISimpleFinClient>(new FakeBridge(Feed));
+        services.AddSingleton<ISimpleFinClient>(new FakeBridge(feed ?? Feed));
         services.AddSingleton<PushNotifier>();
         services.AddSingleton<MatcherStatusTracker>();
         services.AddSingleton<MatchingQueue>();
         services.AddSingleton<OccurrenceService>();
         services.AddSingleton<ActivityService>();
         services.AddSingleton<InboxService>();
+        services.AddSingleton<AddedTransactionService>();
         services.AddSingleton<PlanService>();
         services.AddSingleton<FridayService>();
         services.AddSingleton<MatchingService>();
@@ -153,6 +155,98 @@ public class V7DbTests
         {
             await using var conn = await db.OpenConnectionAsync(ct);
             await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = household.Id });
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = @Id", new { Id = user.Id });
+        }
+    }
+
+    [DbFact]
+    public async Task A_transaction_added_by_hand_counts_until_the_banks_copy_arrives()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
+        var json = Feed();
+        await using var sp = Services(connectionString, () => json);
+        Assert.True(sp.GetRequiredService<DbUpMigrator>().Run());
+
+        var ct = CancellationToken.None;
+        var now = DateTime.UtcNow;
+        var today = DateOnly.FromDateTime(now);
+        var users = sp.GetRequiredService<UserRepository>();
+        var households = sp.GetRequiredService<HouseholdRepository>();
+        var accounts = sp.GetRequiredService<AccountRepository>();
+        var banks = sp.GetRequiredService<BankRepository>();
+        var imports = sp.GetRequiredService<ImportRepository>();
+        var db = sp.GetRequiredService<NpgsqlDataSource>();
+        var sync = sp.GetRequiredService<BankSyncService>();
+        var added = sp.GetRequiredService<AddedTransactionService>();
+        var plans = sp.GetRequiredService<PlanService>();
+
+        var user = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Tester", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var household = await households.CreateAsync(user.Id, "V7 DB added", now, ct);
+        var householdId = household.Id;
+        try
+        {
+            AccountRow checking;
+            BankLinkRow link;
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                checking = await accounts.CreateAsync(uow.Connection, householdId, user.Id, new AccountFields("US Bank", "U.S. Bank", AccountType.Checking, 0, "#000000", "landmark", null), now, ct);
+                var savings = await accounts.CreateAsync(uow.Connection, householdId, user.Id, new AccountFields("Savings", "U.S. Bank", AccountType.Savings, 0, "#000000", "piggy-bank", null), now, ct);
+                link = await banks.InsertLinkAsync(uow.Connection, householdId, user.Id, "U.S. Bank", sp.GetRequiredService<DataProtector>().Protect("https://user:pass@bridge.example/simplefin"), now, ct);
+                var set = SimpleFinParser.Parse(json, today);
+                await banks.SetMappingAsync(uow.Connection, householdId, (await banks.UpsertExternalAccountAsync(uow.Connection, householdId, link.Id, set.Accounts[0], now, ct)).Id, checking.Id, now, ct);
+                await banks.SetMappingAsync(uow.Connection, householdId, (await banks.UpsertExternalAccountAsync(uow.Connection, householdId, link.Id, set.Accounts[1], now, ct)).Id, savings.Id, now, ct);
+                await accounts.SetRoleAsync(uow.Connection, householdId, checking.Id, AccountRole.Bills, null, now, ct);
+                await uow.CommitAsync(ct);
+            }
+
+            await sync.SyncAsync(link, user.Id, "Tester", manual: true, ct);
+            async Task<PlanBillsAccountDto> Bills() => (await plans.GetAsync(householdId, null, ct))!.BillsAccount!;
+            Assert.Equal(234_567, (await Bills()).AvailableCents);
+
+            // A coffee the bank has not shown: it comes off available now and is listed with the pending rows.
+            var coffee = await added.AddAsync(householdId, user.Id, "Tester", checking.Id, -425, "Coffee", today, force: false, ct);
+            Assert.NotNull(coffee.Row);
+            Assert.Equal(("added", true, "confirmed"), (coffee.Row!.Source, coffee.Row.Pending, coffee.Row.Status));
+            var bills = await Bills();
+            Assert.Equal((234_567 - 425, -425L, 13_740L, 6), (bills.AvailableCents, bills.AddedCents, bills.PendingOutCents, bills.Pending.Count));
+
+            // The bank already shows a Walmart −$25.00 today: adding it again is refused unless forced.
+            var walmart = await added.AddAsync(householdId, user.Id, "Tester", checking.Id, -2_500, "Walmart", today, force: false, ct);
+            Assert.Null(walmart.Row);
+            Assert.Equal(-2_500, walmart.Duplicate!.AmountCents);
+            var forced = await added.AddAsync(householdId, user.Id, "Tester", checking.Id, -2_500, "Walmart", today, force: true, ct);
+            Assert.NotNull(forced.Row);
+            Assert.Equal(234_567 - 425 - 2_500, (await Bills()).AvailableCents);
+            Assert.True((await added.AddAsync(householdId, user.Id, "Tester", Guid.NewGuid(), -100, "x", today, force: false, ct)).UnknownAccount);
+
+            // The bank's coffee arrives (a new pending row, its own name): it replaces the added one, so it is not counted twice.
+            var u = Unix(today).ToString(CultureInfo.InvariantCulture);
+            json = json.Replace(
+                "{ \"id\": \"t-payroll\"",
+                "{ \"id\": \"p-coffee\", \"posted\": " + u + ", \"amount\": \"-4.25\", \"description\": \"SQ *BLUE BOTTLE\", \"pending\": true },\n                    { \"id\": \"t-payroll\"",
+                StringComparison.Ordinal);
+            await sync.SyncAsync(await banks.GetLinkAsync(householdId, link.Id, ct) ?? link, user.Id, "Tester", manual: true, ct);
+            await using (var conn = await db.OpenConnectionAsync(ct))
+            {
+                var replaced = await imports.GetAsync(conn, householdId, coffee.Row.Id, ct);
+                Assert.Equal(("ignored", "superseded"), (replaced!.Status, replaced.IgnoreReason));
+                Assert.NotNull(await conn.ExecuteScalarAsync<Guid?>("SELECT replaced_by FROM imported_transactions WHERE id = @Id", new { coffee.Row.Id }));
+            }
+
+            // The bank's numbers now hold the coffee: available is the bank's (with the forced Walmart still waiting).
+            bills = await Bills();
+            Assert.Equal((-2_500L, 13_740L + 425), (bills.AddedCents, bills.PendingOutCents));
+
+            // Delete the forced Walmart; bank rows cannot be deleted.
+            Assert.True(await added.DeleteAsync(householdId, user.Id, "Tester", forced.Row!.Id, ct));
+            Assert.Equal(0, (await Bills()).AddedCents);
+            var bankRow = (await imports.ListBankPendingAsync(householdId, checking.Id, null, reviewOrConfirmedOnly: false, ct)).First();
+            Assert.False(await added.DeleteAsync(householdId, user.Id, "Tester", bankRow.Id, ct));
+        }
+        finally
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = householdId });
             await conn.ExecuteAsync("DELETE FROM users WHERE id = @Id", new { Id = user.Id });
         }
     }

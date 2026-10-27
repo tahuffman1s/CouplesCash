@@ -5,6 +5,7 @@ using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Services;
+using CouplesCash.Api.Validation;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Npgsql;
 
@@ -21,6 +22,10 @@ public static class TransactionEndpoints
             .WithSummary("Transactions feed: pending (every in-progress row, first page only), posted rows + manual expenses newest first; ?accountId=&q=&before=&limit≤200");
         group.MapGet("/pending", Pending)
             .WithSummary("Pending transactions grouped by account (accounts with pending first, by pending outflow), with totals");
+        group.MapPost("/transactions", Add).WithValidation<AddTransactionRequest>()
+            .WithSummary("Add a transaction by hand (pending until the bank's own row replaces it); 409 when the bank already shows it, unless force");
+        group.MapDelete("/transactions/{id:guid}", Remove)
+            .WithSummary("Delete a transaction added by hand (bank rows: 404)");
 
         return group;
     }
@@ -71,6 +76,38 @@ public static class TransactionEndpoints
         var toReview = await imports.CountPendingAsync(conn, householdId, ct);
         return TypedResults.Ok(new TransactionFeedDto(pending, items, nextBefore, toReview));
     }
+
+    private static async Task<Results<Created<AccountTransactionDto>, ValidationProblem, ProblemHttpResult>> Add(
+        AddTransactionRequest request,
+        ClaimsPrincipal principal,
+        AddedTransactionService added,
+        CancellationToken ct)
+    {
+        var outcome = await added.AddAsync(principal.GetHouseholdId(), principal.GetUserId(), principal.GetDisplayName(), request.AccountId,
+            request.AmountCents, request.Description, request.PostedOn, request.Force ?? false, ct);
+        if (outcome.UnknownAccount)
+        {
+            return Problems.Validation("accountId", "Unknown account.");
+        }
+
+        if (outcome.Duplicate is { } d)
+        {
+            return TypedResults.Problem(
+                title: "The bank already shows this",
+                detail: $"{d.AccountName ?? "The bank"} already shows {InboxService.DisplayName(d)} {Money.Format(d.AmountCents, "USD")} on {d.PostedOn:yyyy-MM-dd}.",
+                statusCode: StatusCodes.Status409Conflict,
+                type: "likely_duplicate",
+                extensions: new Dictionary<string, object?> { ["duplicate"] = d.ToAccountTransaction() });
+        }
+
+        var row = outcome.Row!;
+        return TypedResults.Created($"/v1/transactions/{row.Id}", row.ToAccountTransaction());
+    }
+
+    private static async Task<Results<NoContent, NotFound>> Remove(Guid id, ClaimsPrincipal principal, AddedTransactionService added, CancellationToken ct) =>
+        await added.DeleteAsync(principal.GetHouseholdId(), principal.GetUserId(), principal.GetDisplayName(), id, ct)
+            ? TypedResults.NoContent()
+            : TypedResults.NotFound();
 
     private static async Task<Ok<PendingViewDto>> Pending(
         ClaimsPrincipal principal,

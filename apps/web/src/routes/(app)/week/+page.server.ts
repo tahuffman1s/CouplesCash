@@ -4,6 +4,7 @@ import type { Account, Category, Plan, RecurringItem } from '#lib/types.ts';
 import { endpoints, isApiError } from '#lib/server/api.ts';
 import { str } from '#lib/server/forms.ts';
 import { quickAddAction } from '#lib/server/quickadd.ts';
+import { addTransactionAction } from '#lib/server/addtransaction.ts';
 import { isValidISODate } from '#lib/utils/dates.ts';
 
 /**
@@ -35,6 +36,7 @@ export const load: PageServerLoad = async (event) => {
 
 export const actions: Actions = {
 	quickAdd: quickAddAction,
+	addTransaction: addTransactionAction,
 	/** Tick / untick a planned line (a bill, a fun-money transfer, the paycheck). */
 	paid: async (event) => {
 		const data = await event.request.formData();

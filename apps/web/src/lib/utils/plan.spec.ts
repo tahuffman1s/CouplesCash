@@ -68,6 +68,7 @@ function plan(over: Partial<Plan> = {}): Plan {
 			availableFromBank: true,
 			pending: [],
 			pendingOutCents: 6240,
+			addedCents: 0,
 			feed: null
 		},
 		accounts: [],
@@ -216,6 +217,19 @@ describe('pendingLine', () => {
 				balanceCents: 240807
 			})
 		).toBe('balance $2,408.07 − pending −$62.40');
+	});
+	it('what you added comes off on top of what the bank shows', () => {
+		const withAdded = [{}, {}, {}, { source: 'added' }] as never[];
+		const b = { availableFromBank: true, pendingOutCents: 6240, balanceCents: 0, addedCents: -425 };
+		expect(pendingLine({ ...b, pending: withAdded })).toBe(
+			'after 3 pending · −$62.40 · 1 you added −$4.25'
+		);
+		expect(pendingLine({ ...b, pending: [{ source: 'added' }] as never[] })).toBe(
+			'1 you added −$4.25'
+		);
+		expect(pendingLine({ ...b, availableFromBank: false, pending: withAdded })).toBe(
+			'balance $0.00 − pending −$62.40 · 1 you added −$4.25'
+		);
 	});
 });
 

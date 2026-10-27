@@ -32,6 +32,7 @@
 		review: 'bg-warning/15 text-pending',
 		expense: 'bg-base-200 text-base-content/80',
 		manual: 'bg-base-200 text-base-content/80',
+		added: 'bg-primary/10 text-primary',
 		paid: 'bg-success/15 text-success',
 		transfer: 'bg-info/15 text-info',
 		ignored: 'bg-base-200 text-base-content/60',

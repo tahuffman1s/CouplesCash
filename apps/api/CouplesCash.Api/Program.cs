@@ -136,6 +136,7 @@ builder.Services.AddSingleton<GoalService>();
 builder.Services.AddSingleton<ActivityService>();
 builder.Services.AddSingleton<PasskeyService>();
 builder.Services.AddSingleton<InboxService>();
+builder.Services.AddSingleton<AddedTransactionService>();
 builder.Services.AddSingleton<BankSyncService>();
 builder.Services.AddHttpClient(SimpleFinClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddSingleton<ISimpleFinClient, SimpleFinClient>();

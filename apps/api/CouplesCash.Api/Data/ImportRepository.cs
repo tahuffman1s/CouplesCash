@@ -128,6 +128,78 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             }, ct));
 
     // ---------------------------------------------------------------------------------------------
+    // Transactions added by hand (source 'added')
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>Source of a transaction added by hand: on an account, pending until the bank's own row replaces it.</summary>
+    public const string AddedSource = "added";
+
+    /// <summary>Stores a transaction added by hand: confirmed (never to review), nothing attached, pending until the bank shows it.</summary>
+    public Task<Guid> InsertAddedAsync(NpgsqlConnection conn, Guid householdId, Guid accountId, DateOnly postedOn, long amountCents, string description, Guid userId, DateTime now, CancellationToken ct)
+    {
+        var id = Guid.CreateVersion7();
+        return conn.ExecuteScalarAsync<Guid>(Cmd(
+            """
+            INSERT INTO imported_transactions (id, household_id, source, account_id, fingerprint, posted_on, amount_cents, description,
+                                               pending, status, reviewed_by, reviewed_at, created_at)
+            VALUES (@Id, @HouseholdId, 'added', @AccountId, @Fingerprint, @PostedOn, @AmountCents, @Description,
+                    true, 'confirmed', @UserId, @Now, @Now)
+            RETURNING id
+            """,
+            new
+            {
+                Id = id,
+                HouseholdId = householdId,
+                AccountId = accountId,
+                Fingerprint = Fingerprint.ForExternal(AddedSource, accountId.ToString("D"), id.ToString("D")),
+                PostedOn = postedOn,
+                AmountCents = amountCents,
+                Description = description,
+                UserId = userId,
+                Now = now,
+            }, ct));
+    }
+
+    /// <summary>The account's transactions added by hand that the bank has not shown yet.</summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListOpenAddedAsync(NpgsqlConnection conn, Guid householdId, Guid accountId, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"{Select} WHERE t.household_id = @HouseholdId AND t.account_id = @AccountId AND t.source = 'added' AND t.ignore_reason IS NULL ORDER BY t.posted_on, t.id",
+            new { HouseholdId = householdId, AccountId = accountId }, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>The account's bank rows posted in [<paramref name="from"/>, <paramref name="to"/>] that do not already stand for a transaction added by hand.</summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListUnclaimedBankRowsAsync(NpgsqlConnection conn, Guid householdId, Guid accountId, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"""
+            {Select}
+            WHERE t.household_id = @HouseholdId AND t.account_id = @AccountId AND t.source <> 'added' AND {NotHidden}
+              AND t.posted_on BETWEEN @From AND @To
+              AND NOT EXISTS (SELECT 1 FROM imported_transactions m WHERE m.household_id = t.household_id AND m.replaced_by = t.id)
+            ORDER BY t.posted_on, t.id
+            """,
+            new { HouseholdId = householdId, AccountId = accountId, From = from, To = to }, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>The bank's own row arrived: the added one is hidden (ignored / superseded) and points at it.</summary>
+    public Task<int> ReplaceAddedAsync(NpgsqlConnection conn, Guid householdId, Guid addedId, Guid bankId, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE imported_transactions SET status = 'ignored', ignore_reason = 'superseded', replaced_by = @BankId
+            WHERE id = @Id AND household_id = @HouseholdId AND source = 'added' AND ignore_reason IS NULL
+            """,
+            new { Id = addedId, HouseholdId = householdId, BankId = bankId }, ct));
+
+    /// <summary>Deletes a transaction added by hand (never a bank row). False when there is none with that id.</summary>
+    public async Task<bool> DeleteAddedAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct) =>
+        await conn.ExecuteAsync(Cmd(
+            "DELETE FROM imported_transactions WHERE id = @Id AND household_id = @HouseholdId AND source = 'added'",
+            new { Id = id, HouseholdId = householdId }, ct)) > 0;
+
+    // ---------------------------------------------------------------------------------------------
     // Reads
     // ---------------------------------------------------------------------------------------------
 

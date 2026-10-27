@@ -26,14 +26,24 @@ public sealed class PlanContext
     /// <summary>The same occurrences as the engine sees them (same order).</summary>
     public required IReadOnlyList<PlanOccurrence> PlanOccurrences { get; init; }
 
-    /// <summary>The bills account's still-pending bank rows (any review status, not dropped / superseded), newest first.</summary>
+    /// <summary>
+    /// The bills account's still-pending rows (any review status, not dropped / superseded), newest first: the bank's, and the ones added by
+    /// hand that the bank has not shown yet (source <c>added</c>).
+    /// </summary>
     public required IReadOnlyList<ImportedTransactionRow> Pending { get; init; }
 
-    public long PendingOutCents => Pending.Where(p => p.AmountCents < 0).Sum(p => -p.AmountCents);
+    /// <summary>The bank's pending outflows (the added ones are not in the bank's numbers).</summary>
+    public long PendingOutCents => Pending.Where(p => p.AmountCents < 0 && p.Source != ImportRepository.AddedSource).Sum(p => -p.AmountCents);
 
-    /// <summary>Available now: the bills account's bank available, else balance − pending outflows; before setup the v6 spendable sum.</summary>
+    /// <summary>Signed sum of the transactions added by hand the bank has not shown yet (usually negative).</summary>
+    public long AddedCents => Pending.Where(p => p.Source == ImportRepository.AddedSource).Sum(p => p.AmountCents);
+
+    /// <summary>
+    /// Available now: the bills account's bank available, else balance − pending outflows, plus what was added by hand and the bank has
+    /// not shown yet; before setup the v6 spendable sum.
+    /// </summary>
     public long AvailableCents => BillsAccount is { } bills
-        ? WeekEngine.BillsAvailable(bills.AvailableCents, bills.BalanceCents, PendingOutCents)
+        ? WeekEngine.BillsAvailable(bills.AvailableCents, bills.BalanceCents, PendingOutCents) + AddedCents
         : WeekEngine.SpendableV6(Accounts.Select(WeekService.ToSpendable));
 
     public Guid? BillsAccountId => BillsAccount?.Id;
@@ -159,6 +169,7 @@ public sealed class PlanService(
                 bills.AvailableCents is not null,
                 c.Pending.Select(p => p.ToDto()).ToList(),
                 c.PendingOutCents,
+                c.AddedCents,
                 MappingV3.ParseFeed(external?.LastFeed));
         }
 

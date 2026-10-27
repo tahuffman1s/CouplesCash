@@ -131,6 +131,13 @@ public static class ActivitySummaries
 
     public static string TransactionRestored(string name, long amountCents, string currency) => $"restored {Bold(name)} · {Money(amountCents, currency)} to the inbox";
 
+    // Transactions added by hand
+    public static string TransactionAdded(string name, long amountCents, string currency) => $"added {Bold(name)} · {Money(amountCents, currency)} (waiting for the bank)";
+
+    public static string TransactionAddedRemoved(string name, long amountCents, string currency) => $"removed {Bold(name)} · {Money(amountCents, currency)}";
+
+    public static string TransactionAddedReplaced(string name, string bankName) => $"{Bold(name)} showed up at the bank as {Bold(bankName)}";
+
     // v5: pending lifecycle, matching anywhere, transfers
     public static string TransactionPosted(string name, long fromCents, long toCents, string currency) =>
         $"{Bold(name)} posted · {Money(Math.Abs(fromCents), currency)} → {Money(Math.Abs(toCents), currency)}";

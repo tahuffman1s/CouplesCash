@@ -140,14 +140,18 @@ export function orderAccounts<T extends Pick<PlanAccount, 'role' | 'name' | 'own
  * ("after 3 pending · −$62.40"); without it the app subtracts pending itself ("balance − pending").
  */
 export function pendingLine(
-	b: Pick<PlanBillsAccount, 'availableFromBank' | 'pending' | 'pendingOutCents' | 'balanceCents'>
+	b: Pick<PlanBillsAccount, 'availableFromBank' | 'pending' | 'pendingOutCents' | 'balanceCents'> &
+		Partial<Pick<PlanBillsAccount, 'addedCents'>>
 ): string {
-	const n = b.pending.length;
+	const added = b.pending.filter((p) => p?.source === 'added').length;
+	const n = b.pending.length - added;
+	// transactions added by hand aren't in the bank's numbers: they come off on top ("1 you added −$4.25")
+	const extra = added ? ` · ${added} you added ${signedMoney(b.addedCents ?? 0)}` : '';
 	if (b.availableFromBank) {
-		if (n === 0) return 'nothing pending';
-		return `after ${n} pending · ${signedMoney(-b.pendingOutCents)}`;
+		if (n === 0) return added ? extra.slice(3) : 'nothing pending';
+		return `after ${n} pending · ${signedMoney(-b.pendingOutCents)}${extra}`;
 	}
-	return `balance ${formatMoney(b.balanceCents)} − pending ${signedMoney(-b.pendingOutCents)}`;
+	return `balance ${formatMoney(b.balanceCents)} − pending ${signedMoney(-b.pendingOutCents)}${extra}`;
 }
 
 export type ReceiptLine = {

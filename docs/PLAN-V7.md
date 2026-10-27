@@ -85,6 +85,16 @@ Each sync stores per external account how many pending and posted transactions t
 feed sent, that's our bug; if the feed itself sent one, it's the bank/MX feed (and the available balance still makes
 the weekly number right).
 
+## Adding a transaction by hand (when the bank hasn't shown it yet)
+SimpleFIN refreshes the bank about once a day, and some banks send few pending charges, so a coffee bought this morning
+may not be there on Friday. The **+** button opens on **Transaction** (Bill is the second tab): money out / in, amount,
+what it was, account (the bills account by default), date (today). It is listed with the account's pending charges as
+"Added by you" and comes off "available now" right away (`plan.billsAccount.addedCents`). If the bank already shows
+something like it, the sheet asks first ("U.S. Bank already shows STARBUCKS $6.50 on Oct 27" → Add anyway). When the
+bank's own copy arrives (same sign, −3 … +7 days, within $1, or max(25 %, $5) for a matching description), it takes
+the added row's place, so nothing counts twice. It can be deleted from its transaction sheet. Caveat: if the bank's
+available balance already includes a hold the feed doesn't list, adding it by hand counts it twice — delete it.
+
 ## What's removed from the app (web)
 Insights (donut, monthly budgets, month report), weekly budgets, goals, to-pay list, activity feed page, typed manual
 expenses, CSV import entry points (kept only under Settings → Banks → "Import a statement"), pay-period settings,

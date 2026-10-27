@@ -2,6 +2,7 @@ import type { Actions, PageServerLoad } from './$types';
 import type { Account, Category, InboxItem, InboxPage, TransactionFeed } from '#lib/types.ts';
 import { api, endpoints } from '#lib/server/api.ts';
 import { quickAddAction } from '#lib/server/quickadd.ts';
+import { addTransactionAction } from '#lib/server/addtransaction.ts';
 
 /**
  * v6 Transactions tab: everything that hit your accounts. To review on top (the complete pending
@@ -36,4 +37,7 @@ export const load: PageServerLoad = async (event) => {
 	return { ...empty, feed, review: review.items, categories, accounts };
 };
 
-export const actions: Actions = { quickAdd: quickAddAction };
+export const actions: Actions = {
+	quickAdd: quickAddAction,
+	addTransaction: addTransactionAction
+};

@@ -92,7 +92,12 @@
 							<ul class="mt-1 divide-y divide-base-300/60" data-testid="plan-pending">
 								{#each b.pending as t (t.id)}
 									<li class="flex min-h-10 items-center gap-2 py-1 text-sm">
-										<span class="min-w-0 flex-1 truncate">{t.payee || t.description}</span>
+										<span class="min-w-0 flex-1 truncate"
+											>{t.payee || t.description}{#if t.source === 'added'}<span
+													class="ml-1.5 badge border-0 bg-base-200 px-1.5 badge-xs text-[0.65rem] text-base-content/70"
+													data-testid="pending-added">added by you</span
+												>{/if}</span
+										>
 										<span class="shrink-0 text-xs text-base-content/55"
 											>{formatDate(t.postedOn)}</span
 										>

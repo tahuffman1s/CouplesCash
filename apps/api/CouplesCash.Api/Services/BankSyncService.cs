@@ -26,6 +26,7 @@ public sealed class BankSyncService(
     InboxService inbox,
     MatchingService matching,
     FridayService friday,
+    AddedTransactionService added,
     MatchingQueue matchingQueue,
     ISimpleFinClient client,
     DataProtector protector,
@@ -164,7 +165,14 @@ public sealed class BankSyncService(
 
                 var funAccount = external.AccountId is { } target
                     && (await accounts.GetAsync(uow.Connection, householdId, target, ct))?.Role == AccountRole.Fun;
-                newIds.AddRange(await ReconcileAccountAsync(uow, link, account, external, start, today, judgeAbsence, currency, now, stats, ct, funAccount));
+                var inserted = await ReconcileAccountAsync(uow, link, account, external, start, today, judgeAbsence, currency, now, stats, ct, funAccount);
+                newIds.AddRange(inserted);
+
+                // The bank's own copies of transactions added by hand replace them (so nothing counts twice).
+                if (external.AccountId is { } addedTo)
+                {
+                    await added.ReplaceFromBankAsync(uow, householdId, addedTo, inserted, ct);
+                }
             }
 
             // v7: planned transfers (fun money) and the savings sweep are claimed from the bank rows first, so the matcher never scores them.

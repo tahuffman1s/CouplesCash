@@ -9,6 +9,7 @@ import type {
 } from '#lib/types.ts';
 import { api, endpoints } from '#lib/server/api.ts';
 import { quickAddAction } from '#lib/server/quickadd.ts';
+import { addTransactionAction } from '#lib/server/addtransaction.ts';
 import { addDays, today } from '#lib/utils/dates.ts';
 
 /** v7 Bills: one list grouped by pay week (this pay week · next 4 weeks · later), found bills. */
@@ -49,4 +50,7 @@ export const load: PageServerLoad = async (event) => {
 	return { ...empty, items, categories, accounts, suggestions, oneOffPaid };
 };
 
-export const actions: Actions = { quickAdd: quickAddAction };
+export const actions: Actions = {
+	quickAdd: quickAddAction,
+	addTransaction: addTransactionAction
+};

@@ -30,6 +30,7 @@ test('"netflix 15.49 on the 7th" → a monthly subscription on day 7, named for 
 	await page.goto('/bills');
 	await hydrated(page);
 	await page.getByTestId('quick-add').click();
+	await page.getByTestId('quick-tab-bill').click();
 	const form = page.getByTestId('quick-add-form');
 	await expect(form.getByTestId('quick-add-submit')).toBeDisabled();
 	// examples fill the field
@@ -91,6 +92,7 @@ test('chips correct what the sentence got wrong; every 6 months is two yearly it
 	await page.goto('/bills');
 	await hydrated(page);
 	await page.getByTestId('quick-add').click();
+	await page.getByTestId('quick-tab-bill').click();
 	const form = page.getByTestId('quick-add-form');
 	await form.getByTestId('quick-add-input').fill('gym 45 weekly');
 	await expect(form.getByTestId('chip-kind')).toHaveText('Bill');
@@ -123,6 +125,7 @@ test('chips correct what the sentence got wrong; every 6 months is two yearly it
 	// "More options" carries the sentence into the full form
 	await hydrated(page);
 	await page.getByTestId('quick-add').click();
+	await page.getByTestId('quick-tab-bill').click();
 	await page.getByTestId('quick-add-input').fill('water bill ~60 on the 20th');
 	await page.getByTestId('quick-more').click();
 	await expect(page).toHaveURL(/\/bills\/new\?/);

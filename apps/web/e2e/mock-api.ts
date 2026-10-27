@@ -292,7 +292,9 @@ type IgnoreReason = 'manual' | 'transfer' | 'dropped' | 'superseded';
 type Tx = {
 	id: string;
 	householdId: string;
-	source: 'simplefin' | 'csv';
+	/** `added`: added by hand, pending until the bank's own copy replaces it */
+	source: 'simplefin' | 'csv' | 'added';
+	replacedBy?: string | null;
 	externalAccountId: string | null;
 	accountId: string | null;
 	externalId: string | null;
@@ -1861,7 +1863,7 @@ function insertTx(
 	>
 ): Tx | null {
 	const fingerprint = fingerprintFor(
-		input.source,
+		input.source as 'simplefin' | 'csv',
 		input.externalId,
 		input.accountId,
 		input.postedOn,
@@ -2237,6 +2239,39 @@ function billSuggestionView(b: BillSuggestionRec) {
 		lastSeen: b.lastSeen
 	};
 }
+/** Same direction, the bank row 3 days before … 7 days after, within $1 (or 25 % / $5 with the same first word). */
+function addedMatches(a: Tx, b: Tx): boolean {
+	const days = (parse(b.postedOn).getTime() - parse(a.postedOn).getTime()) / 86_400_000;
+	if (days < -3 || days > 7 || Math.sign(a.amountCents) !== Math.sign(b.amountCents)) return false;
+	const diff = Math.abs(Math.abs(a.amountCents) - Math.abs(b.amountCents));
+	const word = (s: string) => s.toLowerCase().match(/[a-z]{2,}/)?.[0] ?? '';
+	const similar = word(a.description) !== '' && word(a.description) === word(b.description);
+	return diff <= (similar ? Math.max(500, Math.round(Math.abs(a.amountCents) * 0.25)) : 100);
+}
+function replaceAdded(hh: string, fresh: Tx[]) {
+	const open = [...txs.values()].filter(
+		(t) => t.householdId === hh && t.source === 'added' && !t.ignoreReason
+	);
+	const used = new Set<string>();
+	for (const a of open) {
+		const b = fresh.find(
+			(f) => !used.has(f.id) && f.accountId === a.accountId && addedMatches(a, f)
+		);
+		if (!b) continue;
+		used.add(b.id);
+		a.status = 'ignored';
+		a.ignoreReason = 'superseded';
+		a.replacedBy = b.id;
+		record(
+			hh,
+			null,
+			'transaction.added_replaced',
+			'transaction',
+			b.id,
+			`${a.description} showed up at the bank`
+		);
+	}
+}
 function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
 	const hh = link.householdId;
 	const data = bridge.get(link.id) ?? [];
@@ -2283,6 +2318,8 @@ function syncLink(link: BankLinkRec, actor: User | null): SyncResult {
 		if (account) applyMapping(ext, account, actor?.id ?? 'scheduler');
 		fresh.push(...reconcileAccount(hh, ext, ba));
 	}
+	// the bank's own copies of transactions added by hand take their place
+	replaceAdded(hh, fresh);
 	// v7: fun-money accounts are personal: never in To review
 	for (const t of fresh) quietFun(t);
 	detectTransfers(hh, fresh);
@@ -3217,11 +3254,16 @@ function planFor(hh: string, date: string) {
 		const pending = [...txs.values()]
 			.filter((t) => live(t) && t.accountId === bills.id)
 			.sort((a, b) => b.postedOn.localeCompare(a.postedOn));
+		// the bank's pending; what was added by hand isn't in the bank's numbers yet and comes off on top
 		const pendingOutCents = pending
-			.filter((t) => t.amountCents < 0)
+			.filter((t) => t.amountCents < 0 && t.source !== 'added')
 			.reduce((s, t) => s - t.amountCents, 0);
+		const addedCents = pending
+			.filter((t) => t.source === 'added')
+			.reduce((s, t) => s + t.amountCents, 0);
 		const fromBank = !!ext && ext.availableCents !== null;
-		available = fromBank ? ext.availableCents! : bills.balanceCents - pendingOutCents;
+		available =
+			(fromBank ? ext.availableCents! : bills.balanceCents - pendingOutCents) + addedCents;
 		billsAccount = {
 			id: bills.id,
 			name: bills.name,
@@ -3230,6 +3272,7 @@ function planFor(hh: string, date: string) {
 			availableFromBank: fromBank,
 			pending: pending.map(txView),
 			pendingOutCents,
+			addedCents,
 			feed: ext?.lastFeed ?? null
 		};
 	}
@@ -5156,6 +5199,94 @@ const server = createServer(async (req, res) => {
 				count: groups.reduce((sum, g) => sum + g.pendingCount, 0),
 				groups
 			});
+		}
+		if (p === '/v1/transactions' && m === 'POST') {
+			const b = await readJson(req);
+			const account = accounts.get(String(b.accountId ?? ''));
+			const cents = Number(b.amountCents);
+			const description = String(b.description ?? '').trim();
+			const postedOn = String(b.postedOn ?? '');
+			const errors: Record<string, string[]> = {};
+			if (!account || account.householdId !== hh) errors.accountId = ['Unknown account.'];
+			if (!Number.isInteger(cents) || cents === 0) errors.amountCents = ['Must not be zero.'];
+			if (!description) errors.description = ['Required.'];
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(postedOn)) errors.postedOn = ['Use a date.'];
+			if (Object.keys(errors).length)
+				return send(res, 400, { title: 'Validation failed', status: 400, errors });
+			const draft = { postedOn, amountCents: cents, description } as Tx;
+			const claimed = new Set([...txs.values()].map((t) => t.replacedBy).filter(Boolean));
+			const dup =
+				b.force === true
+					? undefined
+					: [...txs.values()].find(
+							(t) =>
+								t.householdId === hh &&
+								t.accountId === account!.id &&
+								t.source !== 'added' &&
+								!isHidden(t) &&
+								!claimed.has(t.id) &&
+								addedMatches(draft, t)
+						);
+			if (dup)
+				return send(res, 409, {
+					type: 'likely_duplicate',
+					title: 'The bank already shows this',
+					status: 409,
+					detail: `${account!.name} already shows ${dup.payee ?? dup.description} ${$(dup.amountCents)} on ${dup.postedOn}.`,
+					duplicate: txView(dup)
+				});
+			const t: Tx = {
+				id: randomUUID(),
+				householdId: hh,
+				source: 'added',
+				replacedBy: null,
+				externalAccountId: null,
+				accountId: account!.id,
+				externalId: null,
+				fingerprint: `added|${randomUUID()}`,
+				postedOn,
+				amountCents: cents,
+				description,
+				payee: null,
+				memo: null,
+				pending: true,
+				status: 'confirmed',
+				suggestion: null,
+				confidence: 0,
+				confirmed: null,
+				createdAt: nowIso(),
+				ignoreReason: null,
+				transferPeerId: null,
+				transferAuto: false,
+				suggestedPeerId: null,
+				matchScore: null,
+				matchDetail: null
+			};
+			txs.set(t.id, t);
+			record(
+				hh,
+				user,
+				'transaction.added',
+				'transaction',
+				t.id,
+				`added ${description} · ${$(cents)}`
+			);
+			return send(res, 201, txView(t));
+		}
+		const removeAdded = p.match(/^\/v1\/transactions\/([0-9a-f-]{36})$/);
+		if (removeAdded && m === 'DELETE') {
+			const t = txs.get(removeAdded[1]);
+			if (!t || t.householdId !== hh || t.source !== 'added') return problem(res, 404, 'Not found');
+			txs.delete(t.id);
+			record(
+				hh,
+				user,
+				'transaction.added_removed',
+				'transaction',
+				null,
+				`removed ${t.description}`
+			);
+			return send(res, 204);
 		}
 		if (p === '/v1/transactions' && m === 'GET') {
 			const accountId = url.searchParams.get('accountId');

@@ -106,7 +106,7 @@ public static class InboxEndpoints
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         await imports.LockAsync(uow.Connection, householdId, id, ct);
         var row = await imports.GetAsync(uow.Connection, householdId, id, ct);
-        if (row is null)
+        if (row is null || row.Source == ImportRepository.AddedSource)
         {
             return TypedResults.NotFound();
         }
@@ -150,7 +150,7 @@ public static class InboxEndpoints
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         await imports.LockAsync(uow.Connection, householdId, id, ct);
         var row = await imports.GetAsync(uow.Connection, householdId, id, ct);
-        if (row is null)
+        if (row is null || row.Source == ImportRepository.AddedSource)
         {
             return TypedResults.NotFound();
         }
@@ -275,7 +275,7 @@ public static class InboxEndpoints
         var householdId = principal.GetHouseholdId();
         await using var conn = await db.OpenConnectionAsync(ct);
         var row = await imports.GetAsync(conn, householdId, id, ct);
-        if (row is null)
+        if (row is null || row.Source == ImportRepository.AddedSource)
         {
             return TypedResults.NotFound();
         }
@@ -314,7 +314,7 @@ public static class InboxEndpoints
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         await imports.LockAsync(uow.Connection, householdId, id, ct);
         var row = await imports.GetAsync(uow.Connection, householdId, id, ct);
-        if (row is null)
+        if (row is null || row.Source == ImportRepository.AddedSource)
         {
             return TypedResults.NotFound();
         }

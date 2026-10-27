@@ -1384,6 +1384,27 @@ echo "$BODY" | jq -e '.events[] | select(.kind=="couple.settings" and .data.week
 request POST /v1/auth/password "$A_TOKEN" "$(jq -nc --arg p "$PASSWORD" '{currentPassword:$p,newPassword:"a brand new passphrase"}')"; expect 204 "change password"
 request POST /v1/auth/refresh '' "$(jq -nc --arg r "$A_REFRESH" '{refreshToken:$r}')"; expect 401 "all refresh tokens revoked after password change"
 
+echo "--- added by hand: POST/DELETE /v1/transactions"
+request POST /v1/transactions "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg d "$(date -u +%F)" '{accountId:$a,amountCents:0,description:"Coffee",postedOn:$d}')"; expect 400 "zero amount → 400"
+echo "$BODY" | jq -e '.errors | has("amountCents")' >/dev/null || fail "error names amountCents"
+request POST /v1/transactions "$A_TOKEN" "$(jq -nc --arg d "$(date -u +%F)" '{accountId:"00000000-0000-7000-8000-000000000000",amountCents:-425,description:"Coffee",postedOn:$d}')"; expect 400 "unknown account → 400"
+request POST /v1/transactions "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg d "$(date -u +%F)" '{accountId:$a,amountCents:-425,description:"Coffee",postedOn:$d}')"
+if [[ "$STATUS" == "409" ]]; then # the fake Bridge's −4.50 coffee is already on the account today
+  echo "$BODY" | jq -e '(.type|endswith("likely_duplicate")) and .duplicate.source=="simplefin"' >/dev/null || fail "409 likely_duplicate names the bank row: $BODY"
+  pass "the bank already shows a coffee → 409 likely_duplicate"
+  request POST /v1/transactions "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg d "$(date -u +%F)" '{accountId:$a,amountCents:-425,description:"Coffee",postedOn:$d,force:true}')"
+fi
+expect 201 "Alex adds a coffee by hand"
+ADDED="$(echo "$BODY" | jq -r .id)"
+echo "$BODY" | jq -e '.source=="added" and .pending==true and .amountCents==-425 and .description=="Coffee"' >/dev/null || fail "added row shape: $BODY"
+request GET "/v1/transactions?accountId=$ACC" "$B_TOKEN"; expect 200 "Sam sees the feed"
+echo "$BODY" | jq -e --arg id "$ADDED" 'any(.pending[]; .id==$id)' >/dev/null || fail "added row listed with the pending rows: $BODY"
+request POST "/v1/inbox/$ADDED/confirm" "$A_TOKEN" '{"as":"expense"}'; expect 404 "an added row is not an inbox row → 404"
+request GET "/v1/activity?limit=20" "$A_TOKEN"
+echo "$BODY" | jq -e 'any(.events[]; .kind=="transaction.added")' >/dev/null || fail "transaction.added activity"
+request DELETE "/v1/transactions/$ADDED" "$B_TOKEN"; expect 204 "Sam deletes it"
+request DELETE "/v1/transactions/$ADDED" "$B_TOKEN"; expect 404 "delete again → 404"
+
 # Start over: wipes the household's money data for both of them; the couple stays.
 request POST /v1/couple/reset "$A_TOKEN" '{"confirm":"yes"}'; expect 400 "reset without the word RESET → 400"
 echo "$BODY" | jq -e '.errors | has("confirm")' >/dev/null || fail "reset error names confirm"

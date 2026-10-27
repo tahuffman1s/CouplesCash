@@ -828,7 +828,7 @@ type FeedStats = { pending: number; posted: number; availableReported: boolean; 
 type Plan = {
   start: string; end: string; nextPayday: string; isCurrent: boolean; isPayday: boolean; today: string;
   billsAccount: { id: string; name: string; availableCents: number; balanceCents: number; availableFromBank: boolean;
-                  pending: InboxItem[]; pendingOutCents: number; feed: FeedStats } | null;   // null → setup needed
+                  pending: InboxItem[]; pendingOutCents: number; addedCents: number; feed: FeedStats } | null;   // null → setup needed
   accounts: { id: string; name: string; role: AccountRole; ownerName: string | null; balanceCents: number; availableCents: number | null }[];
   bills: PlanLine[]; funMoney: PlanLine[]; oneOffs: PlanLine[]; income: PlanLine[];
   billsOutCents: number; funOutCents: number; oneOffOutCents: number; incomeInCents: number;  // unpaid remainders
@@ -849,6 +849,8 @@ type Plan = {
 | POST/PUT | `/v1/recurring` | `kind: 'transfer'` requires `fromAccountId` and `toAccountId` (different, both in household) | `RecurringItem` |
 | POST | `/v1/couple/reset` | `{ confirm: "RESET" }` (case and spaces ignored) | `200 Household` (settings back to defaults) · `400 errors.confirm` without the word · `409` "No household" |
 | GET | `/v1/banks` | — | `BankLink.accounts[].lastFeed: FeedStats` |
+| POST | `/v1/transactions` | `{ accountId, amountCents (≠ 0, − = out), description (1–120), postedOn (today − 60 … today + 7), force? }` | `201 AccountTransaction` (`source: 'added'`, `pending: true`) · `400` (`errors.accountId` for an unknown / archived account) · `409` `likely_duplicate` (`duplicate: AccountTransaction`) unless `force` |
+| DELETE | `/v1/transactions/{id}` | — (an `added` row only; a bank row → 404) | `204` · `404` |
 Transactions on `fun` accounts never enter To review (status confirmed, `ignoreReason` null, no suggestion) but appear in
 the account's transaction list. Activity kinds added: `sweep.done`, `sweep.auto`, `transfer.planned_paid`. Push tag
 `payday`. Week endpoints (`/v1/week`) use the pay week (payday-anchored) from v7 on.
@@ -940,7 +942,8 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   `pendingOutCents` = Σ of their outflows, `feed` = last feed stats; `null` when no account has role `bills`. `accounts` = every active
   account ordered bills, savings, fun, other, then name. `setup`: `banksLinked` (a bank link exists), `rolesSet` (a bills account exists),
   `paycheckKnown` (an active income item), `billsAdded` (an active bill / subscription), `partnerJoined` (two members). `toReviewCount` =
-  household rows to review. `sweep` = this week's sweep row, null until its sweep day (`Sweep` gains `leftCents`, `transactionId`).
+  household rows to review. `addedCents` = Σ of the open rows added by hand on the account (signed, − = out), already inside
+  `availableCents` (below). `sweep` = this week's sweep row, null until its sweep day (`Sweep` gains `leftCents`, `transactionId`).
   **Start over (`POST /couple/reset`).** One transaction under a row lock on the household: deletes every account (balance history
   cascades), recurring item (payments, skips, reminders), bank link and external account (stored credentials included — the SimpleFIN
   connection on the Bridge stays; linking again needs a new setup token), imported transaction, CSV import, sweep, payee rule, bill
@@ -954,6 +957,21 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   request is at most 44 days (the Bridge warns in `errors` above 45 days and cuts ranges over 90): a regular sync is one request; the
   first sync adds older history requests without `pending` (best effort — a failed history request is logged and skipped). A pending
   charge is dated by `transacted_at` when present and never after today.
+- **Transactions added by hand (`POST /v1/transactions`).** For a charge (or deposit) the bank has not shown yet. Stored in
+  `imported_transactions` with `source = 'added'`, `pending = true`, `status = 'confirmed'`, nothing attached, `reviewed_by` the caller
+  (migration `0009_manual_transactions.sql` widens the source check and adds `replaced_by`). They are listed with the account's pending
+  rows (`/v1/transactions` `pending`, `/v1/pending`, the plan's `billsAccount.pending`, the account transactions tab) and count against
+  "available now": the plan's `availableCents` = the bank rule above **+ `addedCents`**, while `pendingOutCents` stays bank rows only (a
+  bank `availableCents` already includes the bank's own holds). They are never in To review, never matched, never sent to the matcher;
+  inbox / match / link / from-transaction routes answer 404 for them. Before inserting, a bank row on the same account with the same sign,
+  dated `postedOn − 3 … postedOn + 7`, within $1.00 (or max(25 %, $5.00) when the descriptions agree, as in the pending lifecycle) and not already claimed →
+  `409 likely_duplicate` with `detail` "U.S. Bank already shows STARBUCKS $6.50 on 2026-10-27." and `duplicate`; `force: true` stores it
+  anyway. **The bank's copy replaces it**: after each account's reconcile in a sync, `ManualMatcher` pairs the open added rows with the
+  new bank rows by the same rule (one-to-one, best score first, then oldest added row); a matched added row becomes `ignored` /
+  `ignore_reason 'superseded'` with `replaced_by` = the bank row, so it leaves the pending list and the total, and the bank row goes
+  through review as usual. `DELETE /v1/transactions/{id}` removes an open added row. Activity: `transaction.added` (caller),
+  `transaction.added_removed` (caller), `transaction.added_replaced` (actor null, `data: { addedId, transactionId }`). Start over wipes
+  them with the other imported rows.
 - **Payday checklist** (only for the current pay week; shown on payday and, while an item is open, through payday + 3): `paycheck` =
   income lines due on payday ("Paycheck arrived · $1,500.00", amount = paid amount when paid, `done` = paid, `auto` = the payment is
   automatic, `transactionId` = the paying row); `fun` = fun-money lines due payday … payday + 3 (weekly ones on payday, a monthly one when

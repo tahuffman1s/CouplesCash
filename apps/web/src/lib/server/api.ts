@@ -4,7 +4,9 @@ import { redirect, type RequestEvent } from '@sveltejs/kit';
 import type {
 	Account,
 	AccountRole,
+	AccountTransaction,
 	AccountTransactionsPage,
+	AddTransactionBody,
 	AccountType,
 	AutoMatchLevel,
 	AuthResult,
@@ -307,7 +309,10 @@ export function endpoints(event: RequestEvent) {
 		// ---- v6 (docs/API-CONTRACT.md § v6 additions)
 		transactions: {
 			feed: (opts: TransactionFeedQuery = {}) =>
-				c.get<TransactionFeed>(`/transactions${transactionFeedQuery(opts)}`)
+				c.get<TransactionFeed>(`/transactions${transactionFeedQuery(opts)}`),
+			// added by hand: pending until the bank's copy replaces it; 409 `likely_duplicate` unless force
+			add: (body: AddTransactionBody) => c.post<AccountTransaction>('/transactions', body),
+			remove: (id: string) => c.del(`/transactions/${id}`)
 		},
 		billSuggestions: {
 			list: () => c.get<BillSuggestion[]>('/bill-suggestions'),

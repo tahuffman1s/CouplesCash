@@ -73,6 +73,22 @@ public sealed class JoinRequestValidator : AbstractValidator<JoinRequest>
     public JoinRequestValidator() => RuleFor(x => x.Code).NotEmpty().MaximumLength(64);
 }
 
+public sealed class AddTransactionRequestValidator : AbstractValidator<AddTransactionRequest>
+{
+    /// <summary>$1,000,000.00.</summary>
+    public const long MaxCents = 100_000_000;
+
+    public AddTransactionRequestValidator()
+    {
+        RuleFor(x => x.AccountId).NotEmpty();
+        RuleFor(x => x.AmountCents).NotEqual(0).Must(c => Math.Abs(c) <= MaxCents).WithMessage("At most $1,000,000.00.");
+        RuleFor(x => x.Description).NotEmpty().MaximumLength(120);
+        RuleFor(x => x.PostedOn)
+            .Must(d => d >= DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-60) && d <= DateOnly.FromDateTime(DateTime.UtcNow).AddDays(7))
+            .WithMessage("Use a date in the last 60 days or the next 7.");
+    }
+}
+
 public sealed class ResetHouseholdRequestValidator : AbstractValidator<ResetHouseholdRequest>
 {
     public const string Word = "RESET";

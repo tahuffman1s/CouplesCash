@@ -45,7 +45,7 @@ Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` 
 | **Encryption at rest** (AES-256-GCM, `Security__DataKey`) | `apps/api/CouplesCash.Api/Security/DataProtector.cs` |
 | **Banks / inbox / CSV endpoints** | `Endpoints/BankEndpoints.cs`, `Endpoints/InboxEndpoints.cs`, `Endpoints/ImportEndpoints.cs` |
 | Background job (autopay, reminders, hygiene, **bank sync + auto-match**) | `apps/api/CouplesCash.Api/Scheduler/` (`SchedulerService` hosted service; selection logic lives in `Domain/SchedulerRules.cs`) |
-| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4, `0005_transactions.sql` = v5) |
+| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4, `0005_transactions.sql` = v5, `0009_manual_transactions.sql` = added-by-hand rows) |
 | API tests | `apps/api/CouplesCash.Api.Tests/` (xunit) |
 | Routes (pages + form actions) | `apps/web/src/routes/**/+page.svelte`, `+page.server.ts` |
 | API client + types | `apps/web/src/lib/server/api.ts`, `apps/web/src/lib/types.ts` |
@@ -135,6 +135,9 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   auto-done by a bills→savings transfer (Thursday −1 … +3), never subtracted from the week and never on the payday checklist. A line ticked by hand or by autopay keeps counting until its
   bank row arrives, which takes the payment over (`PayFromBankAsync`; only `source = 'bank'` closes an occurrence for
   matching), so a tick never moves "Left on …". Sync window `today − 30 … today + 14`, ≤ 44 days per Bridge request.
+  Transactions added by hand (`+` → Transaction, `POST /v1/transactions`) are `imported_transactions` rows with `source = 'added'`
+  (pending, confirmed, never reviewed/matched): they count in the plan's available (`addedCents`) until `Domain/ManualMatcher.cs` pairs
+  them with the bank's copy in a sync (`AddedTransactionService.ReplaceFromBankAsync` → ignored/superseded, `replaced_by`).
   Settings → Household → Start over (`POST /couple/reset`, type RESET) wipes every household data table in
   `HouseholdRepository.ResetDataAsync` — add any new household table there. The web has three tabs (This week ·
   Transactions · Bills) + Settings; removed screens redirect to `/week` — don't re-add them without a plan change.

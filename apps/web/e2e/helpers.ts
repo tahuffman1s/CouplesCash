@@ -91,6 +91,8 @@ export async function addBill(
 export async function quickAdd(page: Page, text: string) {
 	await hydrated(page);
 	await page.getByTestId('quick-add').click();
+	// the sheet opens on Transaction; bills and one-offs are the second tab
+	await page.getByTestId('quick-tab-bill').click();
 	const sheet = page.getByTestId('quick-add-form');
 	await sheet.getByTestId('quick-add-input').fill(text);
 	await expect(sheet.getByTestId('quick-add-preview')).toBeVisible();
@@ -224,4 +226,26 @@ export async function setupHousehold(page: Page, opts: { payday?: number } = {})
 	await expect(page).toHaveURL(/step=notes/);
 	await page.goto('/week');
 	await expect(page.getByTestId('plan-receipt')).toBeVisible();
+}
+
+/** Opens "+" (it starts on Transaction) and adds one: `-6.50` money out, `2450` money in. */
+export async function addTransaction(
+	page: Page,
+	opts: { amount: string; description: string; force?: boolean }
+) {
+	await hydrated(page);
+	await page.getByTestId('quick-add').click();
+	const form = page.getByTestId('add-tx-form');
+	await expect(form).toBeVisible();
+	const out = opts.amount.startsWith('-');
+	const radio = form.getByTestId(out ? 'add-tx-out' : 'add-tx-in');
+	await radio.locator('..').click();
+	await expect(radio).toBeChecked();
+	await form.getByTestId('add-tx-amount').fill(opts.amount.replace(/^-/, ''));
+	await form.getByTestId('add-tx-description').fill(opts.description);
+	const saved = page.waitForResponse(
+		(r) => r.url().includes('/addTransaction') && r.request().method() === 'POST'
+	);
+	await form.getByTestId('add-tx-submit').click();
+	await saved;
 }

@@ -19,6 +19,12 @@ public sealed record CoupleCodeRequest(string? Name);
 
 public sealed record JoinRequest(string Code);
 
+/// <summary>
+/// POST /v1/transactions: a transaction added by hand — <paramref name="AmountCents"/> signed (negative = money out). With
+/// <paramref name="Force"/> it is stored even when the bank already shows something that looks like it.
+/// </summary>
+public sealed record AddTransactionRequest(Guid AccountId, long AmountCents, string Description, DateOnly PostedOn, bool? Force);
+
 /// <summary>POST /v1/couple/reset: <c>confirm</c> must be the word RESET.</summary>
 public sealed record ResetHouseholdRequest(string Confirm);
 

@@ -14,6 +14,7 @@
 		MatchCandidate
 	} from '#lib/types.ts';
 	import { FREQUENCIES } from '#lib/types.ts';
+	import { invalidateAll } from '$app/navigation';
 	import BottomSheet from './BottomSheet.svelte';
 	import CategoryGrid from './CategoryGrid.svelte';
 	import Icon from './Icon.svelte';
@@ -67,6 +68,8 @@
 	const manual = $derived(
 		!!current && (('kind' in current && current.kind === 'manual') || current.source === 'manual')
 	);
+	// added by hand, waiting for the bank's copy: the only action is to delete it
+	const added = $derived(current?.source === 'added');
 	const outflow = $derived((current?.amountCents ?? 0) < 0);
 	const info = $derived(current ? txState(current) : null);
 	const title = $derived(current ? current.payee || current.description : 'Transaction');
@@ -78,7 +81,15 @@
 		return parts.join(' · ');
 	});
 	const sourceLabel = $derived(
-		!current ? '' : manual ? 'Manual' : current.source === 'csv' ? 'CSV' : 'Bank'
+		!current
+			? ''
+			: manual
+				? 'Manual'
+				: added
+					? 'Added by you'
+					: current.source === 'csv'
+						? 'CSV'
+						: 'Bank'
 	);
 	const undoLabel = $derived.by(() => {
 		if (!current || current.status === 'pending') return null;
@@ -169,6 +180,22 @@
 			onchange?.(row);
 			toasts.show(problemText(e), 'error');
 			return null;
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function removeAdded() {
+		const row = current;
+		if (!row || busy) return;
+		busy = true;
+		try {
+			await apiFetch<void>(`/transactions/${row.id}`, { method: 'DELETE' });
+			toasts.show(`Removed ${row.description}`, 'success');
+			open = false;
+			await invalidateAll();
+		} catch (e) {
+			toasts.show(problemText(e), 'error');
 		} finally {
 			busy = false;
 		}
@@ -423,7 +450,24 @@
 				</div>
 			{/if}
 
-			{#if manual}
+			{#if added}
+				<p class="text-sm text-base-content/70">
+					{current.ignoreReason === 'superseded'
+						? 'The bank showed its own copy, so this one no longer counts.'
+						: 'You added this. It counts in This week until the bank shows its own copy, which then takes its place.'}
+				</p>
+				{#if current.ignoreReason !== 'superseded'}
+					<button
+						type="button"
+						class="btn min-h-12 rounded-full border-error/40 btn-outline text-error"
+						disabled={busy}
+						onclick={removeAdded}
+						data-testid="delete-added"
+					>
+						<Icon name="trash" size={18} /> Delete
+					</button>
+				{/if}
+			{:else if manual}
 				<a
 					href="/expenses/{current.id}"
 					class="btn min-h-12 rounded-full btn-primary"

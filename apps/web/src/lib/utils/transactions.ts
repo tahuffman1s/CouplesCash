@@ -17,7 +17,15 @@ import type {
 import { formatDate } from './dates.ts';
 
 export type TxStateKind =
-	'review' | 'expense' | 'paid' | 'transfer' | 'ignored' | 'dropped' | 'superseded' | 'manual';
+	| 'review'
+	| 'expense'
+	| 'paid'
+	| 'transfer'
+	| 'ignored'
+	| 'dropped'
+	| 'superseded'
+	| 'manual'
+	| 'added';
 export type TxState = { kind: TxStateKind; label: string };
 
 /** True when the row is (or was marked as) one side of a transfer. */
@@ -65,6 +73,10 @@ export function expenseCategory(
 
 /** The sheet's "current state" line: To review / Expense in Groceries / Paid Rent · Nov 1 / … */
 export function txState(item: InboxItem & { kind?: 'bank' | 'manual' }): TxState {
+	if (item.source === 'added')
+		return item.ignoreReason === 'superseded'
+			? { kind: 'superseded', label: 'Replaced by the bank’s copy' }
+			: { kind: 'added', label: 'Added by you · waiting for the bank' };
 	if (item.kind === 'manual' || item.source === 'manual') {
 		const cat = expenseCategory(item);
 		return { kind: 'manual', label: cat ? `Manual expense in ${cat}` : 'Manual expense' };
@@ -101,6 +113,8 @@ export function statusChip(item: InboxItem & { kind?: 'bank' | 'manual' }): {
 	const s = txState(item);
 	if (item.pending && s.kind === 'review') return { label: 'Pending', kind: 'pending' };
 	switch (s.kind) {
+		case 'added':
+			return { label: 'Added by you', kind: 'added' };
 		case 'manual':
 			return { label: expenseCategory(item) ?? 'Manual', kind: 'manual' };
 		case 'expense':
