@@ -532,7 +532,7 @@ request GET "/v1/week?start=2026-11-05" "$A_TOKEN"; expect 200 "week of Thursday
 v6check "pay week Fri 2026-10-30 … Thu 2026-11-05" '.start=="2026-10-30" and .end=="2026-11-05" and .weekStart==5'
 request GET "/v1/plan?date=2026-11-06" "$A_TOKEN"; expect 200 "plan for payday 2026-11-06"
 v6check "Plan shape (no bills account yet → billsAccount null, setup.rolesSet false)" \
-  '.start=="2026-11-06" and .end=="2026-11-12" and .nextPayday=="2026-11-13" and .billsAccount==null and (.accounts|type=="array") and (.bills|type=="array") and (.funMoney|type=="array") and (.oneOffs|type=="array") and (.income|type=="array") and (.savingsBills|type=="array") and (.checklist|type=="array") and (.leftAtEndCents|type=="number") and .sweepOutCents==0 and (.toReviewCount|type=="number") and .setup.rolesSet==false and (.setup|has("banksLinked") and has("paycheckKnown") and has("billsAdded") and has("partnerJoined"))'
+  '.start=="2026-11-06" and .end=="2026-11-12" and .nextPayday=="2026-11-13" and .billsAccount==null and (.accounts|type=="array") and (.bills|type=="array") and (.funMoney|type=="array") and (.oneOffs|type=="array") and (.income|type=="array") and (.savingsBills|type=="array") and (.checklist|type=="array") and (.leftAtEndCents|type=="number") and (has("sweepOutCents")|not) and (.toReviewCount|type=="number") and .setup.rolesSet==false and (.setup|has("banksLinked") and has("paycheckKnown") and has("billsAdded") and has("partnerJoined"))'
 request GET "/v1/plan?date=nope" "$A_TOKEN"; expect 400 "plan with a bad date → 400"
 request GET /v1/plan "$A_TOKEN"; expect 200 "plan (today)"
 v6check "today's plan" '.isCurrent==true and (.isPayday|type=="boolean")'
@@ -756,7 +756,7 @@ v6_matcher_flow() {
 # $20 to each fun account, the sweep. Today is made their payday. Defined here, run inside the SimpleFIN block below (any engine).
 v7_friday_flow() {
   local T_EMAIL="travis+$RUN@example.com" J_EMAIL="jordan+$RUN@example.com" T_TOKEN T_REFRESH J_TOKEN T_ID J_ID LINK7 USB SAV F1 F2
-  local PAY7 LOAN7 FUNT FUNJ D0 D1 D2 D3 D4 D10 D12 PAYDAY7 PLANNED7 SWEEP_TX
+  local PAY7 LOAN7 FUNT FUNJ D0 D1 D2 D3 D4 D10 D12 PAYDAY7 PLANNED7 SWEEP_TX SW0
   v7wait() { # v7wait LABEL PATH JQ-FILTER [SECONDS]
     local label="$1" path="$2" filter="$3" seconds="${4:-$SMOKE_SCHEDULER_WAIT}"
     for _ in $(seq 1 "$seconds"); do
@@ -836,7 +836,7 @@ v7_friday_flow() {
   v7check "… but they are listed on the account (TARGET, confirmed, nothing attached)" '[.items[] | select(.description=="TARGET 0042" and .status=="confirmed")] | length==1'
 
   # The Friday plan: her note.
-  v7wait "plan: Left on Thursday = \$253.17 before the sweep" /v1/plan '.leftAtEndCents + .sweepOutCents==25317' 15
+  v7wait "plan: Left on Thursday = \$253.17" /v1/plan '.leftAtEndCents==25317' 15
   v7check "available now = US Bank available \$2,345.67 (bank-reported), 3 pending −\$62.40 informational" \
     ".billsAccount.id==\"$USB\" and .billsAccount.availableCents==234567 and .billsAccount.availableFromBank==true and .billsAccount.balanceCents==240807 and (.billsAccount.pending|length==3) and .billsAccount.pendingOutCents==6240"
   v7check "bills before next payday \$1,992.50 (Rent, Phone, Internet), fun money \$40.00, one-offs \$60.00, no income still to come" \
@@ -848,11 +848,8 @@ v7_friday_flow() {
   v7check "payday checklist: paycheck ✓ (auto, its transaction), two \$20 fun transfers open" \
     '([.checklist[] | select(.key=="paycheck")][0] | .done==true and .auto==true and .transactionId!=null and .amountCents==150000) and ([.checklist[] | select(.key=="fun" and .done==false and .amountCents==2000)] | length==2)'
 
-  # shellcheck disable=SC2016 # "$845.67" is a jq string literal (the checklist label), not a shell expansion
-  v7wait "the sweep is frozen at payday 00:00 (catch-up tick): last week's left = \$845.67 (available − the paycheck that posted today)" /v1/plan \
-    '.sweep!=null and .sweep.plannedCents==84567 and .sweep.leftCents==84567 and .sweep.doneAt==null and ([.checklist[] | select(.key=="sweep" and .label=="Move $845.67 to savings" and .done==false)] | length==1)'
-  v7check "the sweep still to move is out of this week's money: left = \$253.17 − \$845.67" '.sweepOutCents==84567 and .leftAtEndCents==(25317 - 84567)'
-  PLANNED7="$(echo "$BODY" | jq -r .sweep.plannedCents)"
+  v7check "payday: no savings move (it is the bottom line on the last day of the week), nothing taken out of the plan" \
+    '.sweep==null and ([.checklist[] | select(.key=="sweep")] | length==0) and .leftAtEndCents==25317'
 
   request GET /v1/banks "$T_TOKEN"; expect 200 "linked banks"
   v7check "feed diagnostics: US Bank sent 3 pending, available balance reported; savings without available" \
@@ -866,7 +863,7 @@ v7_friday_flow() {
   curl -fs -X POST "$FAKE/__phase/v7/2" >/dev/null || fail "phase v7/2"
   v7wait "fun transfers auto-paid from the bank feed (transfer pairs to each fun account)" /v1/plan \
     '.funOutCents==0 and ([.funMoney[] | select(.occurrence.paid.source=="bank" and .occurrence.paid.auto==true)] | length==2)'
-  v7check "left on Thursday unchanged (\$40 left the account and the plan), available \$2,305.67" '.leftAtEndCents==(25317 - 84567) and .billsAccount.availableCents==230567'
+  v7check "left on Thursday unchanged (\$40 left the account and the plan), available \$2,305.67" '.leftAtEndCents==25317 and .billsAccount.availableCents==230567'
   v7check "checklist: both fun transfers ticked automatically with their transactions" '[.checklist[] | select(.key=="fun" and .done==true and .auto==true and .transactionId!=null)] | length==2'
   request GET "/v1/accounts/$USB/transactions?filter=transfers" "$T_TOKEN"; expect 200 "US Bank transfers"
   v7check "both −\$20 rows are ignored transfers paired with a fun account and linked to their planned transfer" \
@@ -876,12 +873,17 @@ v7_friday_flow() {
   request GET "/v1/inbox?status=pending&limit=200" "$T_TOKEN"
   v7check "still nothing from the fun accounts (or the \$20 transfers) in To review" "[.items[] | select(.accountId==\"$F1\" or .accountId==\"$F2\" or .amountCents==-2000)] | length==0"
 
-  # The sweep: last week's leftover moves to savings.
+  # The sweep: on the last day of the pay week what is left moves to savings. Make today that day (payday = tomorrow's weekday): the
+  # week is D0 − 6 … D0, everything in it is paid, so what is left is US Bank's available $2,305.67.
+  SW0="$(date -u -d "$D0 -6 days" +%F)"
+  request PATCH /v1/couple "$T_TOKEN" "$(jq -nc --argjson p "$(( (PAYDAY7 + 1) % 7 ))" '{paydayWeekday:$p}')"; expect 200 "payday = tomorrow: today is the sweep day"
+  v7wait "the sweep is frozen on the sweep day from the week's Left on Thursday (\$2,305.67)" /v1/plan \
+    ".start==\"$SW0\" and .end==\"$D0\" and .sweep!=null and .sweep.weekStart==\"$SW0\" and .sweep.plannedCents==230567 and .sweep.leftCents==230567 and .sweep.doneAt==null and .leftAtEndCents==230567"
+  PLANNED7="$(echo "$BODY" | jq -r .sweep.plannedCents)"
   curl -fs -X POST "$FAKE/__phase/v7/3?cents=$PLANNED7" >/dev/null || fail "phase v7/3"
   v7wait "sweep auto-done from the bills → savings transfer" /v1/plan '.sweep.doneAt!=null and .sweep.auto==true'
-  v7check "sweep: actual = planned, transaction attached; checklist sweep ticked (auto)" \
-    ".sweep.actualCents==$PLANNED7 and .sweep.transactionId!=null and ([.checklist[] | select(.key==\"sweep\" and .done==true and .auto==true and .transactionId!=null)] | length==1)"
-  v7check "the sweep moved: out of available, off the plan, left unchanged" ".sweepOutCents==0 and .leftAtEndCents==(25317 - $PLANNED7)"
+  v7check "sweep: actual = planned, transaction attached" ".sweep.actualCents==$PLANNED7 and .sweep.transactionId!=null"
+  v7check "moved: left on Thursday is what is left after it (\$0.00)" ".leftAtEndCents==(230567 - $PLANNED7) and .billsAccount.availableCents==0"
   SWEEP_TX="$(echo "$BODY" | jq -r .sweep.transactionId)"
   request GET "/v1/accounts/$USB/transactions?filter=transfers" "$T_TOKEN"
   v7check "the sweep rows are a transfer pair to savings" ".items[] | select(.id==\"$SWEEP_TX\") | .ignoreReason==\"transfer\" and .transfer.peerAccountId==\"$SAV\""
@@ -889,12 +891,13 @@ v7_friday_flow() {
   v7check "activity sweep.planned + sweep.auto" '([.events[] | select(.kind=="sweep.auto")] | length==1) and ([.events[] | select(.kind=="sweep.planned")] | length==1)'
 
   # Manual untick / tick: the Undo sticks (the detection never re-ticks that week).
-  request DELETE /v1/plan/sweep/done "$T_TOKEN" "$(jq -nc --arg w "$D0" '{weekStart:$w}')"; expect 200 "untick the sweep"
+  request DELETE /v1/plan/sweep/done "$T_TOKEN" "$(jq -nc --arg w "$SW0" '{weekStart:$w}')"; expect 200 "untick the sweep"
   v7check "not done any more" '.doneAt==null and .auto==false and .actualCents==null and .transactionId==null'
   sleep 6
-  request GET /v1/plan "$T_TOKEN"; v7check "a scheduler tick later it is still unticked (auto-detection blocked), counted again" ".sweep.doneAt==null and .sweepOutCents==$PLANNED7"
-  request POST /v1/plan/sweep/done "$J_TOKEN" "$(jq -nc --arg w "$D0" '{weekStart:$w,actualCents:80000}')"; expect 200 "Jordan ticks it by hand (\$800.00)"
+  request GET /v1/plan "$T_TOKEN"; v7check "a scheduler tick later it is still unticked (auto-detection blocked)" '.sweep.doneAt==null'
+  request POST /v1/plan/sweep/done "$J_TOKEN" "$(jq -nc --arg w "$SW0" '{weekStart:$w,actualCents:80000}')"; expect 200 "Jordan ticks it by hand (\$800.00)"
   v7check "manual tick" '.doneAt!=null and .auto==false and .actualCents==80000'
+  request PATCH /v1/couple "$T_TOKEN" "$(jq -nc --argjson p "$PAYDAY7" '{paydayWeekday:$p}')"; expect 200 "payday back to today"
   request GET "/v1/activity?limit=50" "$T_TOKEN"
   v7check "activity sweep.done × 2 (untick, tick)" '[.events[] | select(.kind=="sweep.done")] | length==2'
 

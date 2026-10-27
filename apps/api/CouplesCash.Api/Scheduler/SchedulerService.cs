@@ -252,7 +252,26 @@ public sealed class SchedulerService(
         {
             var nowLocal = SchedulerRules.ToLocal(nowUtc, user.Timezone);
             var today = DateOnly.FromDateTime(nowLocal);
-            if (!SchedulerRules.ShouldSendReminderNow(user.WeekSummaryEnabled, user.HourLocal, nowLocal) || !PlanEngine.IsPayday(today, user.PaydayWeekday))
+            if (!SchedulerRules.ShouldSendReminderNow(user.WeekSummaryEnabled, user.HourLocal, nowLocal))
+            {
+                continue;
+            }
+
+            // The sweep day (the last day of the pay week): what is left moves to savings today.
+            if (SchedulerRules.IsSweepDay(today, user.PaydayWeekday))
+            {
+                var week = WeekEngine.WeekBounds(today, user.PaydayWeekday);
+                if (await friday.SweepBodyAsync(user.HouseholdId, week, ct) is { } sweepBody
+                    && await pushes.TryLogWeekSummaryAsync(user.UserId, week.Start, WeekSummaryKind.Sweep, nowUtc, ct))
+                {
+                    notifier.ToUser(user.UserId, new PushPayload("Savings", sweepBody, SchedulerRules.WeekLink, SchedulerRules.SweepTag));
+                    logger.LogInformation("Scheduler sweep push for {Day} queued to user {UserId}", today, user.UserId);
+                }
+
+                continue;
+            }
+
+            if (!PlanEngine.IsPayday(today, user.PaydayWeekday))
             {
                 continue;
             }

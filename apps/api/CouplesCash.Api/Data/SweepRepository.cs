@@ -46,6 +46,20 @@ public sealed class SweepRepository(NpgsqlDataSource db)
             """,
             new { Id = Guid.CreateVersion7(), HouseholdId = householdId, WeekStart = weekStart, Planned = plannedCents, Left = leftCents, Now = now }, ct));
 
+    /// <summary>
+    /// The sweep day's amount follows "Left on Thursday" until the move is done (a bill or one-off can change during the day). The bank row
+    /// that moves it is detected in the same transaction that imports it, so the amount it is matched against is never the one after it.
+    /// </summary>
+    public Task<SweepRow?> FollowLeftAsync(NpgsqlConnection conn, Guid householdId, DateOnly weekStart, long plannedCents, long leftCents, CancellationToken ct) =>
+        conn.QuerySingleOrDefaultAsync<SweepRow>(Cmd(
+            $"""
+            UPDATE sweeps SET planned_cents = @Planned, left_cents = @Left
+            WHERE household_id = @HouseholdId AND week_start = @WeekStart AND done_at IS NULL
+              AND (planned_cents <> @Planned OR left_cents <> @Left)
+            RETURNING {Columns}
+            """,
+            new { HouseholdId = householdId, WeekStart = weekStart, Planned = plannedCents, Left = leftCents }, ct));
+
     /// <summary>Done (manual: <paramref name="doneBy"/> set; auto: null) with the amount moved and, when known, the bank row.</summary>
     public Task<SweepRow?> MarkDoneAsync(NpgsqlConnection conn, Guid householdId, DateOnly weekStart, long actualCents, Guid? doneBy, Guid? transactionId, DateTime now, CancellationToken ct) =>
         conn.QuerySingleOrDefaultAsync<SweepRow>(Cmd(

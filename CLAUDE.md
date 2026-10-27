@@ -130,9 +130,9 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
 - **Friday plan (v7)**: the week is the **pay week** (`households.payday_weekday` → day before next payday). Only the
   account with `role = 'bills'` counts: available = bank `availableCents` else `balanceCents − pendingOutCents` (never
   sum other checking accounts). Fun-money accounts (`role = 'fun'`, one owner each) never enter To review. Fun money is
-  `kind = 'transfer'` items (from/to accounts) auto-paid by matching transfers; the savings sweep is frozen at payday
-  00:00 from last week's left-at-end and auto-done by a bills→savings transfer; until ticked it is subtracted from this
-  week's left-at-end (`sweepOutCents`, "− Move to savings"). A line ticked by hand or by autopay keeps counting until its
+  `kind = 'transfer'` items (from/to accounts) auto-paid by matching transfers; the savings sweep is the plan's **bottom line
+  on the week's last day** (Thursday): frozen that day from that week's Left on Thursday (kept equal to it until moved),
+  auto-done by a bills→savings transfer (Thursday −1 … +3), never subtracted from the week and never on the payday checklist. A line ticked by hand or by autopay keeps counting until its
   bank row arrives, which takes the payment over (`PayFromBankAsync`; only `source = 'bank'` closes an occurrence for
   matching), so a tick never moves "Left on …". Sync window `today − 30 … today + 14`, ≤ 44 days per Bridge request.
   Settings → Household → Start over (`POST /couple/reset`, type RESET) wipes every household data table in

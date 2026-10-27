@@ -1,21 +1,17 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import type { ChecklistItem } from '#lib/types.ts';
-	import CopyButton from './CopyButton.svelte';
 	import Icon from './Icon.svelte';
 	import { formatMoney } from '#lib/utils/money.ts';
 	import { checklistProgress, checklistText } from '#lib/utils/plan.ts';
 
 	/**
-	 * v7 payday checklist: paycheck, fun money, move the leftover to savings. Items tick themselves
+	 * v7 payday checklist: paycheck and fun money (the move to savings is the plan's bottom line on
+	 * the last day of the week). Items tick themselves
 	 * from the bank feed ("auto"); "Done" ticks one by hand when the bank is slow. All done → one
 	 * line, "Payday done ✓".
 	 */
-	let {
-		items,
-		weekStart,
-		isPayday
-	}: { items: ChecklistItem[]; weekStart: string; isPayday: boolean } = $props();
+	let { items, isPayday }: { items: ChecklistItem[]; isPayday: boolean } = $props();
 
 	const progress = $derived(checklistProgress(items));
 	let busy = $state<string | null>(null);
@@ -31,11 +27,9 @@
 
 {#snippet row(item: ChecklistItem)}
 	{@const k = keyOf(item)}
-	{@const sweep = item.key === 'sweep'}
-	{@const nothing = sweep && item.amountCents <= 0}
 	{@const shown = checklistText(item)}
 	<li
-		class="flex items-center gap-x-2 gap-y-1 py-1.5 {sweep ? 'flex-wrap' : ''}"
+		class="flex items-center gap-x-2 gap-y-1 py-1.5"
 		data-testid="checklist-item"
 		data-key={item.key}
 		data-done={item.done ? 'true' : 'false'}
@@ -45,12 +39,8 @@
 			size={22}
 			class="shrink-0 {item.done ? 'text-success' : 'text-base-content/35'}"
 		/>
-		<span class="min-w-0 flex-1 text-sm {item.done && !sweep ? 'text-base-content/60' : ''}">
-			{#if sweep}
-				<span class="font-semibold" data-testid="sweep-text">{shown.text}</span>
-			{:else}
-				{shown.text}
-			{/if}
+		<span class="min-w-0 flex-1 text-sm {item.done ? 'text-base-content/60' : ''}">
+			{shown.text}
 			{#if item.done && item.auto}
 				<span
 					class="ml-1 badge border-0 bg-info/15 px-1.5 badge-xs text-[0.65rem] text-info"
@@ -63,51 +53,34 @@
 				>{item.key === 'paycheck' ? '+' : ''}{formatMoney(item.amountCents)}</span
 			>
 		{/if}
-		{#if !nothing}
-			<div class="flex shrink-0 justify-end gap-1.5 {sweep ? 'w-full pl-8' : ''}">
-				{#if sweep && !item.done}
-					<CopyButton cents={item.amountCents} testid="copy-sweep" />
-				{/if}
-				{#if !item.done}
-					<form method="POST" action={sweep ? '?/sweep' : '?/paid'} use:enhance={submit(k)}>
-						{#if sweep}
-							<input type="hidden" name="weekStart" value={weekStart} />
-							<input type="hidden" name="done" value="1" />
-						{:else}
-							<input type="hidden" name="itemId" value={item.itemId ?? ''} />
-							<input type="hidden" name="dueDate" value={item.dueDate ?? ''} />
-							<input type="hidden" name="paid" value="1" />
-						{/if}
-						<button
-							class="btn min-h-11 rounded-full px-4 btn-sm {sweep
-								? 'btn-primary'
-								: 'border border-primary/40 btn-ghost text-primary'}"
-							disabled={busy === k}
-							data-testid="checklist-done"
-						>
-							{#if busy === k}<span class="loading loading-xs loading-spinner"></span>{/if}
-							Done
-						</button>
-					</form>
-				{:else if !item.auto}
-					<form method="POST" action={sweep ? '?/sweep' : '?/paid'} use:enhance={submit(k)}>
-						{#if sweep}
-							<input type="hidden" name="weekStart" value={weekStart} />
-							<input type="hidden" name="done" value="0" />
-						{:else}
-							<input type="hidden" name="itemId" value={item.itemId ?? ''} />
-							<input type="hidden" name="dueDate" value={item.dueDate ?? ''} />
-							<input type="hidden" name="paid" value="0" />
-						{/if}
-						<button
-							class="btn min-h-11 rounded-full btn-ghost px-3 text-xs btn-sm"
-							disabled={busy === k}
-							data-testid="checklist-undo">Undo</button
-						>
-					</form>
-				{/if}
-			</div>
-		{/if}
+		<div class="flex shrink-0 justify-end gap-1.5">
+			{#if !item.done}
+				<form method="POST" action="?/paid" use:enhance={submit(k)}>
+					<input type="hidden" name="itemId" value={item.itemId ?? ''} />
+					<input type="hidden" name="dueDate" value={item.dueDate ?? ''} />
+					<input type="hidden" name="paid" value="1" />
+					<button
+						class="btn min-h-11 rounded-full border border-primary/40 btn-ghost px-4 text-primary btn-sm"
+						disabled={busy === k}
+						data-testid="checklist-done"
+					>
+						{#if busy === k}<span class="loading loading-xs loading-spinner"></span>{/if}
+						Done
+					</button>
+				</form>
+			{:else if !item.auto}
+				<form method="POST" action="?/paid" use:enhance={submit(k)}>
+					<input type="hidden" name="itemId" value={item.itemId ?? ''} />
+					<input type="hidden" name="dueDate" value={item.dueDate ?? ''} />
+					<input type="hidden" name="paid" value="0" />
+					<button
+						class="btn min-h-11 rounded-full btn-ghost px-3 text-xs btn-sm"
+						disabled={busy === k}
+						data-testid="checklist-undo">Undo</button
+					>
+				</form>
+			{/if}
+		</div>
 	</li>
 {/snippet}
 

@@ -821,7 +821,7 @@ type AccountRole = 'bills' | 'savings' | 'fun' | 'other';
 // Household gains: paydayWeekday: 0..6   (weekStart is derived = paydayWeekday; kept for compatibility)
 // Kind gains 'transfer'; RecurringItem gains: fromAccountId, toAccountId (string | null), fromAccountName, toAccountName
 type PlanLine = { kind: 'bill' | 'subscription' | 'income' | 'transfer' | 'oneoff'; occurrence: Occurrence };
-type ChecklistItem = { key: 'paycheck' | 'fun' | 'sweep'; label: string; amountCents: number; done: boolean;
+type ChecklistItem = { key: 'paycheck' | 'fun'; label: string; amountCents: number; done: boolean;
   auto: boolean; transactionId: string | null; itemId: string | null; dueDate: string | null };
 type Sweep = { weekStart: string; plannedCents: number; actualCents: number | null; doneAt: string | null; auto: boolean };
 type FeedStats = { pending: number; posted: number; availableReported: boolean; at: string } | null;
@@ -832,10 +832,9 @@ type Plan = {
   accounts: { id: string; name: string; role: AccountRole; ownerName: string | null; balanceCents: number; availableCents: number | null }[];
   bills: PlanLine[]; funMoney: PlanLine[]; oneOffs: PlanLine[]; income: PlanLine[];
   billsOutCents: number; funOutCents: number; oneOffOutCents: number; incomeInCents: number;  // unpaid remainders
-  sweepOutCents: number;         // this week's savings sweep while not yet ticked (last week's money still in the account), else 0
-  leftAtEndCents: number;        // availableCents − sweep − bills − fun − one-offs (+ unpaid income only when it lands before end)
+  leftAtEndCents: number;        // availableCents − bills − fun − one-offs (+ unpaid income only when it lands before end)
   savingsBills: PlanLine[];      // e.g. student loans from savings — shown, not in the math
-  checklist: ChecklistItem[];    // payday only (empty otherwise); sweep amount = previous week's left-at-end, frozen
+  checklist: ChecklistItem[];    // payday only (empty otherwise): paycheck and fun money
   sweep: Sweep | null; toReviewCount: number; setup: { banksLinked: boolean; rolesSet: boolean; paycheckKnown: boolean; billsAdded: boolean; partnerJoined: boolean } };
 ```
 
@@ -932,16 +931,16 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   bills side. Lines paid from a bank transaction (`paid.source = 'bank'`) are listed (ticked) and not counted — their money is
   already in `available`; lines ticked by hand or by autopay are listed as paid but **keep counting** until their bank transaction
   arrives and takes the payment over, so a tick never moves `leftAtEndCents` (only the bank does, by the paid − planned difference). `billsOutCents` / `funOutCents` / `oneOffOutCents` / `incomeInCents` are
-  the unpaid planned amounts; **`leftAtEndCents = available − sweepOut − billsOut − funOut − oneOffOut + incomeIn`** where unpaid income counts only
+  the unpaid planned amounts; **`leftAtEndCents = available − billsOut − funOut − oneOffOut + incomeIn`** where unpaid income counts only
   when due inside the pay week (≤ end = the day before the next payday): the next payday's paycheck belongs to the new week, and this
   week's paycheck, once it posts, is paid and already in available — it is never added twice. For a past week `leftAtEndCents` is the
-  number frozen for the following payday's sweep (`left_cents`) when there is one; a future week uses today's available (a rough
+  number frozen for its own sweep (`left_cents`, its Left on Thursday before the move) when there is one; a future week uses today's available (a rough
   projection). `billsAccount`: `availableCents` as above,
   `availableFromBank` = the bank reported it, `pending` = every visible bank-pending row of the account (any review status, newest first),
   `pendingOutCents` = Σ of their outflows, `feed` = last feed stats; `null` when no account has role `bills`. `accounts` = every active
   account ordered bills, savings, fun, other, then name. `setup`: `banksLinked` (a bank link exists), `rolesSet` (a bills account exists),
   `paycheckKnown` (an active income item), `billsAdded` (an active bill / subscription), `partnerJoined` (two members). `toReviewCount` =
-  household rows to review. `sweep` = this week's sweep row (`Sweep` gains `leftCents`, `transactionId`).
+  household rows to review. `sweep` = this week's sweep row, null until its sweep day (`Sweep` gains `leftCents`, `transactionId`).
   **Start over (`POST /couple/reset`).** One transaction under a row lock on the household: deletes every account (balance history
   cascades), recurring item (payments, skips, reminders), bank link and external account (stored credentials included — the SimpleFIN
   connection on the Bridge stays; linking again needs a new setup token), imported transaction, CSV import, sweep, payee rule, bill
@@ -955,26 +954,24 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   request is at most 44 days (the Bridge warns in `errors` above 45 days and cuts ranges over 90): a regular sync is one request; the
   first sync adds older history requests without `pending` (best effort — a failed history request is logged and skipped). A pending
   charge is dated by `transacted_at` when present and never after today.
-  `sweepOutCents` (current week only) = the frozen sweep's `planned_cents` while it is not ticked: last week's leftover is still in the
-  bills account until it moves to savings, so it is not this week's money. Once ticked — by the bank or by a person — it is 0 (the
-  money has left `available`). Past and future weeks: 0. The sweep freeze itself (`PreviousWeekLeft`) never subtracts a sweep.
 - **Payday checklist** (only for the current pay week; shown on payday and, while an item is open, through payday + 3): `paycheck` =
   income lines due on payday ("Paycheck arrived · $1,500.00", amount = paid amount when paid, `done` = paid, `auto` = the payment is
   automatic, `transactionId` = the paying row); `fun` = fun-money lines due payday … payday + 3 (weekly ones on payday, a monthly one when
-  its date falls in that window; label "$20.00 → Ally Spending (Travis)" = amount → to-account name, plus the owner when the name does not already say it); `sweep` (only once
-  frozen) = "Move $253.17 to savings" (`done` = ticked, `auto` = ticked from the bank, `transactionId`) or, when last week's left was
-  negative, "Nothing to move this week (−$42.10)" with `amountCents 0`, `done true`. `dueDate` = the occurrence date (sweep: payday).
-- **Sweep.** Scheduler phase `sweep-freeze` (first phase of every tick): on payday (household-local; catch-up through payday + 3 when the
-  API was down at midnight) every household with a bills account and no sweep row for the week gets one: `left_cents` = the previous pay
-  week's `leftAtEndCents` computed at that moment minus what already moved through the bank in the new week (occurrences due payday … today
-  paid from a bank transaction: a posted paycheck is subtracted, posted bills / fun transfers / one-offs are added back — zero at midnight),
-  `planned_cents = max(0, left_cents)`; `INSERT … ON CONFLICT DO NOTHING` (idempotent per household and week); activity **`sweep.planned`**
-  (addition; actor null, `data: { weekStart, plannedCents, leftCents }`). Auto-detection (same pass as planned transfers): a bills-account
-  outflow posted payday − 1 … payday + 3 within max(5 %, $5.00) of `planned_cents` (to review or a transfer not linked to a plan), backed by
-  a transfer peer on a savings account, a savings-account inflow within 1 % ($1 floor) and ±3 days, or — savings without a bank feed and a
-  transfer-looking row, or a row naming a savings account — one-sided; closest amount then closest to payday wins. The rows become an auto
-  transfer pair, the sweep gets `actual_cents` = |amount|, `transaction_id`, `done_at` (done_by NULL = auto) — or, after a manual tick,
-  only the transaction — and `sweep.auto` (actor null) is written. Never for a zero plan or an `auto_blocked` week.
+  its date falls in that window; label "$20.00 → Ally Spending (Travis)" = amount → to-account name, plus the owner when the name does not already say it). The savings move is not on the checklist (it is the plan's bottom line on the sweep day). `dueDate` = the occurrence date.
+- **Sweep (the bottom line, on the last day of the pay week).** What is left on Thursday moves to savings on Thursday, so the sweep is
+  never a line in the calculation and never taken out of `leftAtEndCents`. Scheduler phase `sweep-freeze` (first phase of every tick):
+  on the sweep day = the pay week's last day (`end`, household-local) every household with a bills account and no sweep row for the week
+  gets one: `left_cents` = the week's `leftAtEndCents` at that moment, `planned_cents = max(0, left_cents)`; `INSERT … ON CONFLICT DO
+  NOTHING`; activity **`sweep.planned`** (actor null, `data: { weekStart, plannedCents, leftCents }`). No catch-up: when the API was down
+  all that day nothing is frozen and the money carries into the next week. Until it is done, the sweep day's `GET /plan` keeps
+  `planned_cents` / `left_cents` equal to the live `leftAtEndCents` (a bill can change during the day); the bank row that moves it is
+  detected in the same transaction that imports it. Auto-detection (same pass as planned transfers; this week's sweep and last week's):
+  a bills-account outflow posted sweep day − 1 … sweep day + 3 within max(5 %, $5.00) of `planned_cents` (to review or a transfer not
+  linked to a plan), backed by a transfer peer on a savings account, a savings-account inflow within 1 % ($1 floor) and ±3 days, or —
+  savings without a bank feed and a transfer-looking row, or a row naming a savings account — one-sided; closest amount then closest to
+  the sweep day wins. The rows become an auto transfer pair, the sweep gets `actual_cents` = |amount|, `transaction_id`, `done_at`
+  (done_by NULL = auto) — or, after a manual tick, only the transaction — and `sweep.auto` (actor null) is written. Never for a zero plan
+  or an `auto_blocked` week. Migration `0008_sweep_day.sql` deletes the sweep rows frozen under the old payday rule.
 - **`POST /v1/plan/sweep/done { weekStart, actualCents? }`**: `weekStart` required (400), `actualCents` 0…max (default the previous
   actual, else the planned amount); no sweep for that week → `404` problem "No sweep for that week"; ticks by the caller (`auto false`);
   again = updates the amount. **`DELETE /v1/plan/sweep/done`** takes `{ weekStart }` in the body or `?weekStart=` (missing → 400, unknown
@@ -987,9 +984,10 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   request order (Location `/v1/recurring`).
 - **Payday push** (scheduler phase `payday-push`, replaces the v4 week-ahead / week-left summaries, which are no longer sent): on payday
   (household-local) during the user's `hourLocal`, gated by the existing `weekSummaryEnabled` preference, once per (user, payday) via
-  `week_summary_log` kind `payday`: title "Payday", body e.g. "Payday · move $253.17 to savings · fun money $40.00" (" sent ✓" once every
-  checklist fun transfer is paid; "nothing to move to savings" for a zero sweep; parts dropped when there is no frozen sweep / no fun
-  money), `url: /week`, `tag: payday`. Bill-due reminders are unchanged.
+  `week_summary_log` kind `payday`: title "Payday", body e.g. "Payday · fun money $40.00" (" sent ✓" once every checklist fun transfer is
+  paid; dropped when there is none), `url: /week`, `tag: payday`. **Sweep-day push** (same phase, hour and preference): on the pay week's
+  last day, when its sweep is frozen, above zero and not done, once per (user, week) via kind `sweep`: title "Savings", body "Move $253.17
+  to savings today", `url: /week`, `tag: sweep`. Bill-due reminders are unchanged.
 - **Scheduler order per tick**: autopay → reminders → hygiene → sweep-freeze → bank-sync → friday (planned transfers + sweep for every
   household with a bills account or a transfer item) → rematch → found-bills → payday-push. `bank.synced` data gains
   `plannedTransfersPaid`, `sweepsDone`, `toReview` (the "N to review" push now counts rows actually left to review). OpenAPI tag `Plan`.

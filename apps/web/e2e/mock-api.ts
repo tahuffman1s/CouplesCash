@@ -3153,8 +3153,10 @@ function matchPlannedTransfers(hh: string) {
 	for (const sw of newestFirst) {
 		if (sw.householdId !== hh || sw.doneAt || sw.plannedCents <= 0 || sw.autoBlocked) continue;
 		const tolerance = Math.max(Math.round(sw.plannedCents * 0.05), 500);
+		// made on the sweep day (the last day of the pay week); it may post a day early or over the weekend
+		const sweepDay = addDaysIso(sw.weekStart, 6);
 		const hit = outflows(bills.id).find((t) => {
-			if (t.postedOn < addDaysIso(sw.weekStart, -1) || t.postedOn > addDaysIso(sw.weekStart, 3))
+			if (t.postedOn < addDaysIso(sweepDay, -1) || t.postedOn > addDaysIso(sweepDay, 3))
 				return false;
 			if (Math.abs(-t.amountCents - sw.plannedCents) > tolerance) return false;
 			const peer = t.transferPeerId ? txs.get(t.transferPeerId) : undefined;
@@ -3192,12 +3194,8 @@ function payWeekStartOf(iso: string, wd: number): string {
 	return addDaysIso(iso, -((parse(iso).getDay() - wd + 7) % 7));
 }
 type PlanLine = { kind: string; occurrence: Occ };
-/** Left-at-end of a pay week without touching sweeps (the sweep of the week after freezes it). */
-function leftFor(hh: string, date: string): number {
-	return planFor(hh, date, { withSweep: false }).leftAtEndCents;
-}
 /** GET /plan: the pay week containing `date`, computed like her note. */
-function planFor(hh: string, date: string, opts: { withSweep: boolean } = { withSweep: true }) {
+function planFor(hh: string, date: string) {
 	const h = households.get(hh)!;
 	const start = payWeekStartOf(date, h.paydayWeekday);
 	const end = addDaysIso(start, 6);
@@ -3273,13 +3271,12 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 	const incomeInCents = unpaid(lines.income);
 	let leftAtEndCents = available - billsOutCents - funOutCents - oneOffOutCents + incomeInCents;
 
-	let sweep: SweepRec | null = null;
-	if (opts.withSweep && bills && start <= today) {
-		const key = `${hh}:${start}`;
-		sweep = sweeps.get(key) ?? null;
-		if (!sweep) {
-			// frozen at payday: the previous week's left-at-end (never a negative plan)
-			const leftCents = leftFor(hh, addDaysIso(start, -7));
+	// The sweep is the week's bottom line: frozen on its last day (the sweep day) from Left on <day>.
+	const key = `${hh}:${start}`;
+	let sweep: SweepRec | null = sweeps.get(key) ?? null;
+	if (!sweep && bills && isCurrent && today === end) {
+		{
+			const leftCents = leftAtEndCents;
 			sweep = {
 				householdId: hh,
 				weekStart: start,
@@ -3295,9 +3292,12 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 			matchPlannedTransfers(hh);
 		}
 	}
-	// the sweep still to move is last week's money, not this week's (PLAN-V7 "Move to savings")
-	const sweepOutCents = isCurrent && sweep && !sweep.doneAt ? Math.max(0, sweep.plannedCents) : 0;
-	leftAtEndCents -= sweepOutCents;
+	// on the sweep day the amount follows Left on <day> until it is moved; a past week shows its frozen number
+	if (sweep && !sweep.doneAt && isCurrent && today === end) {
+		sweep.leftCents = leftAtEndCents;
+		sweep.plannedCents = Math.max(0, leftAtEndCents);
+	}
+	if (end < today && sweep) leftAtEndCents = sweep.leftCents;
 	const checklist: {
 		key: string;
 		label: string;
@@ -3335,20 +3335,6 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 			const label = owner && !name.includes(owner) ? `${name} (${owner})` : name;
 			item(l.occurrence, 'fun', `${money(hh, i.amountCents)} → ${label}`);
 		}
-		if (sweep)
-			checklist.push({
-				key: 'sweep',
-				label:
-					sweep.plannedCents > 0
-						? `Move ${money(hh, sweep.plannedCents)} to savings`
-						: `Nothing to move this week (−${money(hh, Math.abs(sweep.leftCents))})`,
-				amountCents: sweep.plannedCents,
-				done: !!sweep.doneAt || sweep.plannedCents <= 0,
-				auto: !!sweep.doneAt && sweep.doneBy === null,
-				transactionId: sweep.transactionId,
-				itemId: null,
-				dueDate: start
-			});
 		// shown on payday and, while something is open, through payday + 3
 		if (!isPayday && (today > addDaysIso(start, 3) || checklist.every((c) => c.done)))
 			checklist.length = 0;
@@ -3380,7 +3366,6 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 		funOutCents,
 		oneOffOutCents,
 		incomeInCents,
-		sweepOutCents,
 		leftAtEndCents,
 		checklist,
 		sweep: sweep ? sweepView(sweep) : null,
@@ -3399,7 +3384,7 @@ function planFor(hh: string, date: string, opts: { withSweep: boolean } = { with
 
 /**
  * v7 `demo-household`: shaped like theirs, dated from the most recent payday P (household payday).
- * US Bank checking: last payday's paycheck, two $20 fun transfers and the sweep, a power bill,
+ * US Bank checking: last payday's paycheck, two $20 fun transfers, last Thursday's sweep, a power bill,
  * 3 pending card holds (−$62.40) and an available balance (= balance − pending). Ally HYS: the
  * sweep in and a student-loan debit on the 15th. Two Ally checkings (fun money): $20 in, a spend.
  */
@@ -3435,7 +3420,7 @@ function demoBridgeHousehold(wd: number): BridgeAccount[] {
 				},
 				{
 					id: 'hh-sweep-out-0',
-					posted: p7,
+					posted: addDaysIso(p, -1),
 					amount: -18000,
 					description: 'ONLINE TRANSFER TO ALLY SAVINGS'
 				},
@@ -3465,7 +3450,12 @@ function demoBridgeHousehold(wd: number): BridgeAccount[] {
 			balance: 1200000,
 			available: 1200000,
 			transactions: [
-				{ id: 'hh-sweep-in-0', posted: p7, amount: 18000, description: 'TRANSFER FROM US BANK' },
+				{
+					id: 'hh-sweep-in-0',
+					posted: addDaysIso(p, -1),
+					amount: 18000,
+					description: 'TRANSFER FROM US BANK'
+				},
 				{ id: 'hh-loan', posted: fifteenth, amount: -31200, description: 'NELNET STUDENT LOAN' }
 			]
 		},
@@ -3505,7 +3495,7 @@ function demoBridgeHousehold(wd: number): BridgeAccount[] {
 		}
 	];
 }
-/** `?phase=payday`: this payday's paycheck, the fun transfers due this pay week and the sweep. */
+/** `?phase=payday`: this payday's paycheck and the fun transfers due this pay week. */
 function applyHouseholdPayday(hh: string, data: BridgeAccount[]) {
 	const h = households.get(hh)!;
 	const us = data.find((a) => a.id === 'hh-us');
@@ -3546,25 +3536,29 @@ function applyHouseholdPayday(hh: string, data: BridgeAccount[]) {
 			pending: true
 		});
 	}
-	const sweep = planFor(hh, p).sweep;
-	if (sweep && sweep.plannedCents > 0) {
-		const savings = [...accounts.values()].find(
-			(a) => a.householdId === hh && a.role === 'savings'
-		);
-		add(us, {
-			id: `hh-sweep-out-${p}`,
-			posted: p,
-			amount: -sweep.plannedCents,
-			description: 'ONLINE TRANSFER TO ALLY SAVINGS'
-		});
-		if (savings)
-			add(bridgeOf(savings.id), {
-				id: `hh-sweep-in-${p}`,
-				posted: p,
-				amount: sweep.plannedCents,
-				description: 'TRANSFER FROM US BANK'
-			});
-	}
+}
+/** `?phase=sweep`: on the sweep day, the frozen amount moves from US Bank to savings. */
+function applyHouseholdSweep(hh: string, data: BridgeAccount[]) {
+	const today = todayIso();
+	const sweep = planFor(hh, today).sweep;
+	const us = data.find((a) => a.id === 'hh-us');
+	const savings = [...accounts.values()].find((a) => a.householdId === hh && a.role === 'savings');
+	const ext = savings && [...extAccounts.values()].find((x) => x.accountId === savings.id);
+	const sav = data.find((d) => d.id === ext?.externalId);
+	if (!sweep || sweep.plannedCents <= 0 || !us) return;
+	const move = (
+		acc: BridgeAccount | undefined,
+		id: string,
+		amount: number,
+		description: string
+	) => {
+		if (!acc || acc.transactions.some((t) => t.id === id)) return;
+		acc.transactions.push({ id, posted: today, amount, description });
+		acc.balance += amount;
+		if (acc.available !== null) acc.available += amount;
+	};
+	move(us, `hh-sweep-out-${today}`, -sweep.plannedCents, 'ONLINE TRANSFER TO ALLY SAVINGS');
+	move(sav, `hh-sweep-in-${today}`, sweep.plannedCents, 'TRANSFER FROM US BANK');
 }
 
 // ---- http -------------------------------------------------------------------------------
@@ -3665,6 +3659,12 @@ const server = createServer(async (req, res) => {
 				if (only && link.householdId !== only) continue;
 				if (phase === 'household') {
 					bridge.set(link.id, demoBridgeHousehold(households.get(link.householdId)!.paydayWeekday));
+					syncLink(link, null);
+					synced++;
+					continue;
+				}
+				if (phase === 'sweep') {
+					applyHouseholdSweep(link.householdId, bridge.get(link.id) ?? []);
 					syncLink(link, null);
 					synced++;
 					continue;

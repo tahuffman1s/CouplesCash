@@ -151,7 +151,7 @@ export function pendingLine(
 }
 
 export type ReceiptLine = {
-	key: 'available' | 'sweep' | 'bills' | 'fun' | 'oneoffs' | 'income';
+	key: 'available' | 'bills' | 'fun' | 'oneoffs' | 'income';
 	/** the operator in front of the label, like her note: "", "−", "+" */
 	op: '' | '−' | '+';
 	label: string;
@@ -174,24 +174,15 @@ export function receiptLines(plan: Plan): ReceiptLine[] {
 			label: `${b.name}, available now`,
 			cents: b.availableCents,
 			lines: []
+		},
+		{
+			key: 'bills',
+			op: '−',
+			label: billsLabel(plan.nextPayday),
+			cents: -plan.billsOutCents,
+			lines: plan.bills
 		}
 	];
-	// last week's leftover is still in the account until it moves to savings
-	if (plan.sweepOutCents > 0)
-		out.push({
-			key: 'sweep',
-			op: '−',
-			label: 'Move to savings',
-			cents: -plan.sweepOutCents,
-			lines: []
-		});
-	out.push({
-		key: 'bills',
-		op: '−',
-		label: billsLabel(plan.nextPayday),
-		cents: -plan.billsOutCents,
-		lines: plan.bills
-	});
 	if (plan.funMoney.length || plan.funOutCents)
 		out.push({
 			key: 'fun',
@@ -252,6 +243,47 @@ export function sweepText(plannedCents: number): string {
 			? 'Nothing to move this week'
 			: `Nothing to move this week (${signedMoney(plannedCents)})`;
 	return `Move ${formatMoney(plannedCents)} to savings`;
+}
+
+/**
+ * The plan's bottom line: what is left on the last day of the pay week moves to savings that day.
+ * `later` — the current week before its sweep day (the amount is today's Left on <day>);
+ * `due` — frozen on the sweep day, not moved yet; `nothing` — frozen at zero (the week ended
+ * negative); `done` — moved (by the bank, `auto`, or ticked by hand).
+ */
+export type SweepState =
+	| { kind: 'none' }
+	| { kind: 'later'; cents: number; day: string }
+	| { kind: 'due'; cents: number; weekStart: string; today: boolean }
+	| { kind: 'nothing'; leftCents: number }
+	| { kind: 'done'; cents: number; auto: boolean; weekStart: string };
+
+export function sweepState(
+	plan: Pick<Plan, 'sweep' | 'isCurrent' | 'billsAccount' | 'leftAtEndCents' | 'end' | 'today'>
+): SweepState {
+	const s = plan.sweep;
+	if (s?.doneAt)
+		return {
+			kind: 'done',
+			cents: s.actualCents ?? s.plannedCents,
+			auto: s.auto,
+			weekStart: s.weekStart
+		};
+	if (s && s.plannedCents > 0)
+		return {
+			kind: 'due',
+			cents: s.plannedCents,
+			weekStart: s.weekStart,
+			today: plan.today === plan.end
+		};
+	if (s) return { kind: 'nothing', leftCents: s.leftCents ?? 0 };
+	if (plan.isCurrent && plan.billsAccount)
+		return {
+			kind: 'later',
+			cents: Math.max(0, plan.leftAtEndCents),
+			day: weekdayName(weekday(plan.end))
+		};
+	return { kind: 'none' };
 }
 
 /** True when the pay week starting on `start` holds the first payday of its month. */
@@ -315,17 +347,11 @@ export function feedAdvice(
 /**
  * A checklist line as shown: the API's label ("Paycheck arrived · $2,450.00", "$20.00 → Ally
  * Spending (Travis)"), with the amount on the right only when the label doesn't already say it.
- * The sweep reads "Move $253.17 to savings", or the API's "Nothing to move this week (−$42.10)".
  */
 export function checklistText(item: Pick<ChecklistItem, 'key' | 'label' | 'amountCents'>): {
 	text: string;
 	showAmount: boolean;
 } {
-	if (item.key === 'sweep')
-		return {
-			text: item.amountCents > 0 ? sweepText(item.amountCents) : item.label || sweepText(0),
-			showAmount: false
-		};
 	const label = item.label.trim() || (item.key === 'paycheck' ? 'Paycheck arrived' : 'Fun money');
 	return { text: label, showAmount: !/\$\s?\d/.test(label) };
 }

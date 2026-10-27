@@ -8,7 +8,7 @@ Every Friday (Travis's payday) she:
 1. takes the **US Bank** balance **after pending** transactions,
 2. subtracts every bill still to come **before next Friday**,
 3. gets what will be **left at the end of the week**,
-4. on the next payday moves that leftover to **Ally High Yield Savings**.
+4. on Thursday — the last day of the pay week — moves that leftover to **Ally High Yield Savings**.
 Travis also moves **$20 a week each** to the two **Ally fun-money checking** accounts, and **$150 each** at the start
 of the month. Student loans auto-deduct from Ally savings (not from US Bank).
 
@@ -34,15 +34,16 @@ Reads top-to-bottom like her note, every line tappable to expand:
 ```
 US Bank, available now             $2,345.67   ← bank available balance (already after pending)
    3 pending                         −$62.40   ← list; informational when the bank gives "available"
-− Move to savings                  −$845.67   ← payday only, until ticked: last week's leftover is still in the account
 − Bills before next Friday        −$1,992.50   ← each bill; ticks to Paid when the bank transaction matches
 − Fun money                           −$40.00   ← $20 Travis · $20 <wife>; +$300 on the first one of the month
 − One-offs                            −$60.00   ← planned with + ("oil change 60 friday")
 ─────────────────────────────────────────────
 = Left on Thursday                    $253.17   ← the number she writes down
+→ Move $253.17 to savings today   [Copy][Done]  ← the bottom line, on Thursday; "Moved … ✓" once the bank shows it
 ```
-- **Move to savings** = this week's frozen sweep while it is not ticked. Last week's leftover sits in US Bank until she moves it,
-  so it is not this week's money; once the transfer shows up (or she taps Done) the line goes away and `available` already reflects it.
+- **Move to savings** is the bottom line, not a line in the sum: on Thursday what is left moves to savings. Before Thursday it
+  reads "On Thursday, move what's left to savings"; on Thursday "Move $X to savings today" (X = Left on Thursday, Copy / Done);
+  once the transfer shows up (or she taps Done) "Moved $X to savings ✓" and Left on Thursday drops to what stays.
 - **Left on Thursday is the balance after everything is paid**, so a tick never moves it: a bill paid from the bank is
   already out of `available`; a bill ticked by hand (or by autopay) still counts until the bank shows it, and that bank
   transaction then takes the tick over. It moves only when the bank does, by the difference between paid and planned.
@@ -51,9 +52,8 @@ US Bank, available now             $2,345.67   ← bank available balance (alrea
 - Bills/one-offs count only when due in the pay week **and** assigned to the bills account or unassigned. Savings
   bills (student loans) show on the savings card, not in the math.
 - **Payday checklist** (shown on payday and until done; auto-ticks from bank data):
-  ☐ Paycheck arrived (+$X) · ☐ $20 → Travis fun · ☐ $20 → <wife> fun · ☐ (first payday of the month) $150 each ·
-  ☐ **Move $253.17 to savings** — the amount is last week's "Left on Thursday", frozen at the start of payday; a
-  **Copy** button copies the number for the bank app. Each item ticks itself when the matching transfer shows up in
+  ☐ Paycheck arrived (+$X) · ☐ $20 → Travis fun · ☐ $20 → <wife> fun · ☐ (first payday of the month) $150 each.
+  (The move to savings is not here: it is Thursday's bottom line, with a **Copy** button for the bank app.) Each item ticks itself when the matching transfer shows up in
   the bank feed (bills → savings / bills → fun account, ±2 days, amount within $1; the sweep within max(5 %, $5)),
   or by a tap ("Done") if the bank is slow.
 - Accounts strip at the top: US Bank · Savings · Fun (Travis) · Fun (<wife>) balances; tap → that account's transactions.
@@ -66,10 +66,11 @@ spending, and are marked paid automatically when a transfer pair (or a one-sided
 unlinked account) matches amount ±$1 within ±2 days. `fromAccountId`/`toAccountId` on RecurringItem.
 
 ## Savings sweep
-`sweeps` table: one row per pay week (household, week_start = payday, planned_cents frozen at payday 00:00 household
-time from the previous week's left-at-end, actual_cents, done_at, done_by NULL = auto, transaction_id). Auto-done when a
-bills → savings transfer appears within payday −1 … +3 days. Negative leftover → no sweep; the checklist says
-"Nothing to move this week (−$42.10)".
+`sweeps` table: one row per pay week (household, week_start = payday, planned_cents frozen at 00:00 household time on the
+week's last day — Thursday — from that week's Left on Thursday, and kept equal to it during the day until moved; actual_cents,
+done_at, done_by NULL = auto, transaction_id). Auto-done when a bills → savings transfer appears Thursday −1 … +3 days.
+Negative leftover → the bottom line says "Nothing to move to savings this week (−$42.10)". A "Move $X to savings today" push
+goes out on Thursday at the user's hour.
 
 ## From her notes to the app (one-time, two minutes)
 **Paste your notes**: a textarea in setup (and Bills → "Paste from notes"). Each line is parsed with the existing
@@ -97,7 +98,7 @@ fun-money amounts, auto-match level), Accounts (roles + owners), Banks (linked b
 matches, import a statement).
 
 ## Notifications (simplified)
-One **payday** push at the user's hour: "Payday · move $253.17 to savings · fun money $40 sent ✓". Optional "bill due
+One **payday** push at the user's hour: "Payday · fun money $40 sent ✓", and on Thursday "Move $253.17 to savings today". Optional "bill due
 tomorrow" reminders stay. Partner-activity and week-ahead pushes are removed.
 
 ## Data model (`0007_friday.sql`)

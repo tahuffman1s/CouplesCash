@@ -92,7 +92,7 @@
 		</div>
 
 		{#if plan.isCurrent && plan.checklist.length}
-			<PaydayChecklist items={plan.checklist} weekStart={plan.start} isPayday={plan.isPayday} />
+			<PaydayChecklist items={plan.checklist} isPayday={plan.isPayday} />
 		{/if}
 
 		<AccountsStrip accounts={plan.accounts} />

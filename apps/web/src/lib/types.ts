@@ -711,7 +711,7 @@ export const AUTO_MATCH_LEVELS: readonly { value: AutoMatchLevel; label: string;
 export type PlanLineKind = 'bill' | 'subscription' | 'income' | 'transfer' | 'oneoff';
 export type PlanLine = { kind: PlanLineKind; occurrence: Occurrence };
 export type ChecklistItem = {
-	key: 'paycheck' | 'fun' | 'sweep';
+	key: 'paycheck' | 'fun';
 	label: string;
 	amountCents: number;
 	done: boolean;
@@ -780,14 +780,13 @@ export type Plan = {
 	funOutCents: number;
 	oneOffOutCents: number;
 	incomeInCents: number;
-	/** this week's savings sweep while not yet ticked (last week's money still in the account), else 0 */
-	sweepOutCents: number;
-	/** available − sweep − bills − fun − one-offs (+ unpaid income only when it lands before the end) */
+	/** available − bills − fun − one-offs (+ unpaid income only when it lands before the end) */
 	leftAtEndCents: number;
 	/** e.g. student loans from savings: shown, not in the math */
 	savingsBills: PlanLine[];
-	/** payday only (empty otherwise); the sweep amount is last week's left-at-end, frozen */
+	/** payday only (empty otherwise): paycheck and fun money */
 	checklist: ChecklistItem[];
+	/** this week's savings move, frozen on its last day from Left on <day>; null before then */
 	sweep: Sweep | null;
 	toReviewCount: number;
 	setup: PlanSetup;

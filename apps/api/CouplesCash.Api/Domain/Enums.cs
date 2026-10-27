@@ -74,6 +74,9 @@ public enum WeekSummaryKind
 
     /// <summary>v7: the single payday push (replaces ahead / left).</summary>
     Payday,
+
+    /// <summary>v7: the sweep-day push ("move $X to savings today").</summary>
+    Sweep,
 }
 
 /// <summary>v6 household setting: off = suggestions only; bills = auto-apply bill/income/one-off matches and transfers; all = also auto-categorise expenses.</summary>

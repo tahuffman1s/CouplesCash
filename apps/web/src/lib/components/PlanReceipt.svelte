@@ -1,18 +1,37 @@
 <script lang="ts">
+	import { enhance } from '$app/forms';
 	import type { Plan } from '#lib/types.ts';
 	import CopyButton from './CopyButton.svelte';
 	import Icon from './Icon.svelte';
 	import PlanLineRow from './PlanLineRow.svelte';
 	import { formatDate } from '#lib/utils/dates.ts';
 	import { formatMoney, signedMoney } from '#lib/utils/money.ts';
-	import { leftLabel, pendingLine, receiptLines, savingsNote } from '#lib/utils/plan.ts';
+	import {
+		leftLabel,
+		pendingLine,
+		receiptLines,
+		savingsNote,
+		sweepState
+	} from '#lib/utils/plan.ts';
 
 	/**
 	 * v7 Friday plan: the calculation she does in her notes app, as a receipt. Monospace amounts,
 	 * every line expands (pending, each bill with its tick, fun money per person, one-offs), and
-	 * the hero "= Left on Thursday" with Copy. Savings bills sit under it, not in it.
+	 * the hero "= Left on Thursday" with Copy. Under it, the bottom line: on Thursday what is left
+	 * moves to savings (Copy / Done; ticks itself when the bank shows it). Savings bills sit under
+	 * it, not in it.
 	 */
 	let { plan }: { plan: Plan } = $props();
+
+	const sweep = $derived(sweepState(plan));
+	let sweepBusy = $state(false);
+	const sweepSubmit = () => {
+		sweepBusy = true;
+		return async ({ update }: { update: (o?: { reset?: boolean }) => Promise<void> }) => {
+			await update({ reset: false });
+			sweepBusy = false;
+		};
+	};
 
 	const b = $derived(plan.billsAccount!);
 	const lines = $derived(receiptLines(plan));
@@ -20,8 +39,6 @@
 	const amount = (key: string, cents: number) =>
 		key === 'available' ? formatMoney(cents) : signedMoney(cents);
 	const emptyText: Record<string, string> = {
-		sweep:
-			"Last week's leftover is still in this account until you move it. This line goes away when the bank shows the transfer, or when you tap Done on the payday list.",
 		bills: 'Nothing else due before payday.',
 		fun: 'No fun money this week.',
 		oneoffs: 'No one-offs planned.',
@@ -124,6 +141,73 @@
 		</div>
 		<CopyButton cents={plan.leftAtEndCents} testid="copy-left" />
 	</div>
+	{#if sweep.kind !== 'none'}
+		<div
+			class="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-base-300/70 px-4 py-3"
+			data-testid="sweep-line"
+			data-state={sweep.kind}
+		>
+			<Icon
+				name={sweep.kind === 'done' ? 'circle-check' : 'piggy-bank'}
+				size={20}
+				class="shrink-0 {sweep.kind === 'done' ? 'text-success' : 'text-primary'}"
+			/>
+			<p class="min-w-0 flex-1 text-sm" data-testid="sweep-text">
+				{#if sweep.kind === 'later'}
+					<span class="text-base-content/70"
+						>On {sweep.day}, move what's left to savings{sweep.cents > 0
+							? ` (${formatMoney(sweep.cents)} so far)`
+							: ''}.</span
+					>
+				{:else if sweep.kind === 'due'}
+					<span class="font-semibold"
+						>Move {formatMoney(sweep.cents)} to savings{sweep.today ? ' today' : ''}</span
+					>
+				{:else if sweep.kind === 'nothing'}
+					<span class="text-base-content/70"
+						>Nothing to move to savings this week{sweep.leftCents < 0
+							? ` (${signedMoney(sweep.leftCents)})`
+							: ''}.</span
+					>
+				{:else}
+					<span class="font-medium">Moved {formatMoney(sweep.cents)} to savings ✓</span>
+					{#if sweep.auto}
+						<span
+							class="ml-1 badge border-0 bg-info/15 px-1.5 badge-xs text-[0.65rem] text-info"
+							data-testid="sweep-auto">auto</span
+						>
+					{/if}
+				{/if}
+			</p>
+			{#if sweep.kind === 'due'}
+				<div class="flex shrink-0 gap-1.5">
+					<CopyButton cents={sweep.cents} testid="copy-sweep" />
+					<form method="POST" action="?/sweep" use:enhance={sweepSubmit}>
+						<input type="hidden" name="weekStart" value={sweep.weekStart} />
+						<input type="hidden" name="done" value="1" />
+						<button
+							class="btn min-h-11 rounded-full px-4 btn-primary btn-sm"
+							disabled={sweepBusy}
+							data-testid="sweep-done"
+						>
+							{#if sweepBusy}<span class="loading loading-xs loading-spinner"></span>{/if}
+							Done
+						</button>
+					</form>
+				</div>
+			{:else if sweep.kind === 'done' && !sweep.auto}
+				<form method="POST" action="?/sweep" use:enhance={sweepSubmit}>
+					<input type="hidden" name="weekStart" value={sweep.weekStart} />
+					<input type="hidden" name="done" value="0" />
+					<button
+						class="btn min-h-11 rounded-full btn-ghost px-3 text-xs btn-sm"
+						disabled={sweepBusy}
+						data-testid="sweep-undo">Undo</button
+					>
+				</form>
+			{/if}
+		</div>
+	{/if}
 </section>
 
 {#if plan.savingsBills.length}

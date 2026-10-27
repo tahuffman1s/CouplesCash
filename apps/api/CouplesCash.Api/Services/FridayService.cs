@@ -125,11 +125,24 @@ public sealed class FridayService(
         return count;
     }
 
+    /// <summary>This week's sweep (made on its last day) and last week's (its move may post over the weekend), each looked for around its sweep day.</summary>
     private async Task<int> DetectSweepAsync(UnitOfWork uow, HouseholdRow household, IReadOnlyList<AccountRow> accountRows, AccountRow bills, DateOnly today, CancellationToken ct)
+    {
+        var week = WeekEngine.WeekBounds(today, household.PaydayWeekday);
+        var done = 0;
+        foreach (var w in new[] { week, week.Shift(-1) })
+        {
+            done += await DetectSweepAsync(uow, household, accountRows, bills, w, ct);
+        }
+
+        return done;
+    }
+
+    private async Task<int> DetectSweepAsync(UnitOfWork uow, HouseholdRow household, IReadOnlyList<AccountRow> accountRows, AccountRow bills, WeekWindow week, CancellationToken ct)
     {
         var conn = uow.Connection;
         var householdId = household.Id;
-        var week = WeekEngine.WeekBounds(today, household.PaydayWeekday);
+        var sweepDay = PlanEngine.SweepDay(week);
         var sweep = await sweeps.LockAsync(conn, householdId, week.Start, ct);
         if (sweep is null || sweep.PlannedCents <= 0 || sweep.AutoBlocked || sweep.TransactionId is not null)
         {
@@ -142,9 +155,9 @@ public sealed class FridayService(
             return 0;
         }
 
-        var (outflows, inflows) = await CandidateRowsAsync(conn, householdId, week.Start.AddDays(-PlanEngine.SweepDaysBefore - PlanEngine.SweepPairDays),
-            week.Start.AddDays(PlanEngine.SweepDaysAfter + PlanEngine.SweepPairDays), ct);
-        var match = PlanEngine.FindSweep(sweep.PlannedCents, week.Start, bills.Id, savings.Select(a => a.Id).ToList(), savings.Any(a => a.Linked),
+        var (outflows, inflows) = await CandidateRowsAsync(conn, householdId, sweepDay.AddDays(-PlanEngine.SweepDaysBefore - PlanEngine.SweepPairDays),
+            sweepDay.AddDays(PlanEngine.SweepDaysAfter + PlanEngine.SweepPairDays), ct);
+        var match = PlanEngine.FindSweep(sweep.PlannedCents, sweepDay, bills.Id, savings.Select(a => a.Id).ToList(), savings.Any(a => a.Linked),
             savings.Select(a => (a.Name, a.Institution)).ToList(), outflows, inflows);
         if (match is null)
         {
@@ -301,9 +314,9 @@ public sealed class FridayService(
     // ---------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Scheduler phase: on payday (household-local; catch-up through payday + 3 when the API was down at midnight) every household with a
-    /// bills account gets this pay week's sweep, frozen from the previous week's left-at-end (<see cref="PlanEngine.PreviousWeekLeft"/>).
-    /// Idempotent: the unique (household, week_start) keeps the first value.
+    /// Scheduler phase: on the sweep day — the last day of the pay week, household-local — every household with a bills account gets that
+    /// week's sweep, frozen from the week's left-at-end: what is left on Thursday moves to savings on Thursday. Idempotent: the unique
+    /// (household, week_start) keeps the first value.
     /// </summary>
     public async Task FreezeDueAsync(DateTime nowUtc, CancellationToken ct)
     {
@@ -311,8 +324,8 @@ public sealed class FridayService(
         {
             ct.ThrowIfCancellationRequested();
             var today = DateOnly.FromDateTime(SchedulerRules.ToLocal(nowUtc, household.Timezone));
-            var week = WeekEngine.WeekBounds(today, household.PaydayWeekday);
-            if (today > week.Start.AddDays(PlanEngine.ChecklistDays) || await sweeps.GetAsync(household.Id, week.Start, ct) is not null)
+            if (PlanEngine.SweepWeekToFreeze(today, household.PaydayWeekday) is not { } week
+                || await sweeps.GetAsync(household.Id, week.Start, ct) is not null)
             {
                 continue;
             }
@@ -330,13 +343,14 @@ public sealed class FridayService(
 
     private async Task FreezeAsync(HouseholdRow household, WeekWindow week, CancellationToken ct)
     {
-        var context = await plans.LoadAsync(household.Id, week.Start.AddDays(-7), week.End, ct);
+        var context = await plans.LoadAsync(household.Id, week.Start, week.End, ct);
         if (context?.BillsAccount is null)
         {
             return;
         }
 
-        var left = PlanEngine.PreviousWeekLeft(week, context.Today, context.AvailableCents, context.PlanOccurrences, context.BillsAccountId, context.Roles);
+        // The week's "Left on Thursday", on Thursday.
+        var left = PlanEngine.Totals(week, context.AvailableCents, context.PlanOccurrences, context.BillsAccountId, context.Roles).LeftAtEndCents;
         var plannedCents = PlanEngine.SweepPlanned(left);
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         var row = await sweeps.InsertAsync(uow.Connection, household.Id, week.Start, plannedCents, left, time.Now(), ct);
@@ -416,7 +430,21 @@ public sealed class FridayService(
         var fun = context.PlanOccurrences
             .Where(o => PlanEngine.IsChecklistFun(o, PlanEngine.Classify(o, context.BillsAccountId, context.Roles), week))
             .ToList();
+        return SchedulerRules.PaydayBody(fun.Sum(o => o.AmountCents), fun.Count > 0 && fun.All(o => o.IsPaid), household.Currency);
+    }
+
+    /// <summary>
+    /// The sweep-day push body ("Move $253.17 to savings today"), or null when the sweep is not frozen yet, is zero or is already done.
+    /// <paramref name="week"/> is the pay week ending today.
+    /// </summary>
+    public async Task<string?> SweepBodyAsync(Guid householdId, WeekWindow week, CancellationToken ct)
+    {
         var sweep = await sweeps.GetAsync(householdId, week.Start, ct);
-        return SchedulerRules.PaydayBody(sweep?.PlannedCents, fun.Sum(o => o.AmountCents), fun.Count > 0 && fun.All(o => o.IsPaid), household.Currency);
+        if (sweep is not { PlannedCents: > 0, IsDone: false })
+        {
+            return null;
+        }
+
+        return SchedulerRules.SweepBody(sweep.PlannedCents, await households.CurrencyAsync(householdId, ct));
     }
 }

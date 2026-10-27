@@ -88,10 +88,10 @@ public static class PlanEngine
     /// <summary>… and within ±2 days of the due date.</summary>
     public const int TransferWindowDays = 2;
 
-    /// <summary>The sweep is looked for from the day before payday …</summary>
+    /// <summary>The sweep is looked for from the day before the sweep day (the last day of the pay week) …</summary>
     public const int SweepDaysBefore = 1;
 
-    /// <summary>… to payday + 3.</summary>
+    /// <summary>… to three days after it (a Thursday transfer can post over the weekend).</summary>
     public const int SweepDaysAfter = 3;
 
     /// <summary>Sweep amount tolerance floor: $5.00 (or 5 % of the planned amount, whichever is larger).</summary>
@@ -197,33 +197,6 @@ public static class PlanEngine
     public static PlanTotals Totals(WeekWindow week, long availableCents, IEnumerable<PlanOccurrence> occurrences, Guid? billsAccountId, IReadOnlyDictionary<Guid, AccountRole> roles) =>
         Totals(week, availableCents, occurrences.Select(o => (o, Classify(o, billsAccountId, roles))));
 
-    /// <summary>
-    /// The previous pay week's "Left on Thursday", computed at <paramref name="today"/> on or after the new payday (the sweep freeze):
-    /// <c>Totals(previous week).leftAtEnd − correction</c>, where the correction takes back what already moved through the bank in the new
-    /// week (occurrences due in <c>[start, today]</c> paid from a bank transaction): a posted paycheck is subtracted, posted bills / fun
-    /// transfers / one-offs are added back. At payday 00:00 nothing has moved yet and the correction is zero; it only matters when the
-    /// freeze runs late (the API was down at midnight).
-    /// </summary>
-    public static long PreviousWeekLeft(WeekWindow currentWeek, DateOnly today, long availableCents, IReadOnlyList<PlanOccurrence> occurrences, Guid? billsAccountId, IReadOnlyDictionary<Guid, AccountRole> roles)
-    {
-        var previous = currentWeek.Shift(-1);
-        var left = Totals(previous, availableCents, occurrences.Where(o => previous.Contains(o.DueDate)), billsAccountId, roles).LeftAtEndCents;
-        foreach (var o in occurrences.Where(o => o.PaidFromBank && o.PaidCents is not null && o.DueDate >= currentWeek.Start && o.DueDate <= today))
-        {
-            switch (Classify(o, billsAccountId, roles))
-            {
-                case PlanBucket.Income:
-                    left -= o.PaidCents!.Value;
-                    break;
-                case PlanBucket.Bill or PlanBucket.FunMoney or PlanBucket.OneOff:
-                    left += o.PaidCents!.Value;
-                    break;
-            }
-        }
-
-        return left;
-    }
-
     // ---------------------------------------------------------------------------------------------
     // Payday checklist
     // ---------------------------------------------------------------------------------------------
@@ -247,32 +220,39 @@ public static class PlanEngine
     // Savings sweep
     // ---------------------------------------------------------------------------------------------
 
-    /// <summary>What to move: last week's left-at-end, or nothing when it was negative.</summary>
+    /// <summary>What to move: the week's left-at-end, or nothing when it is negative.</summary>
     public static long SweepPlanned(long leftCents) => Math.Max(0, leftCents);
 
+    /// <summary>The sweep day: the last day of the pay week ("Left on Thursday" is what moves to savings that day).</summary>
+    public static DateOnly SweepDay(WeekWindow week) => week.End;
+
     /// <summary>
-    /// The sweep still to move, taken out of this week's left-at-end: last week's leftover sits in the bills account until it moves, so it
-    /// is not this week's money. Zero once the sweep is ticked (by the bank or a person — the money has left the bills account).
+    /// The pay week whose sweep is frozen on <paramref name="today"/>: this week, on its last day (the sweep day); null on every other day.
+    /// No catch-up: when the API was down all that day nothing is frozen and the money simply carries into the next week's plan.
     /// </summary>
-    public static long SweepOut(long plannedCents, bool done) => done ? 0 : Math.Max(0, plannedCents);
+    public static WeekWindow? SweepWeekToFreeze(DateOnly today, int paydayWeekday)
+    {
+        var week = WeekEngine.WeekBounds(today, paydayWeekday);
+        return today == SweepDay(week) ? week : null;
+    }
 
     /// <summary>max(5 % of the planned amount, $5.00).</summary>
     public static long SweepTolerance(long plannedCents) =>
         Math.Max(SweepMinToleranceCents, (long)Math.Round(plannedCents * SweepTolerancePercent, MidpointRounding.AwayFromZero));
 
-    public static bool InSweepWindow(DateOnly postedOn, DateOnly weekStart) =>
-        postedOn >= weekStart.AddDays(-SweepDaysBefore) && postedOn <= weekStart.AddDays(SweepDaysAfter);
+    public static bool InSweepWindow(DateOnly postedOn, DateOnly sweepDay) =>
+        postedOn >= sweepDay.AddDays(-SweepDaysBefore) && postedOn <= sweepDay.AddDays(SweepDaysAfter);
 
     /// <summary>
-    /// The bills → savings move of the week starting <paramref name="weekStart"/>: a bills-account outflow posted payday − 1 … payday + 3
+    /// The bills → savings move made on <paramref name="sweepDay"/>: a bills-account outflow posted sweep day − 1 … + 3
     /// within <see cref="SweepTolerance"/> of <paramref name="plannedCents"/>, backed by one of (strongest first) a transfer peer on a savings
     /// account, a savings-account inflow of the same amount (±1 %, at least $1, ±3 days), or — when the savings account has no bank feed, or
-    /// the row names a savings account — a row that reads like a transfer. Closest amount, then closest to payday, wins. Null when nothing fits
+    /// the row names a savings account — a row that reads like a transfer. Closest amount, then closest to the sweep day, wins. Null when nothing fits
     /// or the plan is zero.
     /// </summary>
     public static SweepMatch? FindSweep(
         long plannedCents,
-        DateOnly weekStart,
+        DateOnly sweepDay,
         Guid billsAccountId,
         IReadOnlyCollection<Guid> savingsAccountIds,
         bool savingsLinked,
@@ -288,13 +268,13 @@ public static class PlanEngine
         var tolerance = SweepTolerance(plannedCents);
         var inflows = savingsInflows.Where(r => r.AmountCents > 0 && r.AccountId is { } a && savingsAccountIds.Contains(a)).ToList();
         var best = outflows
-            .Where(r => r.AccountId == billsAccountId && r.AmountCents < 0 && InSweepWindow(r.PostedOn, weekStart))
+            .Where(r => r.AccountId == billsAccountId && r.AmountCents < 0 && InSweepWindow(r.PostedOn, sweepDay))
             .Where(r => Math.Abs(r.Magnitude - plannedCents) <= tolerance)
             .Select(r => Evidence(r))
             .Where(x => x.Strength > 0)
             .OrderByDescending(x => x.Strength)
             .ThenBy(x => Math.Abs(x.Row.Magnitude - plannedCents))
-            .ThenBy(x => Math.Abs(x.Row.PostedOn.DayNumber - weekStart.DayNumber))
+            .ThenBy(x => Math.Abs(x.Row.PostedOn.DayNumber - sweepDay.DayNumber))
             .ThenBy(x => x.Row.Id)
             .FirstOrDefault();
 

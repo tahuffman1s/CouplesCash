@@ -25,6 +25,7 @@ import {
 	receiptLines,
 	savingsNote,
 	shortDay,
+	sweepState,
 	sweepText,
 	weekdayName
 } from './plan.ts';
@@ -78,7 +79,6 @@ function plan(over: Partial<Plan> = {}): Plan {
 		funOutCents: 0,
 		oneOffOutCents: 0,
 		incomeInCents: 0,
-		sweepOutCents: 0,
 		leftAtEndCents: 35317,
 		savingsBills: [],
 		checklist: [],
@@ -243,10 +243,15 @@ describe('receiptLines', () => {
 		expect(lines[3]).toMatchObject({ op: '−', label: 'One-offs', cents: -6000 });
 		expect(lines[4]).toMatchObject({ op: '+', label: 'Paycheck', cents: 245000 });
 	});
-	it("last week's leftover still to move comes right after available", () => {
-		const lines = receiptLines(plan({ sweepOutCents: 84567 }));
-		expect(lines.map((l) => l.key)).toEqual(['available', 'sweep', 'bills']);
-		expect(lines[1]).toMatchObject({ op: '−', label: 'Move to savings', cents: -84567 });
+	it('the savings move is never a line in the calculation', () => {
+		const sweep = {
+			weekStart: '2026-10-23',
+			plannedCents: 35317,
+			actualCents: null,
+			doneAt: null,
+			auto: false
+		};
+		expect(receiptLines(plan({ sweep })).map((l) => l.key)).toEqual(['available', 'bills']);
 	});
 	it('no paycheck line once it has arrived; nothing without a bills account', () => {
 		const lines = receiptLines(
@@ -348,6 +353,52 @@ describe('lineName', () => {
 	});
 });
 
+describe('sweepState: the bottom line on the last day of the week', () => {
+	const base = { isCurrent: true, end: '2026-10-29', today: '2026-10-26', leftAtEndCents: 25317 };
+	const frozen = (over: Record<string, unknown> = {}) => ({
+		weekStart: '2026-10-23',
+		plannedCents: 25317,
+		actualCents: null,
+		doneAt: null,
+		auto: false,
+		leftCents: 25317,
+		...over
+	});
+	it('before Thursday: what is left today will move on Thursday', () => {
+		expect(sweepState(plan({ ...base, sweep: null }))).toEqual({
+			kind: 'later',
+			cents: 25317,
+			day: 'Thursday'
+		});
+		expect(sweepState(plan({ ...base, sweep: null, leftAtEndCents: -4210 }))).toMatchObject({
+			cents: 0
+		});
+	});
+	it('on Thursday: the frozen amount is due today', () => {
+		expect(sweepState(plan({ ...base, today: '2026-10-29', sweep: frozen() }))).toEqual({
+			kind: 'due',
+			cents: 25317,
+			weekStart: '2026-10-23',
+			today: true
+		});
+		expect(
+			sweepState(plan({ ...base, sweep: frozen({ plannedCents: 0, leftCents: -4210 }) }))
+		).toEqual({
+			kind: 'nothing',
+			leftCents: -4210
+		});
+	});
+	it('moved: by the bank (auto) or by hand at its own amount', () => {
+		expect(
+			sweepState(plan({ ...base, sweep: frozen({ doneAt: 'x', auto: true, actualCents: 25000 }) }))
+		).toEqual({ kind: 'done', cents: 25000, auto: true, weekStart: '2026-10-23' });
+		expect(sweepState(plan({ ...base, isCurrent: false, sweep: null }))).toEqual({ kind: 'none' });
+		expect(sweepState(plan({ ...base, billsAccount: null, sweep: null }))).toEqual({
+			kind: 'none'
+		});
+	});
+});
+
 describe('checklistText', () => {
 	it('keeps the API label and never repeats its amount', () => {
 		expect(
@@ -361,17 +412,5 @@ describe('checklistText', () => {
 			showAmount: true
 		});
 		expect(checklistText({ key: 'fun', label: '', amountCents: 1 }).text).toBe('Fun money');
-	});
-	it('the sweep', () => {
-		expect(checklistText({ key: 'sweep', label: 'x', amountCents: 25317 }).text).toBe(
-			'Move $253.17 to savings'
-		);
-		expect(
-			checklistText({ key: 'sweep', label: 'Nothing to move this week (−$42.10)', amountCents: 0 })
-				.text
-		).toBe('Nothing to move this week (−$42.10)');
-		expect(checklistText({ key: 'sweep', label: '', amountCents: 0 }).text).toBe(
-			'Nothing to move this week'
-		);
 	});
 });

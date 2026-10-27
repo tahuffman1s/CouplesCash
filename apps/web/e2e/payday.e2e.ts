@@ -14,7 +14,7 @@ import {
  * v7 payday checklist: payday is set to today so the checklist shows; `?phase=payday` brings the
  * paycheck, the fun-money transfers and the sweep of last week's leftover into the bank feed.
  */
-test('payday: Done by hand, then the bank ticks paycheck, fun money and the sweep', async ({
+test('payday: Done by hand, then the bank ticks the paycheck and fun money', async ({
 	page,
 	context
 }) => {
@@ -29,21 +29,15 @@ test('payday: Done by hand, then the bank ticks paycheck, fun money and the swee
 	await expect(item('paycheck')).toContainText('Paycheck arrived');
 	await expect(item('paycheck')).toContainText('$2,450.00');
 	await expect(item('fun').filter({ hasText: 'Travis' }).first()).toContainText('$20.00');
-	const sweepText = await item('sweep').getByTestId('sweep-text').innerText();
-	expect(sweepText).toMatch(/^Move \$[\d,]+\.\d{2} to savings$/);
-	const amount = sweepText.replace(/^Move \$|,| to savings$/g, '');
-	// until it moves, last week's leftover is taken out of this week's plan
-	await expect(page.getByTestId('plan-amount-sweep')).toHaveText(
-		`−${usd(Math.round(Number(amount) * 100))}`
+	// the move to savings is not on payday: it is the bottom line on the last day of the week
+	await expect(item('sweep')).toHaveCount(0);
+	await expect(page.getByTestId('sweep-line')).toHaveAttribute('data-state', 'later');
+	await expect(page.getByTestId('sweep-text')).toContainText(
+		/On \w+day, move what's left to savings/
 	);
 
-	// Copy the amount for the bank app
+	// the bank is slow: tick the paycheck by hand, then take it back
 	await hydrated(page);
-	await item('sweep').getByTestId('copy-sweep').click();
-	expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(amount);
-
-	// the bank is slow: tick the paycheck by hand, then take it back (a sweep unticked by hand is
-	// never re-ticked by the bank, so it is left alone here)
 	await item('paycheck').getByTestId('checklist-done').click();
 	await expect(item('paycheck')).toHaveAttribute('data-done', 'true');
 	await expect(list.getByTestId('checklist-progress')).toContainText('1 of');
@@ -62,9 +56,6 @@ test('payday: Done by hand, then the bank ticks paycheck, fun money and the swee
 	for (const row of await done.getByTestId('checklist-item').all())
 		await expect(row).toHaveAttribute('data-done', 'true');
 	await expect(done.getByTestId('checklist-auto').first()).toBeVisible();
-	await expect(done.locator('[data-key="sweep"]').getByTestId('checklist-auto')).toBeVisible();
-	// moved: it is out of the account's available balance, so the plan line goes away
-	await expect(page.getByTestId('plan-row-sweep')).toHaveCount(0);
 
 	// the fun money in the plan is paid, and the transfers left To review
 	const funRow = page.getByTestId('plan-row-fun');
@@ -86,4 +77,34 @@ test('payday: Done by hand, then the bank ticks paycheck, fun money and the swee
 	// the other legs land on the fun accounts: listed once fun money is shown
 	await page.getByTestId('fun-toggle').click();
 	await expect(page.getByTestId('pending-count')).toHaveText(String(pending + funCount));
+});
+
+test('the last day of the week: what is left moves to savings, and the bank ticks it', async ({
+	page,
+	context
+}) => {
+	await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+	const { email } = await registerWithHousehold(page, 'Travis');
+	await skipUnlessMockBridge(page);
+	// payday tomorrow: today is the last day of the pay week (her Thursday)
+	await setupHousehold(page, { payday: (weekdayOf(todayIso()) + 1) % 7 });
+
+	const left = await page.getByTestId('left-on').innerText();
+	const line = page.getByTestId('sweep-line');
+	await expect(line).toHaveAttribute('data-state', 'due');
+	await expect(line.getByTestId('sweep-text')).toHaveText(`Move ${left} to savings today`);
+	await expect(page.getByTestId('payday-checklist')).toHaveCount(0);
+
+	// Copy the number for the bank app
+	await hydrated(page);
+	await line.getByTestId('copy-sweep').click();
+	expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(left.replace(/[$,]/g, ''));
+
+	// the transfer shows up at the bank: it ticks itself, and nothing is left on the last day
+	await bankSync(page, email, 'sweep');
+	await page.reload();
+	await expect(line).toHaveAttribute('data-state', 'done');
+	await expect(line.getByTestId('sweep-text')).toContainText(`Moved ${left} to savings ✓`);
+	await expect(line.getByTestId('sweep-auto')).toBeVisible();
+	await expect(page.getByTestId('left-on')).toHaveText(usd(0));
 });

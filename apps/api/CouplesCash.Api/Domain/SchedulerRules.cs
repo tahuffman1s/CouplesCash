@@ -175,19 +175,16 @@ public static class SchedulerRules
     /// <summary>Push tag of the payday push (one per pay week; a later push replaces an earlier one on the device).</summary>
     public const string PaydayTag = "payday";
 
+    /// <summary>Push tag of the sweep-day push ("move $X to savings today").</summary>
+    public const string SweepTag = "sweep";
+
     /// <summary>
-    /// "Payday · move $253.17 to savings · fun money $40.00" (values only). A frozen sweep of zero says "nothing to move to savings" (the negative leftover is shown in the app);
-    /// without a frozen sweep the part is dropped; fun money gets " sent ✓" once every fun transfer of the checklist is paid and is dropped
-    /// when there is none.
+    /// "Payday · fun money $40.00" (values only): fun money gets " sent ✓" once every fun transfer of the checklist is paid and is dropped
+    /// when there is none. The savings move is not on payday any more — it has its own push on the sweep day.
     /// </summary>
-    public static string PaydayBody(long? sweepPlannedCents, long funCents, bool funSent, string currency)
+    public static string PaydayBody(long funCents, bool funSent, string currency)
     {
         var parts = new List<string> { "Payday" };
-        if (sweepPlannedCents is { } planned)
-        {
-            parts.Add(planned > 0 ? $"move {Money.Format(planned, currency)} to savings" : "nothing to move to savings");
-        }
-
         if (funCents > 0)
         {
             parts.Add($"fun money {Money.Format(funCents, currency)}{(funSent ? " sent ✓" : "")}");
@@ -195,4 +192,10 @@ public static class SchedulerRules
 
         return string.Join(" · ", parts);
     }
+
+    /// <summary>"Move $253.17 to savings today" — what is left at the end of the pay week (values only).</summary>
+    public static string SweepBody(long plannedCents, string currency) => $"Move {Money.Format(plannedCents, currency)} to savings today";
+
+    /// <summary>The sweep day of the pay week containing <paramref name="today"/> is today (the day before payday).</summary>
+    public static bool IsSweepDay(DateOnly today, int paydayWeekday) => ((int)today.DayOfWeek + 1) % 7 == paydayWeekday;
 }

@@ -314,36 +314,28 @@ public class V7Tests
         Assert.Equal(1_266, PlanEngine.SweepTolerance(25_317));   // 5 %
     }
 
-    [Fact]
-    public void The_sweep_counts_against_this_week_until_it_moves()
+    [Theory]
+    // Pay week Friday 2026-10-30 … Thursday 2026-11-05: the sweep day is Thursday, and only Thursday.
+    [InlineData(2026, 11, 5, 2026, 10, 30)]   // Thursday: this week's sweep
+    [InlineData(2026, 11, 6, 0, 0, 0)]        // Friday (payday): nothing — no catch-up
+    [InlineData(2026, 11, 9, 0, 0, 0)]        // Monday: nothing
+    [InlineData(2026, 11, 4, 0, 0, 0)]        // Wednesday: not yet
+    public void The_sweep_is_frozen_on_the_last_day_of_the_pay_week(int y, int m, int d, int wy, int wm, int wd)
     {
-        Assert.Equal(234_567, PlanEngine.SweepOut(234_567, done: false));  // − Move to savings
-        Assert.Equal(0, PlanEngine.SweepOut(234_567, done: true));         // moved: already out of available
-        Assert.Equal(0, PlanEngine.SweepOut(0, done: false));              // nothing to move
+        var week = PlanEngine.SweepWeekToFreeze(D(y, m, d), paydayWeekday: 5);
+        Assert.Equal(wy == 0 ? null : D(wy, wm, wd), week?.Start);
+        Assert.Equal(D(2026, 11, 5), PlanEngine.SweepDay(PayWeek));
+        Assert.True(SchedulerRules.IsSweepDay(D(2026, 11, 5), 5));
+        Assert.False(SchedulerRules.IsSweepDay(D(2026, 11, 6), 5));
     }
 
     [Fact]
-    public void Freezing_late_takes_back_what_already_moved_in_the_new_week()
+    public void Left_on_thursday_is_what_moves_it_is_never_taken_out_of_the_week()
     {
-        // Frozen on payday 2026-11-06 for the week that just ended: only Phone ($85) is still unpaid → left = available − 85.
-        var newWeek = PayWeek.Shift(1);
-        var previous = new[]
-        {
-            Bill(1, 185_000, D(2026, 11, 1), UsBank, paid: 185_000, fromBank: true),
-            Bill(2, 8_500, D(2026, 11, 3), UsBank),
-            Transfer(7, 2_000, D(2026, 10, 30), UsBank, FunTravis, paid: 2_000, fromBank: true),
-        };
-        Assert.Equal(300_000 - 8_500, PlanEngine.PreviousWeekLeft(newWeek, newWeek.Start, 300_000, previous, UsBank, Roles));
-
-        // The API was down at midnight: by the time it freezes, the paycheck ($1,500) and both $20 transfers posted — take them back.
-        var late = previous.Concat(
-        [
-            Income(10, 150_000, newWeek.Start, UsBank, paid: 150_000, fromBank: true),
-            Transfer(7, 2_000, newWeek.Start, UsBank, FunTravis, paid: 2_000, fromBank: true),
-            Transfer(8, 2_000, newWeek.Start, UsBank, FunWife, paid: 2_000, fromBank: true),
-            Bill(30, 5_000, newWeek.Start, UsBank, paid: 5_000), // marked paid by hand: not a bank movement, no correction
-        ]).ToList();
-        Assert.Equal(300_000 - 8_500 - 150_000 + 4_000, PlanEngine.PreviousWeekLeft(newWeek, newWeek.Start, 300_000, late, UsBank, Roles));
+        // Her note: the plan is the same with or without a frozen sweep — the sweep is its bottom line, not a line in it.
+        var totals = PlanEngine.Totals(PayWeek, 234_567, Week, UsBank, Roles);
+        Assert.Equal(25_317, totals.LeftAtEndCents);
+        Assert.Equal(25_317, PlanEngine.SweepPlanned(totals.LeftAtEndCents));
     }
 
     private static PlanBankRow Row(int id, Guid? account, DateOnly posted, long cents, string text, Guid? peer = null, Guid? peerAccount = null, bool transferish = false) =>
@@ -481,13 +473,17 @@ public class V7Tests
     [Fact]
     public void The_payday_push_carries_values_only()
     {
-        Assert.Equal("Payday · move $253.17 to savings · fun money $40.00", SchedulerRules.PaydayBody(25_317, 4_000, false, "USD"));
-        Assert.Equal("Payday · move $253.17 to savings · fun money $40.00 sent ✓", SchedulerRules.PaydayBody(25_317, 4_000, true, "USD"));
-        Assert.Equal("Payday · nothing to move to savings · fun money $40.00", SchedulerRules.PaydayBody(0, 4_000, false, "USD"));
-        Assert.Equal("Payday · fun money $340.00", SchedulerRules.PaydayBody(null, 34_000, false, "USD"));
-        Assert.Equal("Payday", SchedulerRules.PaydayBody(null, 0, false, "USD"));
+        Assert.Equal("Payday · fun money $40.00", SchedulerRules.PaydayBody(4_000, false, "USD"));
+        Assert.Equal("Payday · fun money $40.00 sent ✓", SchedulerRules.PaydayBody(4_000, true, "USD"));
+        Assert.Equal("Payday · fun money $340.00", SchedulerRules.PaydayBody(34_000, false, "USD"));
+        Assert.Equal("Payday", SchedulerRules.PaydayBody(0, false, "USD"));
         Assert.Equal("payday", SchedulerRules.PaydayTag);
         Assert.Equal("payday", WeekSummaryKind.Payday.ToDb());
+
+        // The sweep day has its own push.
+        Assert.Equal("Move $253.17 to savings today", SchedulerRules.SweepBody(25_317, "USD"));
+        Assert.Equal("sweep", SchedulerRules.SweepTag);
+        Assert.Equal("sweep", WeekSummaryKind.Sweep.ToDb());
     }
 
     // ---------------------------------------------------------------------------------------------
