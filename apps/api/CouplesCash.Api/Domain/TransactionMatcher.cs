@@ -137,6 +137,39 @@ public static class TransactionMatcher
         return result.Length > 0 ? result : Fingerprint.Normalise(source);
     }
 
+    /// <summary>
+    /// The keys a transaction can be known by: the usual one (payee, else description), then the description and the payee on their
+    /// own. Providers differ — Plaid sends a merchant name next to the bank's wording — so a rule learned from one shape still finds
+    /// a row in the other.
+    /// </summary>
+    public static IReadOnlyList<string> PayeeKeys(string? payee, string? description)
+    {
+        var keys = new List<string>(3);
+        foreach (var key in new[] { NormalisePayee(payee, description), NormalisePayee(null, description), NormalisePayee(payee, null) })
+        {
+            if (key.Length > 0 && !keys.Contains(key, StringComparer.Ordinal))
+            {
+                keys.Add(key);
+            }
+        }
+
+        return keys;
+    }
+
+    /// <summary>The learned rule for a transaction under any of its <see cref="PayeeKeys"/> (the usual key first), or null.</summary>
+    public static PayeeRule? FindRule(IReadOnlyDictionary<string, PayeeRule> rulesByNorm, string? payee, string? description)
+    {
+        foreach (var key in PayeeKeys(payee, description))
+        {
+            if (rulesByNorm.TryGetValue(key, out var rule))
+            {
+                return rule;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Processor noise ("pos", "debit", "ach" …) that never identifies a payee.</summary>
     public static bool IsNoiseToken(string token) => NoiseTokens.Contains(token);
 
@@ -327,8 +360,7 @@ public static class TransactionMatcher
         IReadOnlyDictionary<string, PayeeRule> rulesByNorm,
         IReadOnlyDictionary<string, Guid> categoriesByName)
     {
-        var norm = NormalisePayee(tx.Payee, tx.Description);
-        rulesByNorm.TryGetValue(norm, out var rule);
+        var rule = FindRule(rulesByNorm, tx.Payee, tx.Description);
 
         if (FindOccurrence(tx, unpaid) is { } occurrence)
         {
@@ -341,7 +373,7 @@ public static class TransactionMatcher
 
     /// <summary>Does a learned rule name this item for this transaction's payee (the auto-match precondition)?</summary>
     public static bool RuleMatchesItem(MatchTransaction tx, Guid itemId, IReadOnlyDictionary<string, PayeeRule> rulesByNorm) =>
-        rulesByNorm.TryGetValue(NormalisePayee(tx.Payee, tx.Description), out var rule) && rule.ItemId == itemId;
+        PayeeKeys(tx.Payee, tx.Description).Any(key => rulesByNorm.TryGetValue(key, out var rule) && rule.ItemId == itemId);
 
     /// <summary>
     /// Suggestions for a batch. Each unpaid occurrence is handed out once (two rent debits do not both match the same
@@ -363,8 +395,7 @@ public static class TransactionMatcher
 
         foreach (var tx in transactions.OrderBy(t => t.PostedOn).ThenBy(t => t.Id))
         {
-            var norm = NormalisePayee(tx.Payee, tx.Description);
-            rulesByNorm.TryGetValue(norm, out var rule);
+            var rule = FindRule(rulesByNorm, tx.Payee, tx.Description);
 
             if (FindOccurrence(tx, available) is { } occurrence)
             {
@@ -392,8 +423,7 @@ public static class TransactionMatcher
     /// </summary>
     public static Suggestion SuggestWithoutOccurrence(MatchTransaction tx, IReadOnlyDictionary<string, PayeeRule> rulesByNorm, IReadOnlyDictionary<string, Guid> categoriesByName)
     {
-        rulesByNorm.TryGetValue(NormalisePayee(tx.Payee, tx.Description), out var rule);
-        return SuggestCategory(tx, rule, categoriesByName);
+        return SuggestCategory(tx, FindRule(rulesByNorm, tx.Payee, tx.Description), categoriesByName);
     }
 
     /// <summary>

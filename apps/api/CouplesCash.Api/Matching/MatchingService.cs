@@ -363,7 +363,7 @@ public sealed class MatchingService(
         // Nothing from the matcher: keep the built-in transfer keyword / learned / keyword category suggestion (never auto).
         var fallback = TransactionMatcher.SuggestWithoutOccurrence(tx, rulesByNorm, categoriesByName);
         return fallback.Kind == SuggestionKind.Category
-            ? new Decision(row, fallback, fallback.Confidence, MatchingRules.BuiltinCategoryDetail(fallback, rulesByNorm.GetValueOrDefault(TransactionMatcher.NormalisePayee(tx.Payee, tx.Description))), false, false)
+            ? new Decision(row, fallback, fallback.Confidence, MatchingRules.BuiltinCategoryDetail(fallback, TransactionMatcher.FindRule(rulesByNorm, tx.Payee, tx.Description)), false, false)
             : new Decision(row, fallback, null, null, false, false);
     }
 
@@ -380,17 +380,19 @@ public sealed class MatchingService(
         {
             case SuggestionKind.Occurrence when suggestion is { ItemId: { } itemId, DueDate: { } due } && itemsById.TryGetValue(itemId, out var item):
                 {
-                    var ruleHit = TransactionMatcher.RuleMatchesItem(tx, itemId, rulesByNorm);
+                    // a learned payee rule, or one of the bill's names whole in the transaction (any provider's wording)
+                    var names = BankNames.AllNames(item.Name, item.BankNames, item.BankNamesLearned);
+                    var ruleHit = TransactionMatcher.RuleMatchesItem(tx, itemId, rulesByNorm) || MatchingRules.NameContained(tx.Payee, tx.Description, names);
                     var occurrence = unpaid.FirstOrDefault(o => o.ItemId == itemId && o.DueDate == due)
                         ?? new MatchableOccurrence(itemId, item.Name, item.Kind, item.AmountCents, due, item.Frequency == Frequency.Once, item.AmountVaries);
-                    var detail = MatchingRules.BuiltinOccurrenceDetail(tx, occurrence, BankNames.AllNames(item.Name, item.BankNames, item.BankNamesLearned), ruleHit);
+                    var detail = MatchingRules.BuiltinOccurrenceDetail(tx, occurrence, names, ruleHit);
                     var auto = MatchingRules.BuiltinAuto(level, suggestion, ruleHit) && !row.AutoBlocked;
                     return new Decision(row, suggestion, suggestion.Confidence, detail, auto, false);
                 }
 
             case SuggestionKind.Category:
                 return new Decision(row, suggestion, suggestion.Confidence,
-                    MatchingRules.BuiltinCategoryDetail(suggestion, rulesByNorm.GetValueOrDefault(TransactionMatcher.NormalisePayee(tx.Payee, tx.Description))), false, false);
+                    MatchingRules.BuiltinCategoryDetail(suggestion, TransactionMatcher.FindRule(rulesByNorm, tx.Payee, tx.Description)), false, false);
 
             default:
                 return new Decision(row, suggestion, null, null, false, false);

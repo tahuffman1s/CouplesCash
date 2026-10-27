@@ -1061,4 +1061,10 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
   is hidden as `ignored/superseded` with `replaced_by` = that row, its confirmation reversed, and never reaches matching or To
   review; the same runs when an external account is mapped (`PUT /banks/accounts/{id}`) onto an account the other provider feeds.
   One `bank.deduplicated` event (actor null, `data: { accountId, source, count }`); `bank.synced.data.alreadyFromOtherProvider`.
+- **Built-in matcher across providers.** Payee rules are looked up under every key of a transaction (`TransactionMatcher.PayeeKeys`:
+  payee-else-description, description alone, payee alone), and the built-in auto-match precondition also holds when one of the
+  item's names (name, `bankNames`, `bankNamesLearned`) appears whole — every significant token — in the payee or the description
+  (`MatchingRules.NameContained`). Plaid rows carry `merchant_name` as payee next to the bank's wording; rules and names learned
+  from SimpleFIN rows keep auto-matching them. "Re-check matches now" (`POST /inbox/rematch`) applies this to rows already in
+  To review.
 

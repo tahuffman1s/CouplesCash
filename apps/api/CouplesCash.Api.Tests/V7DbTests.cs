@@ -610,6 +610,67 @@ public class V7DbTests
     }
 
     [DbFact]
+    public async Task A_bill_learned_from_simplefin_wording_is_auto_matched_from_plaids_wording()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
+        var plaid = new FakePlaid();
+        await using var sp = Services(connectionString, plaid: plaid);
+        Assert.True(sp.GetRequiredService<DbUpMigrator>().Run());
+
+        var ct = CancellationToken.None;
+        var now = DateTime.UtcNow;
+        var today = DateOnly.FromDateTime(now);
+        var users = sp.GetRequiredService<UserRepository>();
+        var households = sp.GetRequiredService<HouseholdRepository>();
+        var items = sp.GetRequiredService<RecurringRepository>();
+        var imports = sp.GetRequiredService<ImportRepository>();
+        var db = sp.GetRequiredService<NpgsqlDataSource>();
+        var sync = sp.GetRequiredService<BankSyncService>();
+
+        var user = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Tester", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var household = await households.CreateAsync(user.Id, "V7 DB plaid automatch", now, ct);
+        var householdId = household.Id;
+        try
+        {
+            // The bill learned SimpleFIN's wording ("NETFLIX COM", and a payee rule on it); its own name is not in the bank text.
+            RecurringItemRow streaming;
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                streaming = await items.CreateAsync(uow.Connection, householdId, user.Id,
+                    new RecurringFields("Streaming", Kind.Subscription, 1_549, null, null, Frequency.Monthly, today, null, false, null, null), now, ct);
+                await items.SetLearnedNamesAsync(uow.Connection, householdId, streaming.Id, ["NETFLIX COM"], now, ct);
+                await imports.UpsertRuleAsync(uow.Connection, householdId, "netflix com", null, streaming.Id, now, ct);
+                await uow.CommitAsync(ct);
+            }
+
+            // Plaid: a merchant name ("Netflix") and the bank's own wording with a phone number and state.
+            plaid.Page = $$"""
+                {
+                  "accounts": [ { "account_id": "acc-chk", "name": "Checking", "mask": "1234", "type": "depository",
+                                  "balances": { "available": 2345.67, "current": 2408.07, "iso_currency_code": "USD" } } ],
+                  "transactions": [
+                    { "transaction_id": "t-netflix", "account_id": "acc-chk", "amount": 15.49, "date": "{{today:yyyy-MM-dd}}", "name": "Netflix",
+                      "merchant_name": "Netflix", "original_description": "NETFLIX.COM 866-579-7172 CA", "pending": false }
+                  ],
+                  "total_transactions": 1
+                }
+                """;
+            await sync.PlaidLinkAsync(householdId, user.Id, "Tester", "public-good", "U.S. Bank", ct);
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+            var row = Assert.Single(await conn.QueryAsync<Guid>("SELECT id FROM imported_transactions WHERE household_id = @Id AND source = 'plaid'", new { Id = householdId }));
+            var matched = (await imports.GetAsync(conn, householdId, row, ct))!;
+            Assert.Equal(("confirmed", (Guid?)streaming.Id, true), (matched.Status, matched.ConfirmedItemId, matched.ConfirmedAuto));
+        }
+        finally
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = householdId });
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = @Id", new { Id = user.Id });
+        }
+    }
+
+    [DbFact]
     public async Task Starting_over_empties_the_household_but_keeps_both_people_and_the_couple()
     {
         var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;

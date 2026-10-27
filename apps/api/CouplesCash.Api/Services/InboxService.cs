@@ -448,8 +448,7 @@ public sealed class InboxService(
         var tx = ToMatch(row);
         var itemRows = await items.ListAsync(householdId, null, ct);
         var rulesByNorm = await RulesByNormAsync(conn, householdId, ct);
-        var norm = TransactionMatcher.NormalisePayee(row.Payee, row.Description);
-        rulesByNorm.TryGetValue(norm, out var rule);
+        var rule = TransactionMatcher.FindRule(rulesByNorm, row.Payee, row.Description);
 
         var list = await occurrences.ListAsync(householdId, itemRows, row.PostedOn.AddDays(-days), row.PostedOn.AddDays(days), ct);
         var candidates = list
@@ -495,7 +494,7 @@ public sealed class InboxService(
                 || r is { Source: ImportRepository.AddedSource, Status: "confirmed", ConfirmedItemId: null, IsHidden: false })
             .Select(r =>
             {
-                var ruleHit = rulesByNorm.TryGetValue(TransactionMatcher.NormalisePayee(r.Payee, r.Description), out var rule) && rule.ItemId == item.Id;
+                var ruleHit = TransactionMatcher.FindRule(rulesByNorm, r.Payee, r.Description) is { } rule && rule.ItemId == item.Id;
                 return (Row: r, Score: TransactionMatcher.CandidateScore(item.Kind, item.AmountCents, dueDate, ToMatch(r), days, ruleHit));
             })
             .Where(x => x.Score is not null)

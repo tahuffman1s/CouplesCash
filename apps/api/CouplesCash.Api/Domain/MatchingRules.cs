@@ -140,6 +140,31 @@ public static class MatchingRules
         return string.Join(" · ", parts);
     }
 
+    /// <summary>
+    /// Built-in auto-match by name: one of the item's names (item name, bank names, learned names) appears <b>whole</b> in the
+    /// transaction — every significant token of the name is in its payee or its description ("Oakwood Property" in "ACH DEBIT OAKWOOD
+    /// PROPERTY MGMT RENT", "NETFLIX COM" in "NETFLIX.COM 866-579-7172"). Amount and date must still match the occurrence.
+    /// </summary>
+    public static bool NameContained(string? payee, string? description, IEnumerable<string> names)
+    {
+        var texts = TransactionMatcher.PayeeKeys(payee, description).Select(Tokens).Where(t => t.Count > 0).ToList();
+        if (texts.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var name in names)
+        {
+            var tokens = Tokens(TransactionMatcher.NormalisePayee(name, null));
+            if (tokens.Count > 0 && texts.Any(t => tokens.All(t.Contains)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Best overlap coefficient (×100) between the transaction's significant tokens and any name's.</summary>
     public static int NameOverlap(string transactionNorm, IEnumerable<string> names)
     {

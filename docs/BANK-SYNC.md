@@ -252,7 +252,10 @@ with the reason, and the undo.
 
 **When the matcher is down.** The API never waits on it: if `matcher` is unreachable, slow or answers an error, the
 API uses its **built-in matcher** (the v5 C# rules: exact amount ±2 % / $1, ±5 days, learned payees) and logs a
-warning. Results are marked `engine: builtin`, and the matcher status (`GET /v1/matcher/status`) says which engine
+warning. It auto-pays a bill when a learned payee rule names it — looked up by the payee **and** by the description, so
+a rule learned from SimpleFIN's wording still hits a Plaid row that also carries a merchant name — or when one of the
+bill's names (name, bank names, learned names) appears whole in the payee or the description ("NETFLIX COM" in
+"NETFLIX.COM 866-579-7172 CA"). Results are marked `engine: builtin`, and the matcher status (`GET /v1/matcher/status`) says which engine
 ran last. Nothing else
 changes, and the next sweep re-scores with the fuzzy engine once it is back. `make logs S=matcher` shows its log
 (request counts and timings only — never descriptions).

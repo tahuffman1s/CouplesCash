@@ -201,3 +201,31 @@ public class ProviderTwinsTests
         Assert.Empty(ProviderTwins.Match([R(0, 0)], [R(0, 0)]));
     }
 }
+
+/// <summary>v7: the built-in matcher recognises a bill from either provider's wording.</summary>
+public class ProviderWordingTests
+{
+    [Fact]
+    public void A_rule_learned_on_the_description_still_hits_when_a_merchant_name_is_sent_too()
+    {
+        var itemId = Guid.CreateVersion7();
+        var rules = new Dictionary<string, PayeeRule>(StringComparer.Ordinal) { ["oakwood property mgmt rent"] = new("oakwood property mgmt rent", null, itemId, 3) };
+        var tx = new MatchTransaction(Guid.CreateVersion7(), null, new DateOnly(2026, 11, 1), -185_000, "ACH DEBIT OAKWOOD PROPERTY MGMT RENT", "Oakwood");
+        Assert.True(TransactionMatcher.RuleMatchesItem(tx, itemId, rules));
+        Assert.Equal(itemId, TransactionMatcher.FindRule(rules, tx.Payee, tx.Description)?.ItemId);
+        Assert.Equal(["oakwood", "oakwood property mgmt rent"], TransactionMatcher.PayeeKeys(tx.Payee, tx.Description));
+    }
+
+    [Fact]
+    public void A_bills_name_counts_when_all_its_words_are_in_the_payee_or_the_description()
+    {
+        Assert.True(MatchingRules.NameContained("Netflix", "NETFLIX.COM 866-579-7172 CA", ["Streaming", "NETFLIX COM"]));
+        Assert.True(MatchingRules.NameContained(null, "ACH DEBIT OAKWOOD PROPERTY MGMT RENT", ["Oakwood Property"]));
+        Assert.True(MatchingRules.NameContained("Netflix", "NFLX", ["Netflix"]));
+        // every word of the name, as whole words
+        Assert.False(MatchingRules.NameContained(null, "CARD PURCHASE SHELL OIL", ["Car Insurance"]));
+        Assert.False(MatchingRules.NameContained(null, "CITY WATER UTIL", ["Water Softener"]));
+        Assert.False(MatchingRules.NameContained(null, "", ["Rent"]));
+        Assert.False(MatchingRules.NameContained("Netflix", "NETFLIX.COM", []));
+    }
+}
