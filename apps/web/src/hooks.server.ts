@@ -5,6 +5,7 @@ import { decodeJwt } from '#lib/server/jwt.ts';
 import { ACCESS_COOKIE, REFRESH_COOKIE, isSecure, readTheme } from '#lib/server/cookies.ts';
 import { refreshSession } from '#lib/server/api.ts';
 import { legacyRedirect } from '#lib/utils/redirects.ts';
+import { themeHead } from '#lib/utils/theme-colors.ts';
 
 const PUBLIC_PATHS = new Set([
 	'/login',
@@ -77,7 +78,8 @@ export const handle: Handle = async ({ event, resolve }) => {
 			: ` data-theme="${event.locals.theme === 'dark' ? 'couplescash-dark' : 'couplescash'}"`;
 
 	const response = await resolve(event, {
-		transformPageChunk: ({ html }) => html.replace('%theme%', themeAttr)
+		transformPageChunk: ({ html }) =>
+			html.replace('%theme%', themeAttr).replace('%theme-head%', themeHead(event.locals.theme))
 	});
 
 	// 5. Security headers (CSP is emitted by SvelteKit from the `csp` config with nonces)

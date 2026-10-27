@@ -121,7 +121,7 @@ PLAN-V6 §4–§5. The app is organised so every tab has one job:
   `X-Requested-With: CouplesCash` (403 otherwise) and strips hop-by-hop headers. Used only for
   calendar month navigation, mark-paid and quick balance updates; everything else is `load` +
   form actions with progressive enhancement.
-- **PWA**: `static/manifest.webmanifest`, icons in `static/icons`, `src/service-worker.ts`
+- **PWA**: the manifest is served by `src/routes/manifest.webmanifest/+server.ts` (its colours follow the theme: `?scheme=dark|light`, so an installed app's Android navigation bar matches), icons in `static/icons`, `src/service-worker/index.ts`
   (precache app shell, network-first navigations with `/offline` fallback, never caches `/api/`).
 - **Charts**: hand-rolled SVG (`src/lib/charts`): `Donut.svelte`, `Sparkline.svelte`, `KindBars.svelte`,
   `ProgressRing.svelte` (goals), `BudgetBar.svelte` (budget meters), `GoalSpark.svelte` (history +

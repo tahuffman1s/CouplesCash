@@ -3,6 +3,7 @@
 	import { enhance } from '$app/forms';
 	import type { Theme } from '#lib/server/cookies.ts';
 	import Icon from './Icon.svelte';
+	import { applyThemeChrome } from '#lib/utils/theme-colors.ts';
 
 	let { theme }: { theme: Theme } = $props();
 	let current = $state<Theme>(untrack(() => theme));
@@ -19,6 +20,7 @@
 		const html = document.documentElement;
 		if (t === 'system') delete html.dataset.theme;
 		else html.dataset.theme = t === 'dark' ? 'couplescash-dark' : 'couplescash';
+		applyThemeChrome(t);
 		const secure = location.protocol === 'https:' ? '; Secure' : '';
 		document.cookie = `theme=${t}; Path=/; Max-Age=31536000; SameSite=Lax${secure}`;
 	}
