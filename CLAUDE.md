@@ -136,8 +136,9 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
   bank row arrives, which takes the payment over (`PayFromBankAsync`; only `source = 'bank'` closes an occurrence for
   matching), so a tick never moves "Left on …". Sync window `today − 30 … today + 14`, ≤ 44 days per Bridge request.
   Transactions added by hand (`+` → Transaction, `POST /v1/transactions`) are `imported_transactions` rows with `source = 'added'`
-  (pending, confirmed, never reviewed/matched): they count in the plan's available (`addedCents`) until `Domain/ManualMatcher.cs` pairs
-  them with the bank's copy in a sync (`AddedTransactionService.ReplaceFromBankAsync` → ignored/superseded, `replaced_by`).
+  (pending, confirmed, never reviewed or auto-matched): they count in the plan's available (`addedCents`) until `Domain/ManualMatcher.cs`
+  pairs them with the bank's copy in a sync (`AddedTransactionService.ReplaceFromBankAsync` → ignored/superseded, `replaced_by`). A person
+  can match one to a bill (`/inbox/{id}/match`, bill-side link; payment source bank); the bank's copy takes that payment over.
   Settings → Household → Start over (`POST /couple/reset`, type RESET) wipes every household data table in
   `HouseholdRepository.ResetDataAsync` — add any new household table there. The web has three tabs (This week ·
   Transactions · Bills) + Settings; removed screens redirect to `/week` — don't re-add them without a plan change.

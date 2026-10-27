@@ -184,11 +184,13 @@ public sealed class ImportRepository(NpgsqlDataSource db)
         return rows.ToList();
     }
 
-    /// <summary>The bank's own row arrived: the added one is hidden (ignored / superseded) and points at it.</summary>
+    /// <summary>The bank's own row arrived: the added one is hidden (ignored / superseded) and points at it; a bill it paid has moved to the bank row.</summary>
     public Task<int> ReplaceAddedAsync(NpgsqlConnection conn, Guid householdId, Guid addedId, Guid bankId, CancellationToken ct) =>
         conn.ExecuteAsync(Cmd(
             """
-            UPDATE imported_transactions SET status = 'ignored', ignore_reason = 'superseded', replaced_by = @BankId
+            UPDATE imported_transactions
+            SET status = 'ignored', ignore_reason = 'superseded', replaced_by = @BankId,
+                confirmed_item_id = NULL, confirmed_due_date = NULL, confirmed_auto = false
             WHERE id = @Id AND household_id = @HouseholdId AND source = 'added' AND ignore_reason IS NULL
             """,
             new { Id = addedId, HouseholdId = householdId, BankId = bankId }, ct));
@@ -402,15 +404,19 @@ public sealed class ImportRepository(NpgsqlDataSource db)
     /// <summary>
     /// Back to review with every confirmation cleared. v7: a row on a <c>fun</c> account never goes to To review — it returns to
     /// <c>confirmed</c> (nothing attached) instead, so every restore / unmatch / unpair path keeps personal fun money out of the inbox.
+    /// A transaction added by hand likewise stays confirmed and keeps who added it.
     /// </summary>
     public Task<int> RestoreAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct) =>
         conn.ExecuteAsync(Cmd(
             """
             UPDATE imported_transactions
-            SET status = CASE WHEN EXISTS (SELECT 1 FROM accounts fa WHERE fa.id = imported_transactions.account_id AND fa.role = 'fun')
+            SET status = CASE WHEN imported_transactions.source = 'added'
+                                   OR EXISTS (SELECT 1 FROM accounts fa WHERE fa.id = imported_transactions.account_id AND fa.role = 'fun')
                               THEN 'confirmed' ELSE 'pending' END,
                 confirmed_expense_id = NULL, confirmed_item_id = NULL, confirmed_due_date = NULL, confirmed_auto = false,
-                reviewed_by = NULL, reviewed_at = NULL, ignore_reason = NULL, transfer_peer_id = NULL, transfer_auto = false
+                reviewed_by = CASE WHEN imported_transactions.source = 'added' THEN reviewed_by END,
+                reviewed_at = CASE WHEN imported_transactions.source = 'added' THEN reviewed_at END,
+                ignore_reason = NULL, transfer_peer_id = NULL, transfer_auto = false
             WHERE id = @Id AND household_id = @HouseholdId
             """,
             new { Id = id, HouseholdId = householdId }, ct));

@@ -27,6 +27,7 @@
 		candidateSelectable,
 		isTransfer,
 		kindForAmount,
+		matchedTo,
 		scoreBar,
 		txState
 	} from '#lib/utils/transactions.ts';
@@ -68,7 +69,7 @@
 	const manual = $derived(
 		!!current && (('kind' in current && current.kind === 'manual') || current.source === 'manual')
 	);
-	// added by hand, waiting for the bank's copy: the only action is to delete it
+	// added by hand, waiting for the bank's copy: it can pay a bill (match / unlink) or be deleted
 	const added = $derived(current?.source === 'added');
 	const outflow = $derived((current?.amountCents ?? 0) < 0);
 	const info = $derived(current ? txState(current) : null);
@@ -116,11 +117,15 @@
 		const wanted =
 			initial !== undefined
 				? initial
-				: row.status === 'pending' && row.amountCents < 0
-					? 'expense'
-					: row.status === 'pending'
-						? 'match'
-						: null;
+				: row.source === 'added'
+					? row.ignoreReason || matchedTo(row)
+						? null
+						: 'match'
+					: row.status === 'pending' && row.amountCents < 0
+						? 'expense'
+						: row.status === 'pending'
+							? 'match'
+							: null;
 		section = wanted;
 		if (wanted === 'match' || wanted === 'transfer') void loadCandidates(row.id);
 	});
@@ -290,6 +295,15 @@
 
 	function unmatch() {
 		const label = undoLabel;
+		if (current?.source === 'added') {
+			const name = matchedTo(current)?.itemName ?? 'the bill';
+			void act(
+				{ status: 'confirmed', confirmed: null, match: null },
+				(row) => post(`/inbox/${row.id}/unmatch`),
+				() => `Unlinked from ${name}`
+			);
+			return;
+		}
 		void act(
 			{
 				status: 'pending',
@@ -377,6 +391,97 @@
 	</button>
 {/snippet}
 
+{#snippet matchAction()}
+	<li>
+		{@render actionButton(
+			'match',
+			'receipt',
+			'Match to a bill or income',
+			outflow ? 'Mark a bill or subscription paid with this' : 'Mark an income received'
+		)}
+		{#if section === 'match'}
+			<div class="px-2 pt-1 pb-3" data-testid="match-candidates">
+				{#if candidatesLoading}
+					<div class="h-14 w-full skeleton rounded-xl"></div>
+				{:else if candidatesError}
+					<p class="py-3 text-center text-sm text-base-content/60">Could not load candidates.</p>
+				{:else if occurrences.length === 0}
+					<p class="py-3 text-center text-sm text-base-content/60">
+						Nothing {outflow ? 'due' : 'expected'} within 30 days of {formatDate(
+							current?.postedOn ?? ''
+						)}.
+						{#if !added}
+							<button type="button" class="link link-primary" onclick={() => toggle('bill')}
+								>Create a bill from this</button
+							>
+						{/if}
+					</p>
+				{:else}
+					<ul class="divide-y divide-base-300/60" aria-label="Bills and income to match">
+						{#each occurrences as c (`${c.itemId}:${c.dueDate}`)}
+							{@const bar = scoreBar(c.score)}
+							{@const selectable = candidateSelectable(c)}
+							<li>
+								<button
+									type="button"
+									class="flex min-h-14 w-full items-center gap-3 py-2 text-left disabled:opacity-50"
+									disabled={!selectable || busy}
+									aria-label="Match to {c.itemName}, due {formatDate(c.dueDate)}{c.paid &&
+									!c.paidByThis
+										? ', already paid'
+										: ''}"
+									data-testid="match-candidate"
+									onclick={() => pickOccurrence(c)}
+								>
+									<span
+										class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-base-200"
+									>
+										<Icon name={KIND_ICON[c.kind]} size={16} />
+									</span>
+									<span class="min-w-0 flex-1">
+										<span class="flex items-center gap-1.5">
+											<span class="truncate font-medium">{c.itemName}</span>
+											{#if c.paidByThis}
+												<span class="badge badge-xs badge-success">this one</span>
+											{:else if c.paid}
+												<span class="badge badge-ghost badge-xs">already paid</span>
+											{/if}
+										</span>
+										<span class="block text-xs text-base-content/60"
+											>Due {formatDate(c.dueDate)}</span
+										>
+										<span
+											class="mt-1 block h-1.5 w-full max-w-32 overflow-hidden rounded-full bg-base-300/60"
+											role="meter"
+											aria-valuemin="0"
+											aria-valuemax="100"
+											aria-valuenow={bar.percent}
+											aria-label={bar.label}
+											title={bar.label}
+										>
+											<span
+												class="block h-full rounded-full {bar.tone === 'strong'
+													? 'bg-success'
+													: bar.tone === 'good'
+														? 'bg-secondary'
+														: 'bg-base-content/30'}"
+												style:width="{bar.percent}%"
+											></span>
+										</span>
+									</span>
+									<span class="shrink-0 text-sm font-semibold tabular"
+										>{formatMoney(c.amountCents)}</span
+									>
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+		{/if}
+	</li>
+{/snippet}
+
 <BottomSheet bind:open {title}>
 	{#if current && info}
 		<div class="flex flex-col gap-4" data-testid="transaction-sheet" data-id={current.id}>
@@ -454,9 +559,37 @@
 				<p class="text-sm text-base-content/70">
 					{current.ignoreReason === 'superseded'
 						? 'The bank showed its own copy, so this one no longer counts.'
-						: 'You added this. It counts in This week until the bank shows its own copy, which then takes its place.'}
+						: matchedTo(current)
+							? `You added this and it pays ${matchedTo(current)?.itemName}. When the bank shows its own copy, that one takes its place and pays the bill.`
+							: 'You added this. It counts in This week until the bank shows its own copy, which then takes its place. If it paid a bill, match it below so it isn’t counted twice.'}
 				</p>
 				{#if current.ignoreReason !== 'superseded'}
+					<ul class="flex flex-col gap-1" aria-label="Actions">
+						{@render matchAction()}
+						{#if matchedTo(current)}
+							<li>
+								<button
+									type="button"
+									class={actionClass}
+									disabled={busy}
+									onclick={unmatch}
+									data-testid="unlink-added"
+								>
+									<span
+										class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-base-200 text-base-content/80"
+									>
+										<Icon name="undo-2" size={18} />
+									</span>
+									<span class="min-w-0 flex-1">
+										<span class="block">Unlink from {matchedTo(current)?.itemName}</span>
+										<span class="block text-xs font-normal text-base-content/60"
+											>The bill goes back to unpaid</span
+										>
+									</span>
+								</button>
+							</li>
+						{/if}
+					</ul>
 					<button
 						type="button"
 						class="btn min-h-12 rounded-full border-error/40 btn-outline text-error"
@@ -478,94 +611,7 @@
 			{:else}
 				<ul class="flex flex-col gap-1" aria-label="Actions">
 					<!-- Match to a bill or income -->
-					<li>
-						{@render actionButton(
-							'match',
-							'receipt',
-							'Match to a bill or income',
-							outflow ? 'Mark a bill or subscription paid with this' : 'Mark an income received'
-						)}
-						{#if section === 'match'}
-							<div class="px-2 pt-1 pb-3" data-testid="match-candidates">
-								{#if candidatesLoading}
-									<div class="h-14 w-full skeleton rounded-xl"></div>
-								{:else if candidatesError}
-									<p class="py-3 text-center text-sm text-base-content/60">
-										Could not load candidates.
-									</p>
-								{:else if occurrences.length === 0}
-									<p class="py-3 text-center text-sm text-base-content/60">
-										Nothing {outflow ? 'due' : 'expected'} within 30 days of {formatDate(
-											current.postedOn
-										)}.
-										<button type="button" class="link link-primary" onclick={() => toggle('bill')}
-											>Create a bill from this</button
-										>
-									</p>
-								{:else}
-									<ul class="divide-y divide-base-300/60" aria-label="Bills and income to match">
-										{#each occurrences as c (`${c.itemId}:${c.dueDate}`)}
-											{@const bar = scoreBar(c.score)}
-											{@const selectable = candidateSelectable(c)}
-											<li>
-												<button
-													type="button"
-													class="flex min-h-14 w-full items-center gap-3 py-2 text-left disabled:opacity-50"
-													disabled={!selectable || busy}
-													aria-label="Match to {c.itemName}, due {formatDate(c.dueDate)}{c.paid &&
-													!c.paidByThis
-														? ', already paid'
-														: ''}"
-													data-testid="match-candidate"
-													onclick={() => pickOccurrence(c)}
-												>
-													<span
-														class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-base-200"
-													>
-														<Icon name={KIND_ICON[c.kind]} size={16} />
-													</span>
-													<span class="min-w-0 flex-1">
-														<span class="flex items-center gap-1.5">
-															<span class="truncate font-medium">{c.itemName}</span>
-															{#if c.paidByThis}
-																<span class="badge badge-xs badge-success">this one</span>
-															{:else if c.paid}
-																<span class="badge badge-ghost badge-xs">already paid</span>
-															{/if}
-														</span>
-														<span class="block text-xs text-base-content/60"
-															>Due {formatDate(c.dueDate)}</span
-														>
-														<span
-															class="mt-1 block h-1.5 w-full max-w-32 overflow-hidden rounded-full bg-base-300/60"
-															role="meter"
-															aria-valuemin="0"
-															aria-valuemax="100"
-															aria-valuenow={bar.percent}
-															aria-label={bar.label}
-															title={bar.label}
-														>
-															<span
-																class="block h-full rounded-full {bar.tone === 'strong'
-																	? 'bg-success'
-																	: bar.tone === 'good'
-																		? 'bg-secondary'
-																		: 'bg-base-content/30'}"
-																style:width="{bar.percent}%"
-															></span>
-														</span>
-													</span>
-													<span class="shrink-0 text-sm font-semibold tabular"
-														>{formatMoney(c.amountCents)}</span
-													>
-												</button>
-											</li>
-										{/each}
-									</ul>
-								{/if}
-							</div>
-						{/if}
-					</li>
+					{@render matchAction()}
 
 					<!-- Confirm as expense (money out only) -->
 					{#if outflow}

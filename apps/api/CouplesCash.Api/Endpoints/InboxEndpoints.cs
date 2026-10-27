@@ -275,18 +275,20 @@ public static class InboxEndpoints
         var householdId = principal.GetHouseholdId();
         await using var conn = await db.OpenConnectionAsync(ct);
         var row = await imports.GetAsync(conn, householdId, id, ct);
-        if (row is null || row.Source == ImportRepository.AddedSource)
+        if (row is null)
         {
             return TypedResults.NotFound();
         }
 
-        return TypedResults.Ok(await inbox.CandidatesAsync(conn, householdId, row, days, ct));
+        var candidates = await inbox.CandidatesAsync(conn, householdId, row, days, ct);
+        // added by hand: it can pay a bill, never be a transfer leg
+        return TypedResults.Ok(row.Source == ImportRepository.AddedSource ? candidates with { TransferPeers = [] } : candidates);
     }
 
     private static Task<Results<Ok<InboxItemDto>, NotFound, ValidationProblem, ProblemHttpResult>> Match(
         Guid id, InboxMatchRequest request, ClaimsPrincipal principal, NpgsqlDataSource db, ImportRepository imports, HouseholdRepository households, InboxService inbox, CancellationToken ct) =>
-        Act(id, principal, db, imports, households, ct,
-            (uow, hh, user, name, currency, row) => inbox.MatchAsync(uow, hh, user, name, currency, row, request.ItemId!.Value, request.DueDate!.Value, quiet: false, ct));
+        Act(id, principal, db, imports, households, ct, allowAdded: true,
+            action: (uow, hh, user, name, currency, row) => inbox.MatchAsync(uow, hh, user, name, currency, row, request.ItemId!.Value, request.DueDate!.Value, quiet: false, ct));
 
     private static Task<Results<Ok<InboxItemDto>, NotFound, ValidationProblem, ProblemHttpResult>> Transfer(
         Guid id, InboxTransferRequest request, ClaimsPrincipal principal, NpgsqlDataSource db, ImportRepository imports, HouseholdRepository households, InboxService inbox, CancellationToken ct) =>
@@ -295,8 +297,8 @@ public static class InboxEndpoints
 
     private static Task<Results<Ok<InboxItemDto>, NotFound, ValidationProblem, ProblemHttpResult>> Unmatch(
         Guid id, ClaimsPrincipal principal, NpgsqlDataSource db, ImportRepository imports, HouseholdRepository households, InboxService inbox, CancellationToken ct) =>
-        Act(id, principal, db, imports, households, ct,
-            (uow, hh, user, name, currency, row) => inbox.UnmatchAsync(uow, hh, user, name, currency, row, ct));
+        Act(id, principal, db, imports, households, ct, allowAdded: true,
+            action: (uow, hh, user, name, currency, row) => inbox.UnmatchAsync(uow, hh, user, name, currency, row, ct));
 
     /// <summary>Like <see cref="Review"/> but maps <see cref="InboxError.Conflict"/> to 409.</summary>
     private static async Task<Results<Ok<InboxItemDto>, NotFound, ValidationProblem, ProblemHttpResult>> Act(
@@ -306,7 +308,8 @@ public static class InboxEndpoints
         ImportRepository imports,
         HouseholdRepository households,
         CancellationToken ct,
-        Func<UnitOfWork, Guid, Guid, string?, string, ImportedTransactionRow, Task<InboxError?>> action)
+        Func<UnitOfWork, Guid, Guid, string?, string, ImportedTransactionRow, Task<InboxError?>> action,
+        bool allowAdded = false)
     {
         var householdId = principal.GetHouseholdId();
         var currency = await households.CurrencyAsync(householdId, ct);
@@ -314,7 +317,7 @@ public static class InboxEndpoints
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
         await imports.LockAsync(uow.Connection, householdId, id, ct);
         var row = await imports.GetAsync(uow.Connection, householdId, id, ct);
-        if (row is null || row.Source == ImportRepository.AddedSource)
+        if (row is null || (row.Source == ImportRepository.AddedSource && !allowAdded))
         {
             return TypedResults.NotFound();
         }

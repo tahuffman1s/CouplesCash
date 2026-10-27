@@ -252,6 +252,131 @@ public class V7DbTests
     }
 
     [DbFact]
+    public async Task A_transaction_added_by_hand_can_pay_a_bill_and_the_banks_copy_takes_the_payment_over()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
+        var json = Feed();
+        await using var sp = Services(connectionString, () => json);
+        Assert.True(sp.GetRequiredService<DbUpMigrator>().Run());
+
+        var ct = CancellationToken.None;
+        var now = DateTime.UtcNow;
+        var today = DateOnly.FromDateTime(now);
+        var users = sp.GetRequiredService<UserRepository>();
+        var households = sp.GetRequiredService<HouseholdRepository>();
+        var accounts = sp.GetRequiredService<AccountRepository>();
+        var banks = sp.GetRequiredService<BankRepository>();
+        var imports = sp.GetRequiredService<ImportRepository>();
+        var items = sp.GetRequiredService<RecurringRepository>();
+        var db = sp.GetRequiredService<NpgsqlDataSource>();
+        var sync = sp.GetRequiredService<BankSyncService>();
+        var added = sp.GetRequiredService<AddedTransactionService>();
+        var inbox = sp.GetRequiredService<InboxService>();
+        var plans = sp.GetRequiredService<PlanService>();
+
+        var user = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Tester", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var household = await households.CreateAsync(user.Id, "V7 DB added bill", now, ct);
+        var householdId = household.Id;
+        try
+        {
+            AccountRow checking;
+            BankLinkRow link;
+            RecurringItemRow netflix, gym;
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                checking = await accounts.CreateAsync(uow.Connection, householdId, user.Id, new AccountFields("US Bank", "U.S. Bank", AccountType.Checking, 0, "#000000", "landmark", null), now, ct);
+                var savings = await accounts.CreateAsync(uow.Connection, householdId, user.Id, new AccountFields("Savings", "U.S. Bank", AccountType.Savings, 0, "#000000", "piggy-bank", null), now, ct);
+                link = await banks.InsertLinkAsync(uow.Connection, householdId, user.Id, "U.S. Bank", sp.GetRequiredService<DataProtector>().Protect("https://user:pass@bridge.example/simplefin"), now, ct);
+                var set = SimpleFinParser.Parse(json, today);
+                await banks.SetMappingAsync(uow.Connection, householdId, (await banks.UpsertExternalAccountAsync(uow.Connection, householdId, link.Id, set.Accounts[0], now, ct)).Id, checking.Id, now, ct);
+                await banks.SetMappingAsync(uow.Connection, householdId, (await banks.UpsertExternalAccountAsync(uow.Connection, householdId, link.Id, set.Accounts[1], now, ct)).Id, savings.Id, now, ct);
+                await accounts.SetRoleAsync(uow.Connection, householdId, checking.Id, AccountRole.Bills, null, now, ct);
+                netflix = await items.CreateAsync(uow.Connection, householdId, user.Id,
+                    new RecurringFields("Netflix", Kind.Subscription, 1_549, null, checking.Id, Frequency.Monthly, today, null, false, null, null), now, ct);
+                gym = await items.CreateAsync(uow.Connection, householdId, user.Id,
+                    new RecurringFields("Gym", Kind.Bill, 4_000, null, checking.Id, Frequency.Monthly, today, null, false, null, null), now, ct);
+                await uow.CommitAsync(ct);
+            }
+
+            await sync.SyncAsync(link, user.Id, "Tester", manual: true, ct);
+            async Task<PlanDto> Plan() => (await plans.GetAsync(householdId, null, ct))!;
+            async Task<PaymentRow?> Payment(Guid itemId)
+            {
+                await using var conn = await db.OpenConnectionAsync(ct);
+                return await items.GetPaymentAsync(conn, itemId, today, ct);
+            }
+
+            async Task<InboxError?> Match(Guid id, RecurringItemRow item, Func<UnitOfWork, ImportedTransactionRow, Task<InboxError?>>? action = null)
+            {
+                await using var uow = await db.BeginUnitOfWorkAsync(ct);
+                var row = (await imports.GetAsync(uow.Connection, householdId, id, ct))!;
+                var error = action is null
+                    ? await inbox.MatchAsync(uow, householdId, user.Id, "Tester", "USD", row, item.Id, today, quiet: false, ct)
+                    : await action(uow, row);
+                await uow.CommitAsync(ct);
+                return error;
+            }
+
+            var before = await Plan();
+            Assert.Equal(1_549 + 4_000, before.BillsOutCents);
+
+            // Netflix paid this morning, added by hand: before it is linked the plan counts it twice (added row + unpaid bill) …
+            var paid = (await added.AddAsync(householdId, user.Id, "Tester", checking.Id, -1_549, "Netflix", today, force: false, ct)).Row!;
+            Assert.Equal(before.LeftAtEndCents - 1_549, (await Plan()).LeftAtEndCents);
+
+            // … linked to the bill it is counted once: the bill is paid (source bank), the added row stays added (confirmed, pending).
+            Assert.Null(await Match(paid.Id, netflix));
+            var plan = await Plan();
+            Assert.Equal((4_000L, before.LeftAtEndCents), (plan.BillsOutCents, plan.LeftAtEndCents));
+            Assert.Equal(PaymentSource.Bank, (await Payment(netflix.Id))!.Source);
+            var linked = (await imports.GetAsync(householdId, paid.Id, ct))!;
+            Assert.Equal(("added", "confirmed", (Guid?)netflix.Id), (linked.Source, linked.Status, linked.ConfirmedItemId));
+
+            // Unmatch: the bill is unpaid again and the row is still added (never to review), then link it again.
+            Assert.Null(await Match(paid.Id, netflix, (uow, row) => inbox.UnmatchAsync(uow, householdId, user.Id, "Tester", "USD", row, ct)));
+            var unlinked = (await imports.GetAsync(householdId, paid.Id, ct))!;
+            Assert.Equal(("confirmed", (Guid?)null, (Guid?)user.Id), (unlinked.Status, unlinked.ConfirmedItemId, unlinked.ReviewedBy));
+            Assert.Null(await Payment(netflix.Id));
+            Assert.Null(await Match(paid.Id, netflix));
+
+            // The bank's copy arrives: it replaces the added row and takes the payment over (bank amount, learned name).
+            var u = Unix(today).ToString(CultureInfo.InvariantCulture);
+            json = json.Replace(
+                "{ \"id\": \"t-payroll\"",
+                "{ \"id\": \"p-netflix\", \"posted\": " + u + ", \"amount\": \"-15.49\", \"description\": \"NETFLIX.COM\", \"pending\": true },\n                    { \"id\": \"t-payroll\"",
+                StringComparison.Ordinal);
+            await sync.SyncAsync(await banks.GetLinkAsync(householdId, link.Id, ct) ?? link, user.Id, "Tester", manual: true, ct);
+            await using (var conn = await db.OpenConnectionAsync(ct))
+            {
+                var replaced = (await imports.GetAsync(conn, householdId, paid.Id, ct))!;
+                Assert.Equal(("ignored", "superseded", (Guid?)null), (replaced.Status, replaced.IgnoreReason, replaced.ConfirmedItemId));
+                var bankId = await conn.ExecuteScalarAsync<Guid>("SELECT replaced_by FROM imported_transactions WHERE id = @Id", new { paid.Id });
+                var bank = (await imports.GetAsync(conn, householdId, bankId, ct))!;
+                Assert.Equal(("confirmed", (Guid?)netflix.Id, (DateOnly?)today, (Guid?)user.Id), (bank.Status, bank.ConfirmedItemId, bank.ConfirmedDueDate, bank.ReviewedBy));
+                Assert.Equal(bankId, (await imports.FindConfirmedForOccurrenceAsync(conn, householdId, netflix.Id, today, ct))!.Id);
+            }
+
+            Assert.Equal(PaymentSource.Bank, (await Payment(netflix.Id))!.Source);
+            Assert.Contains((await items.GetAsync(householdId, netflix.Id, ct))!.BankNamesLearned, n => n.Contains("netflix", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(4_000, (await Plan()).BillsOutCents);
+
+            // A linked added row that is deleted leaves its bill unpaid.
+            var gymPaid = (await added.AddAsync(householdId, user.Id, "Tester", checking.Id, -4_000, "Gym", today, force: false, ct)).Row!;
+            Assert.Null(await Match(gymPaid.Id, gym));
+            Assert.Equal(0, (await Plan()).BillsOutCents);
+            Assert.True(await added.DeleteAsync(householdId, user.Id, "Tester", gymPaid.Id, ct));
+            Assert.Null(await Payment(gym.Id));
+            Assert.Equal(4_000, (await Plan()).BillsOutCents);
+        }
+        finally
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = householdId });
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = @Id", new { Id = user.Id });
+        }
+    }
+
+    [DbFact]
     public async Task Starting_over_empties_the_household_but_keeps_both_people_and_the_couple()
     {
         var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;

@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import {
+	addBill,
 	addTransaction,
 	bankSync,
 	hydrated,
@@ -83,6 +84,61 @@ test('a transaction added by hand counts until the bank shows it, then the bank 
 			.filter({ hasText: 'Starbucks' })
 			.filter({ hasText: 'Added by you' })
 	).toHaveCount(0);
+});
+
+/** "$2,345.67" / "−$60.00" → cents */
+const cents = (text: string | null) =>
+	Math.round(Number((text ?? '').replace(/[^0-9.]/g, '')) * 100) *
+	(/^[−-]/.test(text?.trim() ?? '') ? -1 : 1);
+
+test('a transaction added by hand can pay a bill, so it is counted once', async ({ page }) => {
+	await registerWithHousehold(page, 'Travis');
+	await skipUnlessMockBridge(page);
+	const today = todayIso();
+	await addBill(page, { name: 'Water', amount: '61.37', firstDue: today });
+	await setupHousehold(page, { payday: weekdayOf(today) });
+	const left = page.getByTestId('left-on');
+	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$61.37');
+	const before = cents(await left.textContent());
+
+	// paid this morning, added by hand: until it is linked the bill is counted too
+	await addTransaction(page, { amount: '-61.37', description: 'City water' });
+	await expect(left).toHaveText(usd(before - 6137));
+
+	// link it from its sheet: the bill is paid by it, the plan counts it once
+	await page.goto('/transactions');
+	const row = () =>
+		page.getByTestId('pending-section').getByTestId('tx-row').filter({ hasText: 'City water' });
+	await row().click();
+	const sheet = page.getByTestId('transaction-sheet');
+	await expect(sheet.getByTestId('sheet-state')).toHaveText('Added by you · waiting for the bank');
+	await sheet.getByTestId('match-candidate').filter({ hasText: 'Water' }).click();
+	await expect(page.getByText('Matched to Water')).toBeVisible();
+	await expect(row()).toContainText('Water · added');
+	await page.goto('/week');
+	await expect(left).toHaveText(usd(before));
+	await expect(page.getByTestId('plan-amount-bills')).toHaveText('$0.00');
+
+	// unlink: the bill is unpaid again (and counted again)
+	await page.goto('/transactions');
+	await row().click();
+	await expect(sheet.getByTestId('sheet-state')).toContainText('Paid Water');
+	await sheet.getByTestId('unlink-added').click();
+	await expect(page.getByText('Unlinked from Water')).toBeVisible();
+	await page.goto('/week');
+	await expect(left).toHaveText(usd(before - 6137));
+
+	// link it again, then delete it: the bill goes back to unpaid
+	await page.goto('/transactions');
+	await row().click();
+	await sheet.getByTestId('match-candidate').filter({ hasText: 'Water' }).click();
+	await expect(page.getByText('Matched to Water')).toBeVisible();
+	await row().click();
+	await sheet.getByTestId('delete-added').click();
+	await expect(page.getByText('Removed City water')).toBeVisible();
+	await page.goto('/week');
+	await expect(left).toHaveText(usd(before));
+	await expect(page.getByTestId('plan-amount-bills')).toHaveText('−$61.37');
 });
 
 test('the bill tab still adds bills and one-offs from a sentence', async ({ page }) => {

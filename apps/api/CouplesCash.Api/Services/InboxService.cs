@@ -356,7 +356,8 @@ public sealed class InboxService(
     /// </summary>
     public async Task<InboxError?> UnmatchAsync(UnitOfWork uow, Guid householdId, Guid userId, string? actorName, string currency, ImportedTransactionRow row, CancellationToken ct)
     {
-        if (row.IsPending)
+        // Added by hand: only a bill it pays can be undone (it stays added, never goes to review).
+        if (row.IsPending || row is { Source: ImportRepository.AddedSource, ConfirmedItemId: null })
         {
             return null;
         }
@@ -490,7 +491,8 @@ public sealed class InboxService(
         var rulesByNorm = await RulesByNormAsync(conn, householdId, ct);
         var rows = await imports.ListVisibleInWindowAsync(conn, householdId, dueDate.AddDays(-days), dueDate.AddDays(days), ct);
         return rows
-            .Where(r => r.IsPending || r is { Status: "confirmed", ConfirmedExpenseId: not null })
+            .Where(r => r.IsPending || r is { Status: "confirmed", ConfirmedExpenseId: not null }
+                || r is { Source: ImportRepository.AddedSource, Status: "confirmed", ConfirmedItemId: null, IsHidden: false })
             .Select(r =>
             {
                 var ruleHit = rulesByNorm.TryGetValue(TransactionMatcher.NormalisePayee(r.Payee, r.Description), out var rule) && rule.ItemId == item.Id;
@@ -588,7 +590,11 @@ public sealed class InboxService(
         var now = time.Now();
         await items.UpsertPaymentAsync(uow.Connection, item.Id, dueDate, userId, row.Magnitude, now, auto: false, PaymentSource.Bank, ct);
         await imports.ConfirmOccurrenceAsync(uow.Connection, householdId, row.Id, item.Id, dueDate, userId, auto: false, now, ct);
-        await LearnFromMatchAsync(uow.Connection, householdId, row, item, now, ct);
+        if (row.Source != ImportRepository.AddedSource)
+        {
+            // A description typed by hand is not the bank's wording: learn from the bank's copy when it replaces this row.
+            await LearnFromMatchAsync(uow.Connection, householdId, row, item, now, ct);
+        }
     }
 
     /// <summary>

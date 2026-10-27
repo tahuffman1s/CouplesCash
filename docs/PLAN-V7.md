@@ -92,7 +92,10 @@ what it was, account (the bills account by default), date (today). It is listed 
 "Added by you" and comes off "available now" right away (`plan.billsAccount.addedCents`). If the bank already shows
 something like it, the sheet asks first ("U.S. Bank already shows STARBUCKS $6.50 on Oct 27" → Add anyway). When the
 bank's own copy arrives (same sign, −3 … +7 days, within $1, or max(25 %, $5) for a matching description), it takes
-the added row's place, so nothing counts twice. It can be deleted from its transaction sheet. Caveat: if the bank's
+the added row's place, so nothing counts twice. If it paid a bill (Netflix this morning), match it to the bill from its sheet
+("Match to a bill or income", or "Link a transaction" on the bill): the bill is ticked and stops counting, since the added row
+already took the money off available; the bank's copy later takes that payment over. "Unlink from …" puts the bill back to unpaid.
+It can be deleted from its transaction sheet (a bill it paid goes back to unpaid). Caveat: if the bank's
 available balance already includes a hold the feed doesn't list, adding it by hand counts it twice — delete it.
 
 ## What's removed from the app (web)

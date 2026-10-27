@@ -14,13 +14,16 @@ public sealed record AddedOutcome(ImportedTransactionRow? Row, bool UnknownAccou
 /// Transactions added by hand (the "+" sheet): a charge the bank feed has not shown yet. Stored on an account as source <c>added</c>,
 /// confirmed (never to review) and pending, so it is listed with the account's pending rows and counts in the plan until the bank's
 /// own row arrives — then <see cref="ReplaceFromBankAsync"/> hides it (ignored / superseded, <c>replaced_by</c>). Matching:
-/// <see cref="ManualMatcher"/>.
+/// <see cref="ManualMatcher"/>. It can pay a bill like a bank row (<see cref="InboxService.MatchAsync"/>, payment source bank: its money
+/// is already in the plan's available); the bank's copy takes that payment over.
 /// </summary>
 public sealed class AddedTransactionService(
     NpgsqlDataSource db,
     AccountRepository accounts,
     ImportRepository imports,
+    RecurringRepository items,
     HouseholdRepository households,
+    InboxService inbox,
     ActivityService activity,
     TimeProvider time)
 {
@@ -67,15 +70,20 @@ public sealed class AddedTransactionService(
     {
         var currency = await households.CurrencyAsync(householdId, ct);
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        await imports.LockAsync(uow.Connection, householdId, id, ct);
         var row = await imports.GetAsync(uow.Connection, householdId, id, ct);
-        if (row is not { Source: ImportRepository.AddedSource } || !await imports.DeleteAddedAsync(uow.Connection, householdId, id, ct))
+        if (row is not { Source: ImportRepository.AddedSource })
         {
             return false;
         }
 
+        // a bill it paid is unpaid again
+        var reversal = await inbox.ReverseAsync(uow, householdId, userId, row, ct);
+        await imports.DeleteAddedAsync(uow.Connection, householdId, id, ct);
         await activity.RecordAsync(uow, householdId, userId, "transaction.added_removed", "transaction", null,
             ActivitySummaries.TransactionAddedRemoved(row.Description, row.AmountCents, currency),
-            new { transactionId = id, accountId = row.AccountId, amountCents = row.AmountCents }, ct, actorName);
+            new { transactionId = id, accountId = row.AccountId, amountCents = row.AmountCents, itemId = row.ConfirmedItemId, dueDate = row.ConfirmedDueDate, hadPayment = reversal.HadPayment },
+            ct, actorName);
         await uow.CommitAsync(ct);
         return true;
     }
@@ -103,19 +111,48 @@ public sealed class AddedTransactionService(
             open.Select(o => new ManualOpen(o.Id, o.PostedOn, o.AmountCents, o.Description, o.CreatedAt)).ToList(),
             fresh.Select(Candidate).ToList());
         var byId = open.Concat(fresh).ToDictionary(r => r.Id);
+        var now = time.Now();
         foreach (var (addedId, bankId) in pairs)
         {
+            var addedRow = byId[addedId];
+            var bankRow = byId[bankId];
+            var movedTo = await MovePaymentAsync(uow, householdId, addedRow, bankRow, now, ct);
             if (await imports.ReplaceAddedAsync(conn, householdId, addedId, bankId, ct) == 0)
             {
                 continue;
             }
 
             await activity.RecordAsync(uow, householdId, null, "transaction.added_replaced", "transaction", bankId,
-                ActivitySummaries.TransactionAddedReplaced(byId[addedId].Description, InboxService.DisplayName(byId[bankId])),
-                new { addedId, transactionId = bankId, accountId }, ct);
+                ActivitySummaries.TransactionAddedReplaced(addedRow.Description, InboxService.DisplayName(bankRow)),
+                new { addedId, transactionId = bankId, accountId, itemId = movedTo?.Id, dueDate = movedTo is null ? null : addedRow.ConfirmedDueDate }, ct);
         }
 
         return pairs.Count;
+    }
+
+    /// <summary>
+    /// The added row paid a bill: the bank's copy pays it now (bank amount, who matched it, learned bank name). When the bank row already
+    /// stands for something else the bill is unpaid instead, so the matcher can find its payment. Returns the item when it moved.
+    /// </summary>
+    private async Task<RecurringItemRow?> MovePaymentAsync(UnitOfWork uow, Guid householdId, ImportedTransactionRow addedRow, ImportedTransactionRow bankRow, DateTime now, CancellationToken ct)
+    {
+        if (addedRow is not { ConfirmedItemId: { } itemId, ConfirmedDueDate: { } dueDate })
+        {
+            return null;
+        }
+
+        var conn = uow.Connection;
+        var free = bankRow.IsPending || bankRow is { Status: "confirmed", ConfirmedExpenseId: null, ConfirmedItemId: null };
+        if (!free || await items.GetAsync(conn, householdId, itemId, ct) is not { } item)
+        {
+            await inbox.ReverseAsync(uow, householdId, null, addedRow, ct);
+            return null;
+        }
+
+        await imports.ConfirmOccurrenceAsync(conn, householdId, bankRow.Id, itemId, dueDate, addedRow.ReviewedBy, addedRow.ConfirmedAuto, now, ct);
+        await items.SetPaymentAmountAsync(conn, householdId, itemId, dueDate, bankRow.Magnitude, ct);
+        await inbox.LearnFromMatchAsync(conn, householdId, bankRow, item, now, ct);
+        return item;
     }
 
     private static ManualCandidate Candidate(ImportedTransactionRow r) => new(r.Id, r.PostedOn, r.AmountCents, r.Description, r.Payee);

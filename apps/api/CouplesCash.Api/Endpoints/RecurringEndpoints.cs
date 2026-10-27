@@ -453,7 +453,7 @@ public static class RecurringEndpoints
 
         await imports.LockAsync(uow.Connection, householdId, transactionId, ct);
         var row = await imports.GetAsync(uow.Connection, householdId, transactionId, ct);
-        if (row is null || row.Source == ImportRepository.AddedSource)
+        if (row is null)
         {
             return Problems.Validation("transactionId", "Unknown transaction.");
         }

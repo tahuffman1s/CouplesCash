@@ -2259,6 +2259,19 @@ function replaceAdded(hh: string, fresh: Tx[]) {
 		);
 		if (!b) continue;
 		used.add(b.id);
+		const paid = a.confirmed?.itemId ? a.confirmed : null;
+		if (paid?.dueDate) {
+			const key = `${paid.itemId}:${paid.dueDate}`;
+			const item = items.get(paid.itemId!);
+			if (b.status === 'pending' && item) {
+				b.status = 'confirmed';
+				b.confirmed = { ...paid };
+				const pay = payments.get(key);
+				if (pay) pay.amountCents = Math.abs(b.amountCents);
+				learnBankName(item, b);
+			} else payments.delete(key);
+		}
+		a.confirmed = null;
 		a.status = 'ignored';
 		a.ignoreReason = 'superseded';
 		a.replacedBy = b.id;
@@ -2475,8 +2488,12 @@ function confirmTx(
 	tx: Tx,
 	body: Record<string, unknown>
 ): ConfirmError | null {
-	if (tx.status !== 'pending') return { status: 400, detail: 'Not pending' };
+	// added by hand: always confirmed, it can only pay a bill
+	const added = tx.source === 'added';
+	if (tx.status !== 'pending' && !(added && body.as === 'occurrence' && !tx.confirmed?.itemId))
+		return { status: 400, detail: 'Not pending' };
 	if (body.as === 'expense') {
+		if (added) return { status: 400, detail: 'Not pending' };
 		if (tx.amountCents >= 0) return { status: 400, detail: 'Money in cannot become an expense' };
 		const categoryId = (body.categoryId as string | null) || null;
 		const cat = categoryId ? categories.get(categoryId) : undefined;
@@ -2539,8 +2556,11 @@ function confirmTx(
 			auto: false,
 			source: 'bank'
 		});
-		learnRule(hh, tx, { itemId: item.id });
-		learnBankName(item, tx);
+		// typed by hand: learn from the bank's copy instead
+		if (!added) {
+			learnRule(hh, tx, { itemId: item.id });
+			learnBankName(item, tx);
+		}
 		tx.status = 'confirmed';
 		tx.confirmed = {
 			expenseId: null,
@@ -2587,7 +2607,7 @@ function reverseTx(t: Tx) {
 			peer.confirmed = null;
 		}
 	}
-	t.status = 'pending';
+	t.status = t.source === 'added' ? 'confirmed' : 'pending';
 	t.ignoreReason = null;
 	t.transferPeerId = null;
 	t.transferAuto = false;
@@ -2611,7 +2631,7 @@ function restoreTxForOccurrence(hh: string, itemId: string, date: string) {
 		if (t.householdId !== hh || t.status !== 'confirmed') continue;
 		if (t.confirmed?.itemId === itemId && t.confirmed.dueDate === date) {
 			t.autoBlocked = true;
-			t.status = 'pending';
+			t.status = t.source === 'added' ? 'confirmed' : 'pending';
 			t.confirmed = null;
 			t.ignoreReason = null;
 		}
@@ -4447,7 +4467,9 @@ const server = createServer(async (req, res) => {
 						(t) =>
 							t.householdId === hh &&
 							// to review, or confirmed as an expense (not paying a bill, not a transfer)
-							(t.status === 'pending' || (t.status === 'confirmed' && !!t.confirmed?.expenseId)) &&
+							(t.status === 'pending' ||
+								(t.status === 'confirmed' && !!t.confirmed?.expenseId) ||
+								(t.source === 'added' && !t.ignoreReason && !t.confirmed?.itemId)) &&
 							t.amountCents > 0 === income &&
 							dayDistance(t.postedOn, date) <= days
 					)
@@ -5277,6 +5299,7 @@ const server = createServer(async (req, res) => {
 		if (removeAdded && m === 'DELETE') {
 			const t = txs.get(removeAdded[1]);
 			if (!t || t.householdId !== hh || t.source !== 'added') return problem(res, 404, 'Not found');
+			reverseTx(t);
 			txs.delete(t.id);
 			record(
 				hh,
@@ -5539,7 +5562,7 @@ const server = createServer(async (req, res) => {
 			const days = Math.min(60, Math.max(1, Number(url.searchParams.get('days') ?? 30)));
 			return send(res, 200, {
 				occurrences: occurrenceCandidates(hh, tx, days),
-				transferPeers: transferPeers(tx).map(txView)
+				transferPeers: tx.source === 'added' ? [] : transferPeers(tx).map(txView)
 			});
 		}
 		mm = /^\/v1\/inbox\/([^/]+)\/(match|transfer|unmatch)$/.exec(p);
@@ -5582,6 +5605,7 @@ const server = createServer(async (req, res) => {
 				return send(res, 200, txView(tx));
 			}
 			if (mm[2] === 'transfer') {
+				if (tx.source === 'added') return problem(res, 404, 'Not found');
 				if (isHidden(tx))
 					return problem(res, 400, 'Cannot mark as transfer', 'This authorization was dropped');
 				const peerId = (b.peerId as string | null | undefined) || null;
@@ -5610,7 +5634,7 @@ const server = createServer(async (req, res) => {
 				return send(res, 200, txView(tx));
 			}
 			// unmatch: back to To review from any status, reversing everything (peer too)
-			if (tx.status !== 'pending') {
+			if (tx.status !== 'pending' && !(tx.source === 'added' && !tx.confirmed?.itemId)) {
 				const wasTransfer = tx.status === 'ignored' && tx.ignoreReason === 'transfer';
 				reverseTx(tx);
 				tx.autoBlocked = true;
