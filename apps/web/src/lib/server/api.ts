@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { API_URL } from '$app/env/private';
 import { redirect, type RequestEvent } from '@sveltejs/kit';
 import type {
@@ -93,33 +94,62 @@ function headersFor(token: string | undefined, init?: RequestInit): Headers {
 	return headers;
 }
 
-/**
- * Rotates the refresh token and sets fresh cookies. Deduplicated per request so that parallel
- * `load` calls never present the same refresh token twice (the API would revoke the family).
- */
-export function refreshSession(event: RequestEvent): Promise<boolean> {
-	if (event.locals.refreshing) return event.locals.refreshing;
-	const refreshToken = event.cookies.get(REFRESH_COOKIE);
-	if (!refreshToken) return Promise.resolve(false);
+type Rotation = { auth: AuthResult } | { rejected: true } | { failed: true };
 
-	event.locals.refreshing = (async () => {
+/**
+ * Rotations in flight or just done, by refresh token (hashed). A browser often sends several
+ * requests at once when the access token has run out — a hover preload and a click, a form post
+ * and its reload, two tabs — each with the same refresh token. Only the first may rotate it: the
+ * API treats a second use as a stolen token and revokes the whole session. The others share the
+ * first one's result, kept for {@link ROTATION_REUSE_MS} for requests that started just after.
+ */
+const rotations = new Map<string, { at: number; result: Promise<Rotation> }>();
+const ROTATION_REUSE_MS = 30_000;
+
+function rotate(refreshToken: string): Promise<Rotation> {
+	const now = Date.now();
+	for (const [key, r] of rotations) if (now - r.at > ROTATION_REUSE_MS) rotations.delete(key);
+	const key = createHash('sha256').update(refreshToken).digest('base64url');
+	const hit = rotations.get(key);
+	if (hit) return hit.result;
+
+	const result = (async (): Promise<Rotation> => {
 		try {
 			const res = await fetch(`${API_BASE}/auth/refresh`, {
 				method: 'POST',
 				headers: { 'content-type': 'application/json', accept: 'application/json' },
 				body: JSON.stringify({ refreshToken })
 			});
-			if (!res.ok) {
-				clearAuthCookies(event.cookies, event.url);
-				return false;
-			}
-			const auth = (await res.json()) as AuthResult;
-			setAuthCookies(event.cookies, event.url, auth);
-			return true;
+			if (!res.ok) return { rejected: true };
+			return { auth: (await res.json()) as AuthResult };
 		} catch {
-			return false;
+			// the API was unreachable: nothing was rotated, so the next request may try again
+			rotations.delete(key);
+			return { failed: true };
 		}
 	})();
+	rotations.set(key, { at: now, result });
+	return result;
+}
+
+/**
+ * Rotates the refresh token and sets fresh cookies. Deduplicated per request (parallel `load`
+ * calls) and across requests that carry the same refresh token (see {@link rotate}), so the API
+ * never sees one refresh token twice.
+ */
+export function refreshSession(event: RequestEvent): Promise<boolean> {
+	if (event.locals.refreshing) return event.locals.refreshing;
+	const refreshToken = event.cookies.get(REFRESH_COOKIE);
+	if (!refreshToken) return Promise.resolve(false);
+
+	event.locals.refreshing = rotate(refreshToken).then((r) => {
+		if ('auth' in r) {
+			setAuthCookies(event.cookies, event.url, r.auth);
+			return true;
+		}
+		if ('rejected' in r) clearAuthCookies(event.cookies, event.url);
+		return false;
+	});
 	return event.locals.refreshing;
 }
 

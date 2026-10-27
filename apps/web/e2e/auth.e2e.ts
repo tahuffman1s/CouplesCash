@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { register } from './helpers';
+import { register, registerWithHousehold } from './helpers';
 
 test('unauthenticated / redirects to /login', async ({ page }) => {
 	await page.goto('/');
@@ -56,4 +56,29 @@ test('session survives an expired access cookie via refresh', async ({ page, con
 	await expect(page).toHaveURL(/\/settings$/);
 	const after = await context.cookies();
 	expect(after.find((c) => c.name === 'cc_access')).toBeTruthy();
+});
+
+test('an expired session refreshes once, even when the browser sends several requests at once', async ({
+	page,
+	context
+}) => {
+	await registerWithHousehold(page);
+	await page.goto('/bills');
+	// the 15-minute access token has run out; only the refresh cookie is left
+	await context.clearCookies({ name: 'cc_access' });
+	// a hover preload, a click and a form reload land together, each with the same refresh token
+	const statuses = await page.evaluate(() =>
+		Promise.all(
+			['/bills', '/week', '/transactions', '/bills'].map((u) =>
+				fetch(u, { redirect: 'manual' }).then((r) => r.status)
+			)
+		)
+	);
+	expect(statuses).toEqual([200, 200, 200, 200]);
+	// still signed in afterwards: the session family was not revoked
+	await page.goto('/bills');
+	await expect(page).toHaveURL(/\/bills$/);
+	await context.clearCookies({ name: 'cc_access' });
+	await page.goto('/week');
+	await expect(page).toHaveURL(/\/week$/);
 });
