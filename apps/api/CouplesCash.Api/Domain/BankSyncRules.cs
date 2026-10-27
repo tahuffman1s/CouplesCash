@@ -27,6 +27,26 @@ public static class BankSyncRules
         return reference is null || nowUtc - reference.Value >= interval;
     }
 
+    /// <summary>
+    /// Plaid: due every <paramref name="interval"/> like any link, and — until <paramref name="refreshUntilUtc"/> (after linking,
+    /// reconnecting or "Sync now", while Plaid fetches from the bank in the background) — every <paramref name="poll"/>. Never while the
+    /// bank wants a new sign-in (<paramref name="needsReconnect"/>): every attempt would fail the same way.
+    /// </summary>
+    public static bool IsPlaidDue(DateTime? lastSyncedAtUtc, DateTime? lastAttemptAtUtc, DateTime? refreshUntilUtc, bool needsReconnect, DateTime nowUtc, TimeSpan interval, TimeSpan poll)
+    {
+        if (needsReconnect)
+        {
+            return false;
+        }
+
+        if (refreshUntilUtc is { } until && nowUtc <= until)
+        {
+            return IsDue(lastSyncedAtUtc, lastAttemptAtUtc, nowUtc, poll);
+        }
+
+        return IsDue(lastSyncedAtUtc, lastAttemptAtUtc, nowUtc, interval);
+    }
+
     private static DateTime? Max(DateTime? a, DateTime? b) => a is null ? b : b is null ? a : a > b ? a : b;
 
     /// <summary>Time left on the manual "Sync now" cooldown, or null when a manual sync is allowed.</summary>

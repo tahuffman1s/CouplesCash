@@ -42,10 +42,11 @@ Compose behind a Cloudflare Tunnel. Read `docs/PLAN.md` (v1), `docs/PLAN-V2.md` 
 | Pure engines (unit-tested, no I/O) | `apps/api/CouplesCash.Api/Domain/` — `RecurrenceEngine`, `PayPeriodEngine`, `GoalProjection`, `SchedulerRules`, `BudgetMath`, **`WeekEngine`** (week bounds, left-at-end, variance, weekly budget rows/history), **`TransactionMatcher`** (+ `BankSyncRules`, `Fingerprint`: suggestions, dedupe fingerprints, payee normalisation) |
 | Web Push (VAPID keys, sender, payloads, `--vapid` CLI) | `apps/api/CouplesCash.Api/Push/` |
 | **SimpleFIN client** (claim token, fetch accounts; protocol-shaped DTOs) | `apps/api/CouplesCash.Api/SimpleFin/` |
+| **Plaid client** (link token, exchange, `/transactions/get` → the same feed shape; errors → reconnect) | `apps/api/CouplesCash.Api/Plaid/` (`PlaidParser` is pure + tested); web `src/lib/utils/plaid.ts`, `PlaidConnectCard.svelte`, `(app)/settings/banks/plaid-oauth`; fake server `apps/api/scripts/fake-plaid.py` |
 | **Encryption at rest** (AES-256-GCM, `Security__DataKey`) | `apps/api/CouplesCash.Api/Security/DataProtector.cs` |
 | **Banks / inbox / CSV endpoints** | `Endpoints/BankEndpoints.cs`, `Endpoints/InboxEndpoints.cs`, `Endpoints/ImportEndpoints.cs` |
 | Background job (autopay, reminders, hygiene, **bank sync + auto-match**) | `apps/api/CouplesCash.Api/Scheduler/` (`SchedulerService` hosted service; selection logic lives in `Domain/SchedulerRules.cs`) |
-| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4, `0005_transactions.sql` = v5, `0009_manual_transactions.sql` = added-by-hand rows) |
+| Migrations | `apps/api/CouplesCash.Api/Migrations/000N_name.sql` (`0002_v2.sql` = v2, `0003_imports.sql` = v3, `0004_week.sql` = v4, `0005_transactions.sql` = v5, `0009_manual_transactions.sql` = added-by-hand rows, `0010_plaid.sql` = Plaid) |
 | API tests | `apps/api/CouplesCash.Api.Tests/` (xunit) |
 | Routes (pages + form actions) | `apps/web/src/routes/**/+page.svelte`, `+page.server.ts` |
 | API client + types | `apps/web/src/lib/server/api.ts`, `apps/web/src/lib/types.ts` |
@@ -91,6 +92,9 @@ localhost), `WebAuthn__RelyingPartyId` (optional, derived from origin host),
 `Security__DataKey` (base64 32 bytes = `.env` `DATA_KEY`; empty → bank sync disabled, claim
 503 `bank_sync_not_configured`, existing links report decrypt errors) · `Sync__IntervalHours`
 (6, = `SYNC_INTERVAL_HOURS`) · `Sync__ManualCooldownMinutes` (15) · `SimpleFin__BaseUrl` (tests only) ·
+`Plaid__ClientId`, `Plaid__Secret` (= `.env` `PLAID_CLIENT_ID` / `PLAID_SECRET`; empty → only SimpleFIN, Plaid routes 503
+`plaid_not_configured`), `Plaid__Environment` (`production` | `sandbox`), `Plaid__RedirectUri` (default `PUBLIC_URL/settings/banks/plaid-oauth`),
+`Plaid__IntervalMinutes` (60), `Plaid__RefreshPollMinutes` (3), `Plaid__BaseUrl` (tests only) ·
 `Matcher__BaseUrl` (`http://matcher:8090`; dev `http://localhost:8090`), `Matcher__Key` (= `.env` `MATCHER_KEY`, also given
 to the matcher container; empty → the matcher refuses to start and the API uses the built-in matcher).
 Compose maps `.env` → these in `compose.yml` `x-api-env`; `scripts/dev-env.sh` does the same
@@ -126,7 +130,11 @@ for native dev. `--migrate` and `--vapid` must exit before any config validation
 - **Bank credentials** only via `Security/DataProtector.cs` (AES-256-GCM, `Security__DataKey`);
   **never log or return an access URL** or a setup token — logs carry link names and counts.
   Rotating the key = re-link; no re-encryption path. Bridge `errors` are surfaced (link
-  `last_error` + `bank.error` activity), never swallowed.
+  `last_error` + `bank.error` activity), never swallowed. **Plaid** is the second provider (`bank_links.provider`): its access
+  token goes through the same `DataProtector`, never logged/returned; `PlaidParser` turns Plaid responses into the SimpleFIN
+  feed shape so both share one reconcile/matching pipeline (rows `source = 'plaid'`); sign-in errors set `needs_reconnect`
+  (Reconnect = Link update mode). The same bank via both providers is deduplicated (`Domain/ProviderTwins.cs`: posted, exact
+  amount, ≤ 3 days). Unlinking drops the link's pending rows.
 - **Friday plan (v7)**: the week is the **pay week** (`households.payday_weekday` → day before next payday). Only the
   account with `role = 'bills'` counts: available = bank `availableCents` else `balanceCents − pendingOutCents` (never
   sum other checking accounts). Fun-money accounts (`role = 'fun'`, one owner each) never enter To review. Fun money is

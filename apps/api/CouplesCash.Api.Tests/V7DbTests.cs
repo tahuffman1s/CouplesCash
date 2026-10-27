@@ -4,6 +4,7 @@ using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Matching;
+using CouplesCash.Api.Plaid;
 using CouplesCash.Api.Push;
 using CouplesCash.Api.Security;
 using CouplesCash.Api.Services;
@@ -48,6 +49,51 @@ public class V7DbTests
             Task.FromResult(SimpleFinParser.Parse(json(), DateOnly.FromDateTime(DateTime.UtcNow)));
     }
 
+    /// <summary>Plaid as the sync sees it: a /transactions/get page (JSON) parsed by the real <see cref="PlaidParser"/>; <see cref="Fail"/> answers every feed call.</summary>
+    private sealed class FakePlaid : IPlaidClient
+    {
+        public string Page { get; set; } = """{ "accounts": [], "transactions": [], "total_transactions": 0 }""";
+
+        public SimpleFinException? Fail { get; set; }
+
+        public int Refreshes { get; private set; }
+
+        public string? LastUpdateToken { get; private set; }
+
+        public bool Configured => true;
+
+        public Task<PlaidLinkToken> CreateLinkTokenAsync(string clientUserId, string? accessToken, CancellationToken ct)
+        {
+            LastUpdateToken = accessToken;
+            return Task.FromResult(new PlaidLinkToken("link-sandbox-123", DateTime.UtcNow.AddHours(4)));
+        }
+
+        public Task<(string AccessToken, string ItemId)> ExchangeAsync(string publicToken, CancellationToken ct) =>
+            publicToken == "public-bad"
+                ? throw new SimpleFinException(SimpleFinError.InvalidToken, "bad")
+                : Task.FromResult(("access-sandbox-secret", "item-1"));
+
+        public Task<SimpleFinAccountSet> GetFeedAsync(string accessToken, string orgName, DateOnly start, DateOnly end, DateOnly today, CancellationToken ct)
+        {
+            if (Fail is { } fail)
+            {
+                throw fail;
+            }
+
+            using var doc = System.Text.Json.JsonDocument.Parse(Page);
+            var page = PlaidParser.ParseTransactionsPage(doc.RootElement);
+            return Task.FromResult(PlaidParser.ToAccountSet(page.Accounts, page.Transactions, orgName, DateTime.UtcNow, today, []));
+        }
+
+        public Task RefreshAsync(string accessToken, CancellationToken ct)
+        {
+            Refreshes++;
+            return Task.CompletedTask;
+        }
+
+        public Task RemoveAsync(string accessToken, CancellationToken ct) => Task.CompletedTask;
+    }
+
     private static long Unix(DateOnly date, int hour = 12) =>
         new DateTimeOffset(date.ToDateTime(new TimeOnly(hour, 0)), TimeSpan.Zero).ToUnixTimeSeconds();
 
@@ -84,7 +130,7 @@ public class V7DbTests
             """;
     }
 
-    private static ServiceProvider Services(string connectionString, Func<string>? feed = null)
+    private static ServiceProvider Services(string connectionString, Func<string>? feed = null, FakePlaid? plaid = null)
     {
         var services = new ServiceCollection();
         services.AddLogging(b => b.SetMinimumLevel(LogLevel.Warning));
@@ -95,6 +141,8 @@ public class V7DbTests
         services.AddSingleton(new MatcherOptions());
         services.AddSingleton<IMatcherClient>(sp => new MatcherClient(new HttpClient(), sp.GetRequiredService<MatcherOptions>()));
         services.AddSingleton<ISimpleFinClient>(new FakeBridge(feed ?? Feed));
+        services.AddSingleton(new PlaidOptions { ClientId = "client", Secret = "secret" });
+        services.AddSingleton<IPlaidClient>(plaid ?? new FakePlaid());
         services.AddSingleton<PushNotifier>();
         services.AddSingleton<MatcherStatusTracker>();
         services.AddSingleton<MatchingQueue>();
@@ -367,6 +415,191 @@ public class V7DbTests
             Assert.True(await added.DeleteAsync(householdId, user.Id, "Tester", gymPaid.Id, ct));
             Assert.Null(await Payment(gym.Id));
             Assert.Equal(4_000, (await Plan()).BillsOutCents);
+        }
+        finally
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = householdId });
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = @Id", new { Id = user.Id });
+        }
+    }
+
+    [DbFact]
+    public async Task A_plaid_link_syncs_into_the_same_pipeline_and_a_posted_row_takes_over_its_pending_row()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
+        var plaid = new FakePlaid();
+        await using var sp = Services(connectionString, plaid: plaid);
+        Assert.True(sp.GetRequiredService<DbUpMigrator>().Run());
+
+        var ct = CancellationToken.None;
+        var now = DateTime.UtcNow;
+        var today = DateOnly.FromDateTime(now);
+        string D(int daysAgo) => today.AddDays(-daysAgo).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var users = sp.GetRequiredService<UserRepository>();
+        var households = sp.GetRequiredService<HouseholdRepository>();
+        var accounts = sp.GetRequiredService<AccountRepository>();
+        var banks = sp.GetRequiredService<BankRepository>();
+        var imports = sp.GetRequiredService<ImportRepository>();
+        var db = sp.GetRequiredService<NpgsqlDataSource>();
+        var sync = sp.GetRequiredService<BankSyncService>();
+
+        var user = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Tester", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var household = await households.CreateAsync(user.Id, "V7 DB plaid", now, ct);
+        var householdId = household.Id;
+        try
+        {
+            string Page(string transactions, decimal available) => $$"""
+                {
+                  "accounts": [
+                    { "account_id": "acc-chk", "name": "Checking", "mask": "1234", "type": "depository", "subtype": "checking",
+                      "balances": { "available": {{available.ToString(CultureInfo.InvariantCulture)}}, "current": 2408.07, "iso_currency_code": "USD" } }
+                  ],
+                  "transactions": [ {{transactions}} ],
+                  "total_transactions": 2
+                }
+                """;
+            plaid.Page = Page($$"""
+                { "transaction_id": "p-diner", "account_id": "acc-chk", "amount": 40.00, "date": "{{D(1)}}", "name": "SQ *DINER", "pending": true },
+                { "transaction_id": "t-pay", "account_id": "acc-chk", "amount": -1500.00, "date": "{{D(2)}}", "name": "ACME PAYROLL", "pending": false }
+                """, 2345.67m);
+
+            // Link: the bad public token is refused; the good one stores the link (provider plaid, token encrypted) and syncs it.
+            await Assert.ThrowsAsync<SimpleFinException>(() => sync.PlaidLinkAsync(householdId, user.Id, "Tester", "public-bad", "U.S. Bank", ct));
+            var link = await sync.PlaidLinkAsync(householdId, user.Id, "Tester", "public-good", "U.S. Bank", ct);
+            Assert.Equal(("plaid", "U.S. Bank", "item-1"), (link.Provider, link.Name, link.PlaidItemId));
+            Assert.NotNull(link.LastSyncedAt);
+            Assert.True(link.RefreshUntil > now);
+            Assert.DoesNotContain("access-sandbox-secret", System.Text.Encoding.UTF8.GetString(link.AccessUrlEnc), StringComparison.Ordinal);
+
+            var external = Assert.Single(await banks.ListExternalAccountsAsync(householdId, ct));
+            Assert.Equal(("Checking ··1234", 240_807L, (long?)234_567), (external.Name, external.BalanceCents, external.AvailableCents));
+            AccountRow checking;
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                checking = await accounts.CreateAsync(uow.Connection, householdId, user.Id, new AccountFields("US Bank", "U.S. Bank", AccountType.Checking, 0, "#000000", "landmark", null), now, ct);
+                await banks.SetMappingAsync(uow.Connection, householdId, external.Id, checking.Id, now, ct);
+                await sync.ApplyMappingAsync(uow, householdId, external, checking, user.Id, now, ct);
+                await uow.CommitAsync(ct);
+            }
+
+            var pending = (await imports.ListBankPendingAsync(householdId, checking.Id, null, reviewOrConfirmedOnly: false, ct)).Single();
+            Assert.Equal(("plaid", -4_000L, "SQ *DINER"), (pending.Source, pending.AmountCents, pending.Description));
+
+            // The diner posts with a tip under a new id and its own wording: Plaid names the pending row, so it is replaced in place.
+            plaid.Page = Page($$"""
+                { "transaction_id": "t-diner", "account_id": "acc-chk", "amount": 48.00, "date": "{{D(0)}}", "name": "THE DINER LLC", "pending": false, "pending_transaction_id": "p-diner" },
+                { "transaction_id": "t-pay", "account_id": "acc-chk", "amount": -1500.00, "date": "{{D(2)}}", "name": "ACME PAYROLL", "pending": false }
+                """, 2297.67m);
+            var result = await sync.SyncAsync((await banks.GetLinkAsync(householdId, link.Id, ct))!, user.Id, "Tester", manual: true, ct);
+            Assert.Equal(0, result.NewTransactions);
+            Assert.Equal(1, plaid.Refreshes);
+            var posted = (await imports.GetAsync(householdId, pending.Id, ct))!;
+            Assert.Equal((false, -4_800L, "THE DINER LLC", "t-diner"), (posted.Pending, posted.AmountCents, posted.Description, posted.ExternalId));
+            Assert.Equal(229_767, (await accounts.GetAsync(householdId, checking.Id, ct))!.AvailableCents);
+
+            // The bank wants a new sign-in: the link says so and the scheduler leaves it alone until Reconnect.
+            plaid.Fail = new SimpleFinException(SimpleFinError.ReauthRequired, "The bank wants you to sign in again. Tap Reconnect.");
+            await Assert.ThrowsAsync<SimpleFinException>(() => sync.SyncAsync(link, null, null, manual: false, ct));
+            var stuck = (await banks.GetLinkAsync(householdId, link.Id, ct))!;
+            Assert.True(stuck.NeedsReconnect);
+            Assert.Null(stuck.RefreshUntil);
+            Assert.True(sync.ToDto(stuck, []).NeedsReconnect);
+            Assert.False(BankSyncRules.IsPlaidDue(stuck.LastSyncedAt, stuck.LastAttemptAt, stuck.RefreshUntil, stuck.NeedsReconnect, now.AddDays(1), TimeSpan.FromHours(1), TimeSpan.FromMinutes(3)));
+
+            // Update mode gets a token for this Item; once the user has signed in again the sync clears the flag.
+            await sync.PlaidLinkTokenAsync(householdId, stuck, ct);
+            Assert.Equal("access-sandbox-secret", plaid.LastUpdateToken);
+            plaid.Fail = null;
+            await sync.PlaidReconnectedAsync(stuck, user.Id, "Tester", ct);
+            var back = (await banks.GetLinkAsync(householdId, link.Id, ct))!;
+            Assert.Equal((false, (string?)null), (back.NeedsReconnect, back.LastError));
+            Assert.True(back.RefreshUntil > now);
+        }
+        finally
+        {
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await conn.ExecuteAsync("DELETE FROM households WHERE id = @Id", new { Id = householdId });
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = @Id", new { Id = user.Id });
+        }
+    }
+
+    [DbFact]
+    public async Task Switching_the_same_bank_from_simplefin_to_plaid_keeps_each_transaction_once()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(DbFactAttribute.Variable)!;
+        var plaid = new FakePlaid();
+        await using var sp = Services(connectionString, plaid: plaid);
+        Assert.True(sp.GetRequiredService<DbUpMigrator>().Run());
+
+        var ct = CancellationToken.None;
+        var now = DateTime.UtcNow;
+        var today = DateOnly.FromDateTime(now);
+        string D(int daysAgo) => today.AddDays(-daysAgo).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var users = sp.GetRequiredService<UserRepository>();
+        var households = sp.GetRequiredService<HouseholdRepository>();
+        var accounts = sp.GetRequiredService<AccountRepository>();
+        var banks = sp.GetRequiredService<BankRepository>();
+        var imports = sp.GetRequiredService<ImportRepository>();
+        var db = sp.GetRequiredService<NpgsqlDataSource>();
+        var sync = sp.GetRequiredService<BankSyncService>();
+
+        var user = await users.CreateAsync($"v7db+{Guid.NewGuid():N}@example.com", "Tester", "x", now, ct) ?? throw new InvalidOperationException("user");
+        var household = await households.CreateAsync(user.Id, "V7 DB switch", now, ct);
+        var householdId = household.Id;
+        try
+        {
+            // SimpleFIN first: US Bank checking with the payroll (+1,500 today) and five pending charges (plus one on its unmapped savings).
+            AccountRow checking;
+            BankLinkRow simplefin;
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                checking = await accounts.CreateAsync(uow.Connection, householdId, user.Id, new AccountFields("US Bank", "U.S. Bank", AccountType.Checking, 0, "#000000", "landmark", null), now, ct);
+                simplefin = await banks.InsertLinkAsync(uow.Connection, householdId, user.Id, "SimpleFIN", sp.GetRequiredService<DataProtector>().Protect("https://user:pass@bridge.example/simplefin"), now, ct);
+                var set = SimpleFinParser.Parse(Feed(), today);
+                await banks.SetMappingAsync(uow.Connection, householdId, (await banks.UpsertExternalAccountAsync(uow.Connection, householdId, simplefin.Id, set.Accounts[0], now, ct)).Id, checking.Id, now, ct);
+                await uow.CommitAsync(ct);
+            }
+
+            await sync.SyncAsync(simplefin, user.Id, "Tester", manual: true, ct);
+            async Task<IReadOnlyList<ImportedTransactionRow>> Visible() =>
+                (await imports.ListAccountTransactionsAsync(householdId, new AccountTransactionQuery(checking.Id, "all", null, null, null, false), null, 200, ct)).ToList();
+            Assert.Single(await Visible(), r => r.AmountCents == 150_000);
+
+            // Plaid for the same bank: its 90 days include the same payroll (two days earlier) and a coffee SimpleFIN never sent.
+            plaid.Page = $$"""
+                {
+                  "accounts": [ { "account_id": "acc-chk", "name": "Checking", "mask": "1234", "type": "depository",
+                                  "balances": { "available": 2345.67, "current": 2408.07, "iso_currency_code": "USD" } } ],
+                  "transactions": [
+                    { "transaction_id": "t-pay", "account_id": "acc-chk", "amount": -1500.00, "date": "{{D(2)}}", "name": "ACME PAYROLL", "pending": false },
+                    { "transaction_id": "t-coffee", "account_id": "acc-chk", "amount": 4.25, "date": "{{D(1)}}", "name": "BLUE BOTTLE", "pending": false }
+                  ],
+                  "total_transactions": 2
+                }
+                """;
+            var link = await sync.PlaidLinkAsync(householdId, user.Id, "Tester", "public-good", "U.S. Bank", ct);
+            var external = (await banks.ListExternalAccountsAsync(householdId, ct)).Single(e => e.BankLinkId == link.Id);
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                await sync.ApplyMappingAsync(uow, householdId, external, checking, user.Id, now, ct);
+                await uow.CommitAsync(ct);
+            }
+
+            // Mapped onto the same account: the payroll is there once (SimpleFIN's), the coffee is new.
+            var rows = await Visible();
+            Assert.Equal("simplefin", Assert.Single(rows, r => r.AmountCents == 150_000).Source);
+            Assert.Equal("plaid", Assert.Single(rows, r => r.AmountCents == -425).Source);
+
+            // Unlinking SimpleFIN drops its pending charges (nothing follows them any more); posted rows stay.
+            await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+            {
+                Assert.Equal(6, await sync.DropPendingForLinkAsync(uow, householdId, simplefin.Id, user.Id, ct));
+                await uow.CommitAsync(ct);
+            }
+
+            Assert.Empty(await imports.ListBankPendingAsync(householdId, checking.Id, null, reviewOrConfirmedOnly: false, ct));
+            Assert.Single(await Visible(), r => r.AmountCents == 150_000);
         }
         finally
         {

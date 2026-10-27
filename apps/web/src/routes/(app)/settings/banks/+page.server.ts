@@ -6,14 +6,15 @@ import { echo, str } from '#lib/server/forms.ts';
 
 export const load: PageServerLoad = async (event) => {
 	if (!event.locals.household) redirect(303, '/couple');
-	const [links, accounts] = await Promise.all([
+	const [links, accounts, plaid] = await Promise.all([
 		endpoints(event).banks.list(),
 		api(event)
 			.get<Account[]>('/accounts')
-			.catch(() => [] as Account[])
+			.catch(() => [] as Account[]),
+		endpoints(event).banks.plaidStatus()
 	]);
 	// links === null → the API answered 503 bank_sync_not_configured
-	return { links, accounts, notConfigured: links === null };
+	return { links, accounts, plaid, notConfigured: links === null };
 };
 
 export const actions: Actions = {

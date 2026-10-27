@@ -195,6 +195,58 @@ public sealed class ImportRepository(NpgsqlDataSource db)
             """,
             new { Id = addedId, HouseholdId = householdId, BankId = bankId }, ct));
 
+    /// <summary>
+    /// Cross-provider dedupe: posted, visible bank rows of the account in [<paramref name="from"/>, <paramref name="to"/>] from a
+    /// provider other than <paramref name="source"/> that no row stands in for yet.
+    /// </summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListOtherProviderPostedAsync(NpgsqlConnection conn, Guid householdId, Guid accountId, string source, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"""
+            {Select}
+            WHERE t.household_id = @HouseholdId AND t.account_id = @AccountId AND t.source IN ('simplefin', 'plaid') AND t.source <> @Source
+              AND NOT t.pending AND {NotHidden} AND t.posted_on BETWEEN @From AND @To
+              AND NOT EXISTS (SELECT 1 FROM imported_transactions m WHERE m.household_id = t.household_id AND m.replaced_by = t.id)
+            ORDER BY t.posted_on, t.id
+            """,
+            new { HouseholdId = householdId, AccountId = accountId, Source = source, From = from, To = to }, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>Posted, visible rows of one external account (the newcomer side of the cross-provider dedupe at mapping time).</summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListPostedForExternalAsync(NpgsqlConnection conn, Guid householdId, Guid externalAccountId, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"{Select} WHERE t.household_id = @HouseholdId AND t.external_account_id = @ExternalAccountId AND NOT t.pending AND {NotHidden} ORDER BY t.posted_on, t.id",
+            new { HouseholdId = householdId, ExternalAccountId = externalAccountId }, ct));
+        return rows.ToList();
+    }
+
+    /// <summary>Hides a row as the twin of <paramref name="twinId"/> (ignored / superseded, <c>replaced_by</c>); the caller reverses any confirmation first.</summary>
+    public Task<int> MarkTwinAsync(NpgsqlConnection conn, Guid householdId, Guid id, Guid twinId, DateTime now, CancellationToken ct) =>
+        conn.ExecuteAsync(Cmd(
+            """
+            UPDATE imported_transactions
+            SET status = 'ignored', ignore_reason = 'superseded', replaced_by = @TwinId, confirmed_expense_id = NULL, confirmed_item_id = NULL,
+                confirmed_due_date = NULL, confirmed_auto = false, transfer_peer_id = NULL, transfer_auto = false, reviewed_by = NULL, reviewed_at = @Now
+            WHERE id = @Id AND household_id = @HouseholdId
+            """,
+            new { Id = id, HouseholdId = householdId, TwinId = twinId, Now = now }, ct));
+
+    /// <summary>A link is being removed: its bank-pending rows that are still visible (nothing will follow them any more).</summary>
+    public async Task<IReadOnlyList<ImportedTransactionRow>> ListPendingForLinkAsync(NpgsqlConnection conn, Guid householdId, Guid linkId, CancellationToken ct)
+    {
+        var rows = await conn.QueryAsync<ImportedTransactionRow>(Cmd(
+            $"""
+            {Select}
+            WHERE t.household_id = @HouseholdId AND t.pending AND {NotHidden}
+              AND t.external_account_id IN (SELECT e.id FROM external_accounts e WHERE e.household_id = @HouseholdId AND e.bank_link_id = @LinkId)
+            ORDER BY t.posted_on, t.id
+            """,
+            new { HouseholdId = householdId, LinkId = linkId }, ct));
+        return rows.ToList();
+    }
+
     /// <summary>Deletes a transaction added by hand (never a bank row). False when there is none with that id.</summary>
     public async Task<bool> DeleteAddedAsync(NpgsqlConnection conn, Guid householdId, Guid id, CancellationToken ct) =>
         await conn.ExecuteAsync(Cmd(

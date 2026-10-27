@@ -4,6 +4,7 @@
 	import type { Account, BankLink, ExternalAccount, SyncResult } from '#lib/types.ts';
 	import { apiFetch, ClientApiError } from '#lib/utils/client.ts';
 	import { relativeTime } from '#lib/utils/dates.ts';
+	import { announcePlaid, openPlaid } from '#lib/utils/plaid.ts';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 	import Icon from './Icon.svelte';
 	import ExternalAccountRow from './ExternalAccountRow.svelte';
@@ -20,6 +21,8 @@
 
 	let renaming = $state(false);
 	let syncing = $state(false);
+	let reconnecting = $state(false);
+	const plaid = $derived(link.provider === 'plaid');
 	// local copy so a mapping change shows immediately; reset when the server data changes
 	let exts = $derived<ExternalAccount[]>(link.accounts);
 
@@ -44,12 +47,38 @@
 					'info'
 				);
 			} else if (e instanceof ClientApiError && e.status === 502) {
-				toasts.show(e.problem.detail || 'SimpleFIN Bridge is not reachable right now.', 'error');
+				toasts.show(
+					e.problem.detail ||
+						(plaid
+							? 'Plaid is not reachable right now.'
+							: 'SimpleFIN Bridge is not reachable right now.'),
+					'error'
+				);
 			} else {
 				toasts.show('Could not sync. Check your connection.', 'error');
 			}
 		} finally {
 			syncing = false;
+		}
+	}
+
+	/** Plaid Link in update mode: sign in to the bank again, then the API syncs this link. */
+	async function reconnect() {
+		if (reconnecting) return;
+		reconnecting = true;
+		try {
+			const outcome = await openPlaid(link.id);
+			announcePlaid(outcome);
+			if (outcome.kind !== 'exit') await invalidateAll();
+		} catch (e) {
+			toasts.show(
+				e instanceof ClientApiError
+					? e.problem.detail || 'Plaid is not reachable right now.'
+					: 'Could not open Plaid.',
+				'error'
+			);
+		} finally {
+			reconnecting = false;
 		}
 	}
 
@@ -116,6 +145,7 @@
 					{:else}
 						Not synced yet
 					{/if}
+					<span aria-hidden="true"> · </span>via {plaid ? 'Plaid' : 'SimpleFIN'}
 					{#if !link.syncEnabled}<span aria-hidden="true"> · </span>Paused{/if}
 				</p>
 			</div>
@@ -140,6 +170,18 @@
 				<span>{link.lastError}</span>
 			</div>
 		{/if}
+		{#if plaid && link.needsReconnect}
+			<button
+				type="button"
+				class="btn min-h-12 rounded-full btn-primary"
+				disabled={reconnecting}
+				onclick={reconnect}
+				data-testid="plaid-reconnect"
+			>
+				{#if reconnecting}<span class="loading loading-sm loading-spinner"></span>{/if}
+				Reconnect {link.name}
+			</button>
+		{/if}
 		{#each link.bridgeErrors as err, i (i)}
 			<div class="alert items-start text-sm alert-warning" role="alert">
 				<Icon name="circle-alert" size={18} />
@@ -149,8 +191,13 @@
 
 		{#if exts.length === 0}
 			<p class="text-sm text-base-content/60">
-				No accounts came through yet. Sync again in a moment, or check the Bridge for connection
-				problems.
+				{#if plaid}
+					No accounts came through yet. Plaid can take a few minutes after connecting; this page
+					fills in on the next sync.
+				{:else}
+					No accounts came through yet. Sync again in a moment, or check the Bridge for connection
+					problems.
+				{/if}
 			</p>
 		{:else}
 			<ul class="divide-y divide-base-300/60" aria-label="Accounts from {link.name}">
@@ -172,7 +219,11 @@
 						onchange={(e) => e.currentTarget.form?.requestSubmit()}
 					/>
 					<span class="label-text text-sm"
-						>{link.syncEnabled ? 'Syncing every few hours' : 'Paused'}</span
+						>{link.syncEnabled
+							? plaid
+								? 'Syncing every hour'
+								: 'Syncing every few hours'
+							: 'Paused'}</span
 					>
 				</label>
 			</form>

@@ -51,6 +51,14 @@ x-api-env: &api-env
   # it means re-linking every bank (docs/BANK-SYNC.md).
   Security__DataKey: ${DATA_KEY:-}
   Sync__IntervalHours: ${SYNC_INTERVAL_HOURS:-6}
+  # Plaid (optional, next to SimpleFIN): keys from dashboard.plaid.com → Developers
+  # → Keys. Empty = only SimpleFIN is offered. PLAID_ENV production (the free
+  # Trial plan) or sandbox. PLAID_REDIRECT_URI defaults to
+  # ${PUBLIC_URL}/settings/banks/plaid-oauth; list it under Allowed redirect URIs.
+  Plaid__ClientId: ${PLAID_CLIENT_ID:-}
+  Plaid__Secret: ${PLAID_SECRET:-}
+  Plaid__Environment: ${PLAID_ENV:-production}
+  Plaid__RedirectUri: ${PLAID_REDIRECT_URI:-}
   # Fuzzy matcher (v6, apps/matcher). Shared secret sent as X-Matcher-Key; the
   # same MATCHER_KEY is passed to the `matcher` service. If the matcher is down
   # or the key is empty/wrong, the API falls back to its built-in matcher.

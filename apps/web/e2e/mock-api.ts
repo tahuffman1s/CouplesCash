@@ -238,7 +238,7 @@ type Prefs = {
 type BankLinkRec = {
 	id: string;
 	householdId: string;
-	provider: 'simplefin';
+	provider: 'simplefin' | 'plaid';
 	name: string;
 	createdBy: string;
 	createdAt: string;
@@ -247,6 +247,8 @@ type BankLinkRec = {
 	lastError: string | null;
 	syncEnabled: boolean;
 	bridgeErrors: string[];
+	/** v7 Plaid: the bank wants a new sign-in (Reconnect) */
+	needsReconnect?: boolean;
 };
 type ExtAccount = {
 	id: string;
@@ -2389,6 +2391,7 @@ function linkView(l: BankLinkRec) {
 		lastError: l.lastError,
 		syncEnabled: l.syncEnabled,
 		bridgeErrors: l.bridgeErrors,
+		needsReconnect: !!l.needsReconnect,
 		accounts: [...extAccounts.values()]
 			.filter((x) => x.bankLinkId === l.id)
 			.sort((a, b) => a.name.localeCompare(b.name))
@@ -5004,6 +5007,78 @@ const server = createServer(async (req, res) => {
 					.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 					.map(linkView)
 			);
+		// --- v7: Plaid. `public-demo` links the demo bank (as "U.S. Bank" unless Link named it), `public-reauth` links one
+		// that already wants a new sign-in (Reconnect → /plaid/reconnected clears it); `public-bad` is refused.
+		if (p === '/v1/banks/plaid' && m === 'GET')
+			return send(res, 200, {
+				configured: !BANKS_DISABLED,
+				environment: 'sandbox',
+				oAuthRedirect: false
+			});
+		if (p === '/v1/banks/plaid/link-token' && m === 'POST') {
+			if (BANKS_DISABLED)
+				return problem(
+					res,
+					503,
+					'Plaid not configured',
+					'Set Plaid__ClientId and Plaid__Secret',
+					'https://couplescash.app/problems/plaid_not_configured'
+				);
+			const b = await readJson(req);
+			if (b.linkId) {
+				const l = bankLinks.get(String(b.linkId));
+				if (!l || l.householdId !== hh || l.provider !== 'plaid')
+					return problem(res, 404, 'Not found');
+			}
+			return send(res, 200, {
+				linkToken: `link-sandbox-${randomUUID()}`,
+				expiration: new Date(Date.now() + 4 * 3600_000).toISOString()
+			});
+		}
+		if (p === '/v1/banks/plaid/exchange' && m === 'POST') {
+			const b = await readJson(req);
+			const token = String(b.publicToken ?? '').trim();
+			if (token !== 'public-demo' && token !== 'public-reauth')
+				return send(res, 400, {
+					title: 'Validation failed',
+					status: 400,
+					errors: {
+						publicToken: [
+							'Plaid did not accept this connection (it may have expired). Connect again.'
+						]
+					}
+				});
+			const link: BankLinkRec = {
+				id: randomUUID(),
+				householdId: hh,
+				provider: 'plaid',
+				name: String(b.institutionName ?? '').trim() || 'U.S. Bank',
+				createdBy: user.id,
+				createdAt: nowIso(),
+				lastSyncedAt: null,
+				lastManualSyncAt: null,
+				lastError: null,
+				syncEnabled: true,
+				bridgeErrors: []
+			};
+			bankLinks.set(link.id, link);
+			bridge.set(link.id, demoBridge());
+			record(hh, user, 'bank.linked', 'bank_link', link.id, `linked bank ${link.name}`);
+			syncLink(link, user);
+			if (token === 'public-reauth') {
+				link.needsReconnect = true;
+				link.lastError = 'The bank wants you to sign in again. Tap Reconnect.';
+			}
+			return send(res, 201, linkView(link));
+		}
+		mm = /^\/v1\/banks\/([^/]+)\/plaid\/reconnected$/.exec(p);
+		if (mm && m === 'POST') {
+			const l = bankLinks.get(mm[1]);
+			if (!l || l.householdId !== hh || l.provider !== 'plaid')
+				return problem(res, 404, 'Not found');
+			l.needsReconnect = false;
+			return send(res, 200, syncLink(l, user));
+		}
 		if (p === '/v1/banks/simplefin/claim' && m === 'POST') {
 			const b = await readJson(req);
 			const token = String(b.setupToken ?? '').trim();

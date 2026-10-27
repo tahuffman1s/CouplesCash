@@ -856,6 +856,24 @@ Transactions on `fun` accounts never enter To review (status confirmed, `ignoreR
 the account's transaction list. Activity kinds added: `sweep.done`, `sweep.auto`, `transfer.planned_paid`. Push tag
 `payday`. Week endpoints (`/v1/week`) use the pay week (payday-anchored) from v7 on.
 
+### Plaid (v7, optional second provider)
+
+```ts
+// BankLink.provider: 'simplefin' | 'plaid'; BankLink gains needsReconnect: boolean
+// InboxItem / AccountTransaction source gains 'plaid'
+type PlaidStatus = { configured: boolean; environment: 'production' | 'sandbox'; oAuthRedirect: boolean };
+type PlaidLinkToken = { linkToken: string; expiration: string };
+```
+
+| Method | Route | Body / Query | Response |
+|---|---|---|---|
+| GET | `/v1/banks/plaid` | — | `200 PlaidStatus` (`configured` = Plaid keys **and** `Security__DataKey`) |
+| POST | `/v1/banks/plaid/link-token` | `{ linkId? }` (a Plaid link → Link update mode) | `200 PlaidLinkToken` · `404` unknown / not Plaid link · `503 plaid_not_configured` · `503 bank_sync_not_configured` · `502` Plaid error |
+| POST | `/v1/banks/plaid/exchange` | `{ publicToken (1–512), institutionName? (≤ 120) }` | `201 BankLink` (first sync inline, 20 s budget) · `400 errors.publicToken` (refused / expired) · `503` · `502` |
+| POST | `/v1/banks/{id}/plaid/reconnected` | — (after Link update mode) | `200 SyncResult` (no cooldown; clears `needsReconnect`) · `404` · `503` · `502` |
+| POST | `/v1/banks/{id}/sync` | — | Plaid links also call `/transactions/refresh` first (best effort) |
+| DELETE | `/v1/banks/{id}` | — | also drops the link's visible pending rows (`ignored/dropped`, confirmations reversed) and, for Plaid, revokes the Item (`/item/remove`, best effort) |
+
 ## v7 implementation notes (API)
 
 Deviations and clarifications from the "# v7 additions" table, as built in `apps/api`:
@@ -1020,3 +1038,27 @@ Deviations and clarifications from the "# v7 additions" table, as built in `apps
 - **Scheduler order per tick**: autopay → reminders → hygiene → sweep-freeze → bank-sync → friday (planned transfers + sweep for every
   household with a bills account or a transfer item) → rematch → found-bills → payday-push. `bank.synced` data gains
   `plannedTransfersPaid`, `sweepsDone`, `toReview` (the "N to review" push now counts rows actually left to review). OpenAPI tag `Plan`.
+- **Plaid** (`Plaid/PlaidClient.cs`, `PlaidParser.cs`, migration `0010_plaid.sql`). Keys in the `PLAID-CLIENT-ID` / `PLAID-SECRET` headers,
+  `Plaid-Version: 2020-09-14`; bodies are never logged. Link token: `client_name` CouplesCash, `products: [transactions]`,
+  `transactions.days_requested` 90, `user.client_user_id` = household id, `redirect_uri` = `Plaid__RedirectUri` (default
+  `{WebAuthn__Origin}/settings/banks/plaid-oauth` when https; when Plaid answers `INVALID_FIELD` about it the token is created
+  without it and a warning is logged); with `linkId` → `access_token` instead of products (update mode). The access token is
+  stored encrypted in `bank_links.access_url_enc` (`provider = 'plaid'`, `plaid_item_id`). A sync reads `/item/get`
+  (`status.transactions.last_successful_update` → every account's `balanceAt`, `institution_name` when present) and
+  `/transactions/get` for the usual window (`today − 30`, `− 90` first sync, … today; 500 per page, ≤ 20 pages,
+  `include_original_description`) — the same reconcile / matching pipeline as SimpleFIN, rows `source = 'plaid'`. Mapping:
+  amount sign flipped (Plaid positive = money out); credit / loan `current` = owed (stored positive like SimpleFIN's);
+  `available` only for depository; description = `original_description` ?? `name`, payee = `merchant_name` (when different);
+  pending dated `authorized_date` ?? `date`, never after today; a posted row's `pending_transaction_id` replaces that pending
+  row in place (certain, before the fuzzy pairing). `PRODUCT_NOT_READY` (new Item) → accounts from `/accounts/get`, no
+  transactions, bridge error "Plaid is still loading transactions…". Errors: `ITEM_LOGIN_REQUIRED` and other sign-in codes →
+  `last_error` "The bank wants you to sign in again. Tap Reconnect." + `needs_reconnect` (the scheduler skips the link until
+  `/plaid/reconnected`); `INVALID_ACCESS_TOKEN` / `ITEM_NOT_FOUND` → "unlink and connect again"; otherwise Plaid's
+  `display_message`. **Scheduling**: every `Plaid__IntervalMinutes` (60); after linking / reconnecting (30 min) and Sync now
+  (20 min) — `bank_links.refresh_until` — every `Plaid__RefreshPollMinutes` (3), since Plaid fetches in the background.
+- **Cross-provider dedupe.** On a mapped account, a new posted row from one provider (`simplefin` / `plaid`) whose exact amount
+  matches a posted, visible row from the other provider at most 3 days apart (one-to-one, closest date first; `Domain/ProviderTwins.cs`)
+  is hidden as `ignored/superseded` with `replaced_by` = that row, its confirmation reversed, and never reaches matching or To
+  review; the same runs when an external account is mapped (`PUT /banks/accounts/{id}`) onto an account the other provider feeds.
+  One `bank.deduplicated` event (actor null, `data: { accountId, source, count }`); `bank.synced.data.alreadyFromOtherProvider`.
+

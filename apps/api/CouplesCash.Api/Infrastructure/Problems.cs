@@ -36,6 +36,15 @@ public static class Problems
             detail: "Passkeys need an https origin: set WebAuthn__Origin (or Api__PublicUrl) to the public URL of the app.",
             statusCode: StatusCodes.Status503ServiceUnavailable);
 
+    public const string PlaidNotConfiguredType = "https://couplescash.app/problems/plaid_not_configured";
+
+    public static ProblemHttpResult PlaidNotConfigured() =>
+        TypedResults.Problem(
+            type: PlaidNotConfiguredType,
+            title: "Plaid not configured",
+            detail: "Set Plaid__ClientId and Plaid__Secret (PLAID_CLIENT_ID / PLAID_SECRET in .env) from dashboard.plaid.com → Developers → Keys.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+
     public static ProblemHttpResult BankSyncNotConfigured() =>
         TypedResults.Problem(
             type: BankSyncNotConfiguredType,

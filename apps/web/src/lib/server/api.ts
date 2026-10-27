@@ -3,6 +3,7 @@ import { API_URL } from '$app/env/private';
 import { redirect, type RequestEvent } from '@sveltejs/kit';
 import type {
 	Account,
+	PlaidStatus,
 	AccountRole,
 	AccountTransaction,
 	AccountTransactionsPage,
@@ -390,6 +391,14 @@ export function endpoints(event: RequestEvent) {
 			update: (id: string, patch: { name?: string; syncEnabled?: boolean }) =>
 				c.patch<BankLink>(`/banks/${id}`, patch),
 			remove: (id: string) => c.del(`/banks/${id}`),
+			/** v7: whether Plaid is offered (false on any error, so the page just shows SimpleFIN). */
+			plaidStatus: async (): Promise<PlaidStatus> => {
+				try {
+					return await c.get<PlaidStatus>('/banks/plaid');
+				} catch {
+					return { configured: false, environment: 'production', oAuthRedirect: false };
+				}
+			},
 			sync: (id: string) => c.post<SyncResult>(`/banks/${id}/sync`),
 			map: (externalAccountId: string, body: ExternalAccountMapping) =>
 				c.put<ExternalAccount>(`/banks/accounts/${externalAccountId}`, body)

@@ -121,6 +121,12 @@ public sealed record PasskeyLoginRequest(Guid ChallengeId, JsonElement Credentia
 
 public sealed record BankClaimRequest(string SetupToken, string? Name);
 
+/// <summary>v7 Plaid: <paramref name="LinkId"/> = a Plaid link to sign in to again (Link update mode); null = a new connection.</summary>
+public sealed record PlaidLinkTokenRequest(Guid? LinkId);
+
+/// <summary>v7 Plaid: Link's <c>onSuccess</c> public token and the institution name from its metadata (the link's name).</summary>
+public sealed record PlaidExchangeRequest(string PublicToken, string? InstitutionName);
+
 public sealed record BankLinkPatchRequest(string? Name, bool? SyncEnabled);
 
 public sealed record ExternalAccountCreateSpec(string Name, AccountType? Type, string? Institution);

@@ -6,6 +6,7 @@
 	import Icon from '#lib/components/Icon.svelte';
 	import BottomSheet from '#lib/components/BottomSheet.svelte';
 	import BankLinkCard from '#lib/components/BankLinkCard.svelte';
+	import PlaidConnectCard from '#lib/components/PlaidConnectCard.svelte';
 	import { toasts } from '#lib/state/toasts.svelte.ts';
 
 	let { data, form }: PageProps = $props();
@@ -48,6 +49,9 @@
 				<Icon name="landmark" size={18} /> How bank sync works
 			</h2>
 			<p class="text-sm text-base-content/70">
+				{#if data.plaid.configured}
+					The quickest way is <strong>Connect with Plaid</strong> below. Or:
+				{/if}
 				CouplesCash reads balances and transactions through <strong>SimpleFIN Bridge</strong>, a
 				read-only service built for self-hosters. It costs <strong>$1.50 a month</strong>, never
 				sees your CouplesCash login, and can't move money. Transactions are matched to your bills
@@ -90,6 +94,9 @@
 			</span>
 		</div>
 	{:else}
+		{#if data.plaid.configured}
+			<PlaidConnectCard status={data.plaid} />
+		{/if}
 		<section class="card border border-base-300/60 bg-base-100 shadow-sm" aria-labelledby="link">
 			<form
 				method="POST"
@@ -103,7 +110,9 @@
 					};
 				}}
 			>
-				<h2 id="link" class="font-semibold">Link a bank</h2>
+				<h2 id="link" class="font-semibold">
+					{data.plaid.configured ? 'Or link through SimpleFIN' : 'Link a bank'}
+				</h2>
 				{#if form?.error && form?.values}
 					<div class="alert text-sm alert-error" role="alert">{form.error}</div>
 				{/if}
@@ -151,7 +160,8 @@
 	{#if unlinking}
 		<p class="text-sm text-base-content/70">
 			Syncing stops and the accounts from this link disappear from this page. Transactions already
-			in Transactions and the CouplesCash accounts you mapped to are kept.
+			in Transactions and the CouplesCash accounts you mapped to are kept; its pending charges are
+			dropped, since nothing can update them any more.
 		</p>
 		<form method="POST" action="?/unlink" class="mt-4 flex gap-2" use:enhance>
 			<input type="hidden" name="id" value={unlinking.id} />

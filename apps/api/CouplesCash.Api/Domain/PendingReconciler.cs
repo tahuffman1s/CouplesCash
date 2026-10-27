@@ -21,8 +21,11 @@ public sealed record ReconcileExisting(
     public bool IsReviewed => Status != "pending";
 }
 
-/// <summary>A transaction in this Bridge response for the same account. <paramref name="AmountCents"/> is signed.</summary>
-public sealed record ReconcileIncoming(string ExternalId, bool Pending, DateOnly PostedOn, long AmountCents, string Description, string? Payee);
+/// <summary>
+/// A transaction in this Bridge response for the same account. <paramref name="AmountCents"/> is signed. <paramref name="ReplacesExternalId"/>:
+/// the provider says this posted transaction is the pending one with that id (Plaid's <c>pending_transaction_id</c>).
+/// </summary>
+public sealed record ReconcileIncoming(string ExternalId, bool Pending, DateOnly PostedOn, long AmountCents, string Description, string? Payee, string? ReplacesExternalId = null);
 
 /// <summary>An incoming transaction whose id is already stored. <paramref name="Posts"/> = the stored row was pending and this one is posted.</summary>
 public sealed record SameIdUpdate(Guid ExistingId, ReconcileIncoming Incoming, bool Posts, bool AmountChanged);
@@ -129,9 +132,24 @@ public static class PendingReconciler
         var replacements = new List<PendingReplacement>();
         var usedPending = new HashSet<Guid>();
         var usedIncoming = new HashSet<ReconcileIncoming>(ReferenceEqualityComparer.Instance);
+
+        // 1a. The provider names the pending row it replaces: that pairing is certain, whatever the amount or the description.
+        foreach (var tx in unmatched.Where(t => !t.Pending && t.ReplacesExternalId is not null))
+        {
+            var pending = absent.FirstOrDefault(p => p.ExternalId == tx.ReplacesExternalId && !usedPending.Contains(p.Id));
+            if (pending is null)
+            {
+                continue;
+            }
+
+            usedPending.Add(pending.Id);
+            usedIncoming.Add(tx);
+            replacements.Add(new PendingReplacement(pending.Id, tx, 1.0, pending.AmountCents != tx.AmountCents));
+        }
+
         var pairs = (
-            from tx in unmatched.Where(t => !t.Pending)
-            from p in absent
+            from tx in unmatched.Where(t => !t.Pending && !usedIncoming.Contains(t))
+            from p in absent.Where(p => !usedPending.Contains(p.Id))
             let score = Score(p.PostedOn, p.AmountCents, p.Description, p.Payee, tx.PostedOn, tx.AmountCents, tx.Description, tx.Payee)
             where score is not null
             select (Pending: p, Tx: tx, Score: score!.Value))

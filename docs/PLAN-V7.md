@@ -98,6 +98,11 @@ already took the money off available; the bank's copy later takes that payment o
 It can be deleted from its transaction sheet (a bill it paid goes back to unpaid). Caveat: if the bank's
 available balance already includes a hold the feed doesn't list, adding it by hand counts it twice — delete it.
 
+## Plaid (fresher bank data)
+SimpleFIN refreshed their banks about once a day and once stalled for two days. Plaid (free Trial plan, "Personal use",
+10 connections) is offered next to it: *Settings → Banks → Connect a bank*, Reconnect when the bank wants a new sign-in, and
+Sync now asks Plaid to check the bank right away. Same pipeline; switching dedupes the overlap. Setup: `docs/BANK-SYNC.md`.
+
 ## What's removed from the app (web)
 Insights (donut, monthly budgets, month report), weekly budgets, goals, to-pay list, activity feed page, typed manual
 expenses, CSV import entry points (kept only under Settings → Banks → "Import a statement"), pay-period settings,

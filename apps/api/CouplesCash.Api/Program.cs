@@ -6,6 +6,7 @@ using CouplesCash.Api.Data;
 using CouplesCash.Api.Endpoints;
 using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Matching;
+using CouplesCash.Api.Plaid;
 using CouplesCash.Api.Push;
 using CouplesCash.Api.Scheduler;
 using CouplesCash.Api.Security;
@@ -90,6 +91,7 @@ var push = PushOptions.Read(configuration);
 var webAuthn = WebAuthnOptions.Resolve(configuration);
 var security = SecurityOptions.Read(configuration);
 var simpleFin = SimpleFinOptions.Read(configuration);
+var plaidOptions = PlaidOptions.Read(configuration);
 var sync = configuration.GetSection(SyncOptions.SectionName).Get<SyncOptions>() ?? new SyncOptions();
 var matcherOptions = MatcherOptions.Read(configuration);
 var dataProtector = new DataProtector(security); // throws on a malformed key: refuse to start rather than store credentials unencrypted
@@ -101,6 +103,7 @@ builder.Services.AddSingleton(push);
 builder.Services.AddSingleton(webAuthn);
 builder.Services.AddSingleton(sync);
 builder.Services.AddSingleton(simpleFin);
+builder.Services.AddSingleton(plaidOptions);
 builder.Services.AddSingleton(dataProtector);
 builder.Services.AddSingleton(matcherOptions);
 builder.Services.AddSingleton(TimeProvider.System);
@@ -140,6 +143,8 @@ builder.Services.AddSingleton<AddedTransactionService>();
 builder.Services.AddSingleton<BankSyncService>();
 builder.Services.AddHttpClient(SimpleFinClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddSingleton<ISimpleFinClient, SimpleFinClient>();
+builder.Services.AddHttpClient(PlaidClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(60));
+builder.Services.AddSingleton<IPlaidClient, PlaidClient>();
 
 // v6: the Python matcher (typed client, X-Matcher-Key, 30 s), matching with the built-in fallback, found bills, and the
 // debounced background worker for "rematch now" / "found bills after a sync".
@@ -212,6 +217,9 @@ app.Logger.LogInformation("Web Push {State}", push.Enabled ? "enabled" : "disabl
 app.Logger.LogInformation("Bank sync {State}", dataProtector.IsConfigured
     ? $"enabled (every {sync.IntervalHours}h, manual cooldown {sync.ManualCooldownMinutes} min{(simpleFin.BaseUrl is null ? "" : $", Bridge override {simpleFin.BaseUrl}")})"
     : "disabled (set Security__DataKey, base64 of 32 random bytes)");
+app.Logger.LogInformation("Plaid {State}", plaidOptions.Configured
+    ? $"enabled ({plaidOptions.Environment}{(plaidOptions.BaseUrl is null ? "" : $", override {plaidOptions.BaseUrl}")}, every {plaidOptions.IntervalMinutes:0.##} min, OAuth redirect {(plaidOptions.RedirectUri is null ? "none" : plaidOptions.RedirectUri)})"
+    : "disabled (set Plaid__ClientId and Plaid__Secret to offer Plaid next to SimpleFIN)");
 app.Logger.LogInformation("Matcher {State}", matcherOptions.Enabled
     ? $"enabled at {matcherOptions.BaseUri} (timeout {matcherOptions.Timeout.TotalSeconds:0}s, sweep every {matcherOptions.RematchMinutes:0.##} min)"
     : "disabled (set Matcher__BaseUrl and Matcher__Key): the built-in matcher is used and found bills are paused");

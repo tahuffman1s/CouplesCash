@@ -18,6 +18,9 @@
 #   SMOKE_SIMPLEFIN_PORT=<port>     start scripts/fake-simplefin.py and run the bank-sync flow (API needs Security__DataKey
 #                                   and SimpleFin__BaseUrl=http://127.0.0.1:<port>; add Sync__IntervalHours=0 +
 #                                   Scheduler__IntervalSeconds=5 + SMOKE_SCHEDULER_WAIT for auto-match).
+#   SMOKE_PLAID_PORT=<port>         v7: start scripts/fake-plaid.py and run the Plaid flow (API needs Security__DataKey,
+#                                   Plaid__BaseUrl=http://127.0.0.1:<port>, Plaid__ClientId, Plaid__Secret; with SMOKE_SCHEDULER_WAIT
+#                                   also Plaid__IntervalMinutes=0.1 + Plaid__RefreshPollMinutes=0.05 for the scheduler checks).
 #   SMOKE_MATCHER_URL=<url>         v6: the API runs with Matcher__BaseUrl=<url> + Matcher__Key=$SMOKE_MATCHER_KEY. Replaces the v3–v5
 #   SMOKE_MATCHER_KEY=<key>         bank flows (which assert built-in scores) with the fuzzy-matcher flow: auto-match with a reason,
 #                                   learned names, rematch after a bank name, auto level off/bills, found bills accept/dismiss,
@@ -913,6 +916,88 @@ v7_friday_flow() {
   request DELETE "/v1/banks/$LINK7" "$T_TOKEN"; expect 204 "unlink the v7 Bridge"
 }
 
+# v7 Plaid flow (SMOKE_PLAID_PORT): a fresh household links a bank through scripts/fake-plaid.py — link token, a refused and an
+# accepted public token, "still loading" on the first sync, Sync now (refresh + transactions), mapping, Plaid rows in the pipeline;
+# with SMOKE_SCHEDULER_WAIT (API: Plaid__IntervalMinutes / Plaid__RefreshPollMinutes small) the scheduler picks up a posted
+# transaction that names its pending row, then the bank wants a new sign-in → Reconnect (update mode) → unlink revokes the Item.
+plaid_flow() {
+  local P_EMAIL="pat+$RUN@example.com" P_TOKEN P_REFRESH PLINK PEXT PACC PDINER FAKEP="http://127.0.0.1:$SMOKE_PLAID_PORT"
+  pwait() { # pwait LABEL PATH JQ-FILTER
+    for _ in $(seq 1 "$SMOKE_SCHEDULER_WAIT"); do
+      request GET "$2" "$P_TOKEN"
+      if [[ "$STATUS" == "200" ]] && echo "$BODY" | jq -e "$3" >/dev/null 2>&1; then pass "$1"; return 0; fi
+      sleep 1
+    done
+    echo "$BODY" | head -c 2500; echo; fail "$1: not observed within ${SMOKE_SCHEDULER_WAIT}s"
+  }
+
+  echo "--- v7: Plaid via fake Plaid on port $SMOKE_PLAID_PORT"
+  command -v python3 >/dev/null || fail "python3 is required for the fake Plaid server"
+  local SCRIPT_DIR; SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 -I "$SCRIPT_DIR/fake-plaid.py" --port "$SMOKE_PLAID_PORT" &
+  PLAID_PID=$!
+  for _ in $(seq 1 50); do curl -fs "$FAKEP/__health" >/dev/null 2>&1 && break; sleep 0.1; done
+  curl -fs "$FAKEP/__health" >/dev/null || fail "fake Plaid server did not start"
+
+  request POST /v1/auth/register '' "$(jq -nc --arg e "$P_EMAIL" --arg p "$PASSWORD" '{email:$e,password:$p,displayName:"Pat"}')"; expect 201 "register Pat"
+  P_TOKEN="$(echo "$BODY" | jq -r .accessToken)"; P_REFRESH="$(echo "$BODY" | jq -r .refreshToken)"
+  request POST /v1/couple/code "$P_TOKEN" '{"name":"Pat & Co"}'; expect 201 "Pat creates a household"
+  request POST /v1/auth/refresh '' "$(jq -nc --arg r "$P_REFRESH" '{refreshToken:$r}')"; expect 200 "refresh Pat"
+  P_TOKEN="$(echo "$BODY" | jq -r .accessToken)"
+
+  request GET /v1/banks/plaid "$P_TOKEN"; expect 200 "Plaid status"
+  v6check "Plaid is offered" '.configured==true'
+  request POST /v1/banks/plaid/link-token "$P_TOKEN" '{}'; expect 200 "a Link token for a new connection"
+  v6check "link token handed to the page" '.linkToken=="link-sandbox-smoke" and (.expiration|length>0)'
+  request POST /v1/banks/plaid/link-token "$P_TOKEN" '{"linkId":"00000000-0000-7000-8000-000000000000"}'; expect 404 "update mode for an unknown link → 404"
+  request POST /v1/banks/plaid/exchange "$P_TOKEN" '{"publicToken":""}'; expect 400 "empty public token → 400"
+  request POST /v1/banks/plaid/exchange "$P_TOKEN" '{"publicToken":"public-sandbox-expired"}'; expect 400 "refused public token → 400"
+  v6check "error names publicToken" '.errors | has("publicToken")'
+  request POST /v1/banks/plaid/exchange "$P_TOKEN" '{"publicToken":"public-sandbox-good","institutionName":"U.S. Bank"}'; expect 201 "Pat connects U.S. Bank through Plaid"
+  PLINK="$(echo "$BODY" | jq -r .id)"
+  v6check "a Plaid link named after the bank; Plaid still loading; accounts already there" \
+    '.provider=="plaid" and .name=="U.S. Bank" and .needsReconnect==false and (.bridgeErrors[0]|test("still loading")) and (.accounts|length==2)'
+  [[ "$BODY" != *access-sandbox* ]] || fail "the access token must never be returned"
+  PEXT="$(echo "$BODY" | jq -r '.accounts[] | select(.externalId=="acc-chk") | .id')"
+  v6check "checking ··0000 with Plaid's available balance" '.accounts[] | select(.externalId=="acc-chk") | .name=="Plaid Checking ··0000" and .balanceCents==240807 and .availableCents==234567'
+
+  request POST "/v1/banks/$PLINK/sync" "$P_TOKEN"; expect 200 "Sync now (asks Plaid to refresh, then reads transactions)"
+  v6check "no Plaid errors (the scheduler may already have read the transactions)" '(.errors|length==0)'
+  [[ "$(curl -fs "$FAKEP/__fake/state" | jq -r .refreshes)" == "1" ]] || fail "Sync now calls /transactions/refresh"
+  pass "Sync now asked Plaid to refresh"
+  request POST "/v1/banks/$PLINK/sync" "$P_TOKEN"; expect 429 "Sync now again inside the cooldown → 429"
+
+  request PUT "/v1/banks/accounts/$PEXT" "$P_TOKEN" '{"create":{"name":"US Bank","type":"checking","institution":"U.S. Bank"}}'; expect 200 "map Plaid checking to a new account"
+  PACC="$(echo "$BODY" | jq -r .accountId)"
+  request GET "/v1/accounts/$PACC/transactions?filter=all" "$P_TOKEN"; expect 200 "the account's transactions"
+  v6check "Plaid rows: money out negative, the bank's wording, the merchant as payee" \
+    'any(.items[]; .source=="plaid" and .description=="SQ *BLUE BOTTLE 0042" and .payee=="Blue Bottle Coffee" and .amountCents==-425) and any(.items[]; .description=="ACME CORP PAYROLL" and .amountCents==150000)'
+  PDINER="$(echo "$BODY" | jq -r '.items[] | select(.description=="SQ *DINER") | .id')"
+  v6check "the pending diner is dated by its authorization" ".items[] | select(.id==\"$PDINER\") | .pending==true and .amountCents==-4000 and .postedOn==\"$(date -u -d "$TODAY_UTC -1 day" +%F)\""
+
+  if [[ "${SMOKE_SCHEDULER_WAIT:-0}" -gt 0 ]]; then
+    curl -fs -X POST "$FAKEP/__fake/phase/2" >/dev/null || fail "fake Plaid phase 2"
+    pwait "the scheduler picks up the posted diner: it takes over its pending row (tip, new wording)" "/v1/accounts/$PACC/transactions?filter=all" \
+      "any(.items[]; .id==\"$PDINER\" and .pending==false and .amountCents==-4800 and .description==\"THE DINER LLC\") and ([.items[] | select(.description|test(\"DINER\"))] | length==1)"
+    request GET "/v1/accounts/$PACC" "$P_TOKEN"; v6check "available follows Plaid" '.availableCents==229767'
+
+    curl -fs -X POST "$FAKEP/__fake/login-required" >/dev/null || fail "fake Plaid login-required"
+    pwait "the bank wants a new sign-in: the link says so" /v1/banks \
+      ".[] | select(.id==\"$PLINK\") | .needsReconnect==true and (.lastError|test(\"sign in again\"))"
+    request POST /v1/banks/plaid/link-token "$P_TOKEN" "$(jq -nc --arg l "$PLINK" '{linkId:$l}')"; expect 200 "a Link token in update mode"
+    [[ "$(curl -fs "$FAKEP/__fake/state" | jq -r .updateMode)" == "1" ]] || fail "update mode passes the Item's access token"
+    request POST "/v1/banks/$PLINK/plaid/reconnected" "$P_TOKEN"; expect 200 "Reconnect finished: synced without the cooldown"
+    request GET /v1/banks "$P_TOKEN"; v6check "reconnected" ".[] | select(.id==\"$PLINK\") | .needsReconnect==false and .lastError==null"
+  else
+    echo "--- v7 Plaid scheduler checks skipped (set SMOKE_SCHEDULER_WAIT > 0)"
+  fi
+
+  request DELETE "/v1/banks/$PLINK" "$P_TOKEN"; expect 204 "unlink the Plaid bank"
+  [[ "$(curl -fs "$FAKEP/__fake/state" | jq -r .removed)" == "1" ]] || fail "unlinking revokes the Item at Plaid"
+  pass "unlinking revoked the Item at Plaid"
+  kill "$PLAID_PID" 2>/dev/null; wait "$PLAID_PID" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------------------------
 # v3: bank sync, review inbox, CSV import
 #   SMOKE_SIMPLEFIN_PORT=<port>  start scripts/fake-simplefin.py on that port and run the full SimpleFIN flow.
@@ -1383,6 +1468,8 @@ echo "$BODY" | jq -e '.events[] | select(.kind=="couple.settings" and .data.week
 
 request POST /v1/auth/password "$A_TOKEN" "$(jq -nc --arg p "$PASSWORD" '{currentPassword:$p,newPassword:"a brand new passphrase"}')"; expect 204 "change password"
 request POST /v1/auth/refresh '' "$(jq -nc --arg r "$A_REFRESH" '{refreshToken:$r}')"; expect 401 "all refresh tokens revoked after password change"
+
+if [[ -n "${SMOKE_PLAID_PORT:-}" ]]; then plaid_flow; else echo "--- v7 Plaid flow skipped (set SMOKE_PLAID_PORT; API needs Plaid__BaseUrl=http://127.0.0.1:<port>, Plaid__ClientId, Plaid__Secret)"; fi
 
 echo "--- added by hand: POST/DELETE /v1/transactions"
 request POST /v1/transactions "$A_TOKEN" "$(jq -nc --arg a "$ACC" --arg d "$(date -u +%F)" '{accountId:$a,amountCents:0,description:"Coffee",postedOn:$d}')"; expect 400 "zero amount → 400"

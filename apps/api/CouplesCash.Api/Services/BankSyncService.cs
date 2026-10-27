@@ -5,6 +5,7 @@ using CouplesCash.Api.Domain;
 using CouplesCash.Api.Endpoints;
 using CouplesCash.Api.Infrastructure;
 using CouplesCash.Api.Matching;
+using CouplesCash.Api.Plaid;
 using CouplesCash.Api.Push;
 using CouplesCash.Api.Security;
 using CouplesCash.Api.SimpleFin;
@@ -13,9 +14,11 @@ using Npgsql;
 namespace CouplesCash.Api.Services;
 
 /// <summary>
-/// SimpleFIN bank links: claim (store the access URL encrypted), sync (fetch, upsert external accounts, insert transactions
-/// with fingerprint dedupe, run the matcher, auto-match, push balances to mapped accounts), and the scheduler's "sync what is due".
-/// The access URL is decrypted only inside <see cref="SyncAsync"/> and never logged or returned.
+/// Bank links — SimpleFIN (claim a setup token, store the access URL encrypted) and Plaid (exchange Link's public token, store the
+/// access token encrypted) — sync (fetch, upsert external accounts, insert transactions with fingerprint dedupe, run the matcher,
+/// auto-match, push balances to mapped accounts), and the scheduler's "sync what is due". Both providers produce the same feed shape
+/// (<see cref="SimpleFinAccountSet"/>), so their rows share the pending lifecycle, matching and plan. Credentials are decrypted only
+/// inside this class and never logged or returned.
 /// </summary>
 public sealed class BankSyncService(
     NpgsqlDataSource db,
@@ -29,6 +32,8 @@ public sealed class BankSyncService(
     AddedTransactionService added,
     MatchingQueue matchingQueue,
     ISimpleFinClient client,
+    IPlaidClient plaid,
+    PlaidOptions plaidOptions,
     DataProtector protector,
     SyncOptions options,
     ActivityService activity,
@@ -38,8 +43,103 @@ public sealed class BankSyncService(
 {
     public const string DefaultLinkName = "SimpleFIN";
     public const string Source = "simplefin";
+    public const string PlaidSource = "plaid";
+    public const string DefaultPlaidLinkName = "Plaid";
+
+    /// <summary>After linking or reconnecting, Plaid is still fetching from the bank: check the link every few minutes for this long.</summary>
+    public static readonly TimeSpan PlaidLinkPollWindow = TimeSpan.FromMinutes(30);
+
+    /// <summary>After "Sync now" (which asks Plaid to refresh from the bank).</summary>
+    public static readonly TimeSpan PlaidRefreshPollWindow = TimeSpan.FromMinutes(20);
 
     public bool Configured => protector.IsConfigured;
+
+    public bool PlaidConfigured => plaid.Configured;
+
+    // ---------------------------------------------------------------------------------------------
+    // Plaid
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>A Link token for a new connection, or — with <paramref name="link"/> — for signing in again (update mode).</summary>
+    public async Task<PlaidLinkToken> PlaidLinkTokenAsync(Guid householdId, BankLinkRow? link, CancellationToken ct)
+    {
+        var accessToken = link is null ? null : protector.Unprotect(link.AccessUrlEnc);
+        return await plaid.CreateLinkTokenAsync(householdId.ToString("D"), accessToken, ct);
+    }
+
+    /// <summary>
+    /// Exchanges Link's public token, stores the access token encrypted and runs a first sync within <c>Sync__ClaimSyncBudgetSeconds</c>
+    /// (Plaid usually needs a few more minutes for the transactions; the scheduler keeps checking for <see cref="PlaidLinkPollWindow"/>).
+    /// Throws <see cref="SimpleFinException"/> when the exchange fails.
+    /// </summary>
+    public async Task<BankLinkRow> PlaidLinkAsync(Guid householdId, Guid userId, string? actorName, string publicToken, string? institutionName, CancellationToken ct)
+    {
+        var (accessToken, itemId) = await plaid.ExchangeAsync(publicToken, ct);
+        var encrypted = protector.Protect(accessToken);
+        var linkName = string.IsNullOrWhiteSpace(institutionName) ? DefaultPlaidLinkName : institutionName.Trim();
+        if (linkName.Length > 40)
+        {
+            linkName = linkName[..40].TrimEnd();
+        }
+
+        var now = time.Now();
+        BankLinkRow link;
+        await using (var uow = await db.BeginUnitOfWorkAsync(ct))
+        {
+            link = await banks.InsertLinkAsync(uow.Connection, householdId, userId, linkName, encrypted, now, ct,
+                provider: BankProviders.Plaid, plaidItemId: itemId, refreshUntil: now + PlaidLinkPollWindow);
+            await activity.RecordAsync(uow, householdId, userId, "bank.linked", "bank", link.Id,
+                ActivitySummaries.BankLinked(link.Name), new { linkId = link.Id, provider = link.Provider }, ct, actorName);
+            await uow.CommitAsync(ct);
+        }
+
+        await FirstSyncAsync(link, userId, actorName, ct);
+        return await banks.GetLinkAsync(householdId, link.Id, ct) ?? link;
+    }
+
+    /// <summary>Plaid Link in update mode finished: clear "needs reconnect", sync now (no cooldown) and keep checking for a while.</summary>
+    public async Task<SyncResultDto> PlaidReconnectedAsync(BankLinkRow link, Guid userId, string? actorName, CancellationToken ct)
+    {
+        await banks.SetRefreshUntilAsync(link.HouseholdId, link.Id, time.Now() + PlaidLinkPollWindow, reconnected: true, ct);
+        var fresh = await banks.GetLinkAsync(link.HouseholdId, link.Id, ct) ?? link;
+        return await SyncAsync(fresh, userId, actorName, manual: false, ct);
+    }
+
+    /// <summary>Unlinking a Plaid link also revokes its access token at Plaid (best effort; the link is gone either way).</summary>
+    public async Task RevokeAsync(BankLinkRow link, CancellationToken ct)
+    {
+        if (!link.IsPlaid || !protector.IsConfigured || !plaid.Configured)
+        {
+            return;
+        }
+
+        try
+        {
+            await plaid.RemoveAsync(protector.Unprotect(link.AccessUrlEnc), ct);
+        }
+        catch (Exception ex) when (ex is SimpleFinException or CryptographicException or InvalidOperationException)
+        {
+            logger.LogWarning("Could not revoke Plaid link {LinkId} at Plaid: {Message}", link.Id, ex.Message);
+        }
+    }
+
+    private async Task FirstSyncAsync(BankLinkRow link, Guid userId, string? actorName, CancellationToken ct)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.ClaimSyncBudgetSeconds, 1, 120)));
+        try
+        {
+            await SyncAsync(link, userId, actorName, manual: false, budget.Token);
+        }
+        catch (SimpleFinException ex)
+        {
+            logger.LogWarning("First sync of bank link {LinkId} failed: {Message}", link.Id, ex.Message);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            await banks.SetErrorAsync(link.HouseholdId, link.Id, "First sync timed out; the scheduler will retry.", manual: false, time.Now(), CancellationToken.None);
+        }
+    }
 
     // ---------------------------------------------------------------------------------------------
     // Claim
@@ -62,21 +162,7 @@ public sealed class BankSyncService(
             await uow.CommitAsync(ct);
         }
 
-        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        budget.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.ClaimSyncBudgetSeconds, 1, 120)));
-        try
-        {
-            await SyncAsync(link, userId, actorName, manual: false, budget.Token);
-        }
-        catch (SimpleFinException ex)
-        {
-            logger.LogWarning("First sync of bank link {LinkId} failed: {Message}", link.Id, ex.Message);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            await banks.SetErrorAsync(householdId, link.Id, "First sync timed out; the scheduler will retry.", manual: false, time.Now(), CancellationToken.None);
-        }
-
+        await FirstSyncAsync(link, userId, actorName, ct);
         return await banks.GetLinkAsync(householdId, link.Id, ct) ?? link;
     }
 
@@ -102,9 +188,61 @@ public sealed class BankSyncService(
 
         var today = time.Today();
         var (start, endExclusive) = BankSyncRules.FetchWindow(link.LastSyncedAt, today);
+        var source = link.IsPlaid ? PlaidSource : Source;
 
-        // One request on a regular sync; the first sync's 90 days of history come in further requests that stay inside the
-        // Bridge's per-request limit (a longer one is cut and reported as an error).
+        SimpleFinAccountSet set;
+        if (link.IsPlaid)
+        {
+            set = await FetchPlaidAsync(link, accessUrl, actorId, manual, start, today, ct);
+        }
+        else
+        {
+            set = await FetchSimpleFinAsync(link, accessUrl, actorId, manual, start, endExclusive, ct);
+        }
+
+        return await StoreAsync(link, set, source, actorId, manual, start, today, ct);
+    }
+
+    /// <summary>Plaid: "Sync now" first asks Plaid to refresh from the bank (results arrive minutes later, so the scheduler keeps checking).</summary>
+    private async Task<SimpleFinAccountSet> FetchPlaidAsync(BankLinkRow link, string accessToken, Guid? actorId, bool manual, DateOnly start, DateOnly today, CancellationToken ct)
+    {
+        try
+        {
+            if (manual)
+            {
+                try
+                {
+                    await plaid.RefreshAsync(accessToken, ct);
+                }
+                catch (SimpleFinException ex) when (ex.Error is not SimpleFinError.ReauthRequired and not SimpleFinError.AccessDenied)
+                {
+                    logger.LogWarning("Plaid refresh of {LinkId} skipped: {Message}", link.Id, ex.Message);
+                }
+
+                await banks.SetRefreshUntilAsync(link.HouseholdId, link.Id, time.Now() + PlaidRefreshPollWindow, reconnected: false, ct);
+            }
+
+            var set = await plaid.GetFeedAsync(accessToken, link.Name, start, today, today, ct);
+            if (set.Errors.Contains(PlaidClient.StillLoading))
+            {
+                await banks.SetRefreshUntilAsync(link.HouseholdId, link.Id, time.Now() + PlaidLinkPollWindow, reconnected: false, ct);
+            }
+
+            return set;
+        }
+        catch (SimpleFinException ex)
+        {
+            await RecordFailureAsync(link, actorId, ex.Message, manual, ct, needsReconnect: ex.Error == SimpleFinError.ReauthRequired);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// SimpleFIN: one request on a regular sync; the first sync's 90 days of history come in further requests that stay inside the
+    /// Bridge's per-request limit (a longer one is cut and reported as an error).
+    /// </summary>
+    private async Task<SimpleFinAccountSet> FetchSimpleFinAsync(BankLinkRow link, string accessUrl, Guid? actorId, bool manual, DateOnly start, DateOnly endExclusive, CancellationToken ct)
+    {
         var requests = BankSyncRules.FetchRequests(start, endExclusive);
         SimpleFinAccountSet set;
         try
@@ -131,6 +269,12 @@ public sealed class BankSyncService(
             }
         }
 
+        return set;
+    }
+
+    private async Task<SyncResultDto> StoreAsync(BankLinkRow link, SimpleFinAccountSet set, string source, Guid? actorId, bool manual, DateOnly start, DateOnly today, CancellationToken ct)
+    {
+        var householdId = link.HouseholdId;
         var currency = await households.CurrencyAsync(householdId, ct);
         var now = time.Now();
 
@@ -165,7 +309,17 @@ public sealed class BankSyncService(
 
                 var funAccount = external.AccountId is { } target
                     && (await accounts.GetAsync(uow.Connection, householdId, target, ct))?.Role == AccountRole.Fun;
-                var inserted = await ReconcileAccountAsync(uow, link, account, external, start, today, judgeAbsence, currency, now, stats, ct, funAccount);
+                var inserted = await ReconcileAccountAsync(uow, link, account, external, start, today, judgeAbsence, currency, now, stats, ct, funAccount, source);
+
+                // The same bank linked through the other provider too (switching SimpleFIN → Plaid): keep each transaction once.
+                if (external.AccountId is { } twinAccount && inserted.Count > 0)
+                {
+                    var twins = await DedupeAcrossProvidersAsync(uow, householdId, twinAccount, source,
+                        await imports.ListByIdsAsync(uow.Connection, householdId, inserted, ct), now, ct);
+                    inserted = inserted.Where(id => !twins.Contains(id)).ToList();
+                    stats.Twins += twins.Count;
+                }
+
                 newIds.AddRange(inserted);
 
                 // The bank's own copies of transactions added by hand replace them (so nothing counts twice).
@@ -207,6 +361,7 @@ public sealed class BankSyncService(
                     replaced = stats.Replaced,
                     dropped = stats.Dropped,
                     superseded = stats.Superseded,
+                    alreadyFromOtherProvider = stats.Twins,
                     plannedTransfersPaid = plannedPass.PlannedTransfersPaid,
                     sweepsDone = plannedPass.SweepsDone,
                     toReview,
@@ -232,8 +387,8 @@ public sealed class BankSyncService(
 
             await uow.CommitAsync(ct);
             logger.LogInformation(
-                "Scheduler bank sync of {LinkId}: {New} new, {Updated} balance(s) updated, {Auto} auto-matched ({Engine}), {Transfers} transfer(s) auto-ignored, {Posted} posted ({Replaced} under a new id), {Dropped} dropped, {Superseded} superseded, {Errors} bridge error(s)",
-                link.Id, newRows.Count, updatedAccounts, autoMatched, run.Engine, autoIgnored, stats.Posted, stats.Replaced, stats.Dropped, stats.Superseded, set.Errors.Count);
+                "Scheduler bank sync of {LinkId}: {New} new, {Updated} balance(s) updated, {Auto} auto-matched ({Engine}), {Transfers} transfer(s) auto-ignored, {Posted} posted ({Replaced} under a new id), {Dropped} dropped, {Superseded} superseded, {Twins} already in from the other provider, {Errors} bridge error(s)",
+                link.Id, newRows.Count, updatedAccounts, autoMatched, run.Engine, autoIgnored, stats.Posted, stats.Replaced, stats.Dropped, stats.Superseded, stats.Twins, set.Errors.Count);
 
             return new SyncResultDto(link.Id, newRows.Count, updatedAccounts, autoMatched, set.Errors, now);
         }
@@ -260,7 +415,10 @@ public sealed class BankSyncService(
             return;
         }
 
-        foreach (var link in links.Where(l => BankSyncRules.IsDue(l.LastSyncedAt, l.LastAttemptAt, nowUtc, options.Interval)))
+        var due = links.Where(l => l.IsPlaid
+            ? plaid.Configured && BankSyncRules.IsPlaidDue(l.LastSyncedAt, l.LastAttemptAt, l.RefreshUntil, l.NeedsReconnect, nowUtc, plaidOptions.Interval, plaidOptions.RefreshPoll)
+            : BankSyncRules.IsDue(l.LastSyncedAt, l.LastAttemptAt, nowUtc, options.Interval));
+        foreach (var link in due)
         {
             ct.ThrowIfCancellationRequested();
             try
@@ -295,6 +453,8 @@ public sealed class BankSyncService(
         public int Dropped { get; set; }
 
         public int Superseded { get; set; }
+
+        public int Twins { get; set; }
     }
 
     /// <summary>
@@ -315,7 +475,8 @@ public sealed class BankSyncService(
         DateTime now,
         ReconcileStats stats,
         CancellationToken ct,
-        bool funAccount = false)
+        bool funAccount = false,
+        string source = Source)
     {
         var householdId = link.HouseholdId;
         var conn = uow.Connection;
@@ -325,13 +486,13 @@ public sealed class BankSyncService(
             byExternalId.TryAdd(tx.Id, tx);
         }
 
-        var fingerprints = byExternalId.Keys.ToDictionary(id => id, id => Fingerprint.ForExternal(Source, account.Id, id), StringComparer.Ordinal);
+        var fingerprints = byExternalId.Keys.ToDictionary(id => id, id => Fingerprint.ForExternal(source, account.Id, id), StringComparer.Ordinal);
         var stored = await imports.ListForReconcileAsync(conn, householdId, external.Id, fingerprints.Values.ToList(),
             windowStart.AddDays(-PendingReconciler.DaysAfter), ct);
         var storedById = stored.ToDictionary(r => r.Id);
 
         var incoming = byExternalId.Values
-            .Select(tx => new ReconcileIncoming(tx.Id, tx.Pending, tx.PostedOn, tx.AmountCents, DescriptionOf(tx), tx.Payee))
+            .Select(tx => new ReconcileIncoming(tx.Id, tx.Pending, tx.PostedOn, tx.AmountCents, DescriptionOf(tx), tx.Payee, tx.ReplacesId))
             .ToList();
         var existing = stored
             .Select(r => new ReconcileExisting(r.Id, r.ExternalId, r.Pending, r.PostedOn, r.AmountCents, r.Description, r.Payee, r.Status, r.IgnoreReason, r.CreatedAt))
@@ -415,7 +576,7 @@ public sealed class BankSyncService(
         {
             var tx = byExternalId[fresh.ExternalId];
             // v7: personal fun money never enters To review — stored confirmed with nothing attached (still listed on the account).
-            var row = new NewImportedTransaction(Source, external.Id, external.AccountId, tx.Id, fingerprints[tx.Id], tx.PostedOn, tx.AmountCents,
+            var row = new NewImportedTransaction(source, external.Id, external.AccountId, tx.Id, fingerprints[tx.Id], tx.PostedOn, tx.AmountCents,
                 fresh.Description, tx.Payee, tx.Memo, tx.Pending, funAccount ? "confirmed" : "pending");
             if (await imports.InsertAsync(conn, householdId, row, now, ct) is { } id)
             {
@@ -482,17 +643,87 @@ public sealed class BankSyncService(
     // ---------------------------------------------------------------------------------------------
 
     /// <summary>Mapping an external account pushes its balance (and a snapshot) onto the CouplesCash account right away and re-points its inbox rows.</summary>
-    public async Task<bool> ApplyMappingAsync(NpgsqlConnection conn, Guid householdId, ExternalAccountRow external, AccountRow account, Guid recordedBy, DateTime now, CancellationToken ct)
+    public async Task<bool> ApplyMappingAsync(UnitOfWork uow, Guid householdId, ExternalAccountRow external, AccountRow account, Guid recordedBy, DateTime now, CancellationToken ct)
     {
+        var conn = uow.Connection;
         var balance = BankSyncRules.ToAccountBalance(account.Type, external.BalanceCents);
         var changed = await banks.ApplyBalanceAsync(conn, householdId, account.Id, balance, recordedBy, now, ct);
         await imports.SetAccountForExternalAsync(conn, householdId, external.Id, account.Id, ct);
+
+        // Mapped onto an account another provider already feeds (switching banks' provider): its history is there already.
+        var rows = await imports.ListPostedForExternalAsync(conn, householdId, external.Id, ct);
+        if (rows.Count > 0)
+        {
+            await DedupeAcrossProvidersAsync(uow, householdId, account.Id, rows[0].Source, rows, now, ct);
+        }
+
         if (account.Role == AccountRole.Fun)
         {
             await imports.ConfirmFunPendingAsync(conn, householdId, account.Id, ct);
         }
 
         return changed;
+    }
+
+    /// <summary>
+    /// Posted <paramref name="newcomers"/> from <paramref name="source"/> that another provider already brought onto the account
+    /// (<see cref="ProviderTwins"/>) are hidden as its twins (ignored / superseded, <c>replaced_by</c>), anything they were
+    /// confirmed as reversed, with one <c>bank.deduplicated</c> event (actor null). Returns the hidden ids.
+    /// </summary>
+    public async Task<HashSet<Guid>> DedupeAcrossProvidersAsync(UnitOfWork uow, Guid householdId, Guid accountId, string source,
+        IReadOnlyList<ImportedTransactionRow> newcomers, DateTime now, CancellationToken ct)
+    {
+        var posted = newcomers.Where(r => !r.Pending && !r.IsHidden && r.Source == source && r.Source is Source or PlaidSource).ToList();
+        if (posted.Count == 0)
+        {
+            return [];
+        }
+
+        var conn = uow.Connection;
+        var from = posted.Min(r => r.PostedOn).AddDays(-ProviderTwins.MaxDays);
+        var to = posted.Max(r => r.PostedOn).AddDays(ProviderTwins.MaxDays);
+        var existing = await imports.ListOtherProviderPostedAsync(conn, householdId, accountId, source, from, to, ct);
+        var pairs = ProviderTwins.Match(
+            posted.Select(r => new TwinRow(r.Id, r.PostedOn, r.AmountCents)).ToList(),
+            existing.Select(r => new TwinRow(r.Id, r.PostedOn, r.AmountCents)).ToList());
+        if (pairs.Count == 0)
+        {
+            return [];
+        }
+
+        var byId = posted.ToDictionary(r => r.Id);
+        foreach (var (newId, existingId) in pairs)
+        {
+            await imports.LockAsync(conn, householdId, newId, ct);
+            await inbox.ReverseAsync(uow, householdId, null, byId[newId], ct);
+            await imports.MarkTwinAsync(conn, householdId, newId, existingId, now, ct);
+        }
+
+        var other = source == PlaidSource ? "SimpleFIN" : "Plaid";
+        await activity.RecordAsync(conn, uow.Transaction, householdId, null, "bank.deduplicated", "account", accountId,
+            $"kept {ActivitySummaries.Plural(pairs.Count, "transaction")} once (already in from {other})",
+            new { accountId, source, count = pairs.Count }, ct);
+        logger.LogInformation("Bank sync: {Count} {Source} row(s) on account {AccountId} were already in from another provider", pairs.Count, source, accountId);
+        return pairs.Select(p => p.NewId).ToHashSet();
+    }
+
+    /// <summary>Unlinking: the link's pending rows can no longer post or drop, so they are dropped now (confirmations reversed).</summary>
+    public async Task<int> DropPendingForLinkAsync(UnitOfWork uow, Guid householdId, Guid linkId, Guid userId, CancellationToken ct)
+    {
+        var pending = await imports.ListPendingForLinkAsync(uow.Connection, householdId, linkId, ct);
+        if (pending.Count == 0)
+        {
+            return 0;
+        }
+
+        var currency = await households.CurrencyAsync(householdId, ct);
+        foreach (var row in pending)
+        {
+            await imports.LockAsync(uow.Connection, householdId, row.Id, ct);
+            await inbox.HideAsync(uow, householdId, userId, currency, row, PendingReconciler.Dropped, ct);
+        }
+
+        return pending.Count;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -514,14 +745,15 @@ public sealed class BankSyncService(
         protector.IsConfigured ? link.LastError : DataProtector.KeyMissingMessage,
         link.SyncEnabled,
         link.BridgeErrors,
-        externals.Select(e => e.ToDto()).ToList());
+        externals.Select(e => e.ToDto()).ToList(),
+        link.NeedsReconnect);
 
-    private async Task RecordFailureAsync(BankLinkRow link, Guid? actorId, string message, bool manual, CancellationToken ct)
+    private async Task RecordFailureAsync(BankLinkRow link, Guid? actorId, string message, bool manual, CancellationToken ct, bool needsReconnect = false)
     {
         try
         {
             var now = time.Now();
-            await banks.SetErrorAsync(link.HouseholdId, link.Id, message, manual, now, ct);
+            await banks.SetErrorAsync(link.HouseholdId, link.Id, message, manual, now, ct, needsReconnect);
             await using var uow = await db.BeginUnitOfWorkAsync(ct);
             await activity.RecordAsync(uow.Connection, uow.Transaction, link.HouseholdId, actorId, "bank.error", "bank", link.Id,
                 ActivitySummaries.BankError(link.Name, message), new { linkId = link.Id, error = message }, ct);

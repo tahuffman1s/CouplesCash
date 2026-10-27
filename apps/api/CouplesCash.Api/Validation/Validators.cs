@@ -318,6 +318,15 @@ public sealed class BankClaimRequestValidator : AbstractValidator<BankClaimReque
     }
 }
 
+public sealed class PlaidExchangeRequestValidator : AbstractValidator<PlaidExchangeRequest>
+{
+    public PlaidExchangeRequestValidator()
+    {
+        RuleFor(x => x.PublicToken).NotEmpty().MaximumLength(512);
+        RuleFor(x => x.InstitutionName).MaximumLength(120).When(x => x.InstitutionName is not null);
+    }
+}
+
 public sealed class BankLinkPatchRequestValidator : AbstractValidator<BankLinkPatchRequest>
 {
     public BankLinkPatchRequestValidator()

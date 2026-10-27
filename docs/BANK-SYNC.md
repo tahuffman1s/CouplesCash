@@ -58,7 +58,7 @@ How the pieces fit:
 | | Why |
 |---|---|
 | `DATA_KEY` in `.env` | Encrypts the access URL at rest. `make secrets` and `install.sh` generate it (`openssl rand -base64 32`). Empty → *Linked banks* says "not configured" and the API answers `503 bank_sync_not_configured`. |
-| A SimpleFIN Bridge account ($1.50/month) | It holds the bank logins and talks to the banks. CouplesCash never sees a bank password. |
+| A SimpleFIN Bridge account ($1.50/month) **or** Plaid keys (free Trial plan, see *Plaid* below) | They hold the bank logins and talk to the banks. CouplesCash never sees a bank password. |
 | Outbound HTTPS from the Pi to `beta-bridge.simplefin.org` | The only network connection bank sync makes. The tunnel is not involved; LAN-only installs can use bank sync too (it does not need `https://` like push and passkeys do). |
 | A backup of `.env` | The dump alone cannot restore links — see *Backups* below. |
 
@@ -83,6 +83,56 @@ A link can be renamed, paused (*sync enabled* off) or removed. **Unlinking** del
 encrypted credential and the external accounts; your CouplesCash accounts, their balance history
 and every inbox row stay. The token remains valid at the Bridge until you also delete it there
 (*Delete access*), which you should do if the Pi is lost (see [SECURITY.md](./SECURITY.md)).
+
+## Plaid (optional, next to SimpleFIN)
+
+SimpleFIN refreshes each bank about once a day and its feed can lag a day or two. Plaid checks most
+banks several times a day, and **Sync now** asks it to check right away (`/transactions/refresh`).
+Both can be linked at once; their rows go through the same pending lifecycle, matching and plan.
+
+**Set it up (once, on the Pi):**
+
+1. Sign up at <https://dashboard.plaid.com/signup> and choose **Personal use**. That gives the free
+   **Trial plan**: up to **10 bank connections** with real (production) data, Transactions included.
+   The 10 is a lifetime count — removing a connection does not give the slot back — so avoid
+   linking the same bank over and over. US and Canadian developers who signed up on or after
+   2026-04-15 and have never had Production access qualify.
+2. Dashboard → **Developers → Keys**: copy the **client_id** and the **Production secret** into `.env`:
+   `PLAID_CLIENT_ID=…`, `PLAID_SECRET=…` (`PLAID_ENV=production`; `sandbox` with sandbox keys for
+   testing with Plaid's fake banks, user `user_good` / password `pass_good`).
+3. Dashboard → **Developers → API → Allowed redirect URIs**: add
+   `https://<your PUBLIC_URL host>/settings/banks/plaid-oauth`. Banks that sign in through their own
+   site (OAuth — US Bank, Chase, Wells Fargo, …) send you back there on a phone. The API derives that
+   URL from `PUBLIC_URL`; `PLAID_REDIRECT_URI` overrides it. If Plaid rejects it (not listed yet) the
+   API logs a warning and creates the link token without it, so desktop browsers still work (pop-up).
+   Some OAuth banks also need Plaid's institution access to be approved in the dashboard first.
+4. `make pi` (or `make up`). The log says `Plaid enabled (production, every 60 min, OAuth redirect …)`.
+   `DATA_KEY` must be set too: the Plaid access token is stored encrypted with it.
+
+**Link a bank:** *Settings → Banks → Connect a bank* opens Plaid's window; sign in to the bank there.
+CouplesCash receives a one-time public token, exchanges it server-side and stores the access token
+encrypted — the browser and the logs never see it. Then map the accounts exactly like a SimpleFIN
+link. Plaid often needs a few minutes for the first transactions after linking ("Plaid is still
+loading transactions…" on the link card); the scheduler checks every few minutes for half an hour.
+
+**How it syncs:** every `Plaid__IntervalMinutes` (60) the scheduler reads the last 30 days (90 on the
+first sync) with `/transactions/get`, the balances Plaid cached with them, and `/item/get`'s last
+successful update (shown as "Bank data as of …"). *Sync now* also calls `/transactions/refresh` and
+then checks every 3 minutes for 20 minutes, since Plaid fetches from the bank in the background.
+A posted transaction names the pending one it replaces (`pending_transaction_id`), so the pending row
+is updated in place even when the tip or the wording changed.
+
+**When the bank wants a new sign-in** (`ITEM_LOGIN_REQUIRED`, a new password, MFA…): the link card
+says so and shows **Reconnect**, which opens Plaid in update mode for that bank; the scheduler stops
+trying until then. **Unlink** also revokes the access token at Plaid (`/item/remove`).
+
+**Switching from SimpleFIN:** connect the bank through Plaid and map its accounts to the **same**
+CouplesCash accounts. Plaid's first sync brings 90 days, most of which SimpleFIN already brought: a
+posted Plaid row with exactly the same amount as a posted SimpleFIN row on that account, at most 3 days
+apart, is kept once (the newcomer is hidden as `superseded` with `replaced_by`, anything it was
+matched to reversed, one `bank.deduplicated` activity); new rows from either side keep being checked
+while both are linked. Then unlink the SimpleFIN link — unlinking drops its pending charges, which
+nothing can update any more (posted rows stay) — and cancel the Bridge subscription.
 
 ## How sync works
 

@@ -14,7 +14,7 @@ public sealed class SimpleFinOptions
     }
 }
 
-/// <summary>Why a Bridge call failed; maps to the contract's 400 / 502 / 503 answers.</summary>
+/// <summary>Why a bank feed call (SimpleFIN Bridge or Plaid) failed; maps to the contract's 400 / 502 / 503 answers.</summary>
 public enum SimpleFinError
 {
     /// <summary>The setup token is not base64 / not a URL, or the Bridge answered 403 (already claimed or expired).</summary>
@@ -31,9 +31,12 @@ public enum SimpleFinError
 
     /// <summary>A 2xx body that is not protocol-shaped JSON.</summary>
     BadResponse,
+
+    /// <summary>Plaid: the bank wants the user to sign in again (Plaid Link in update mode, "Reconnect").</summary>
+    ReauthRequired,
 }
 
-public sealed class SimpleFinException(SimpleFinError error, string message, Exception? inner = null) : Exception(message, inner)
+public class SimpleFinException(SimpleFinError error, string message, Exception? inner = null) : Exception(message, inner)
 {
     public SimpleFinError Error { get; } = error;
 }
@@ -75,7 +78,10 @@ public sealed record SimpleFinAccount(
     string? OrgDomain,
     IReadOnlyList<SimpleFinTransaction> Transactions);
 
-/// <summary><paramref name="AmountCents"/> is signed: negative = money out (deposits are positive in the protocol).</summary>
+/// <summary>
+/// <paramref name="AmountCents"/> is signed: negative = money out (deposits are positive in the protocol).
+/// <paramref name="ReplacesId"/> (Plaid's <c>pending_transaction_id</c>): this posted transaction is the pending one with that id.
+/// </summary>
 public sealed record SimpleFinTransaction(
     string Id,
     DateOnly PostedOn,
@@ -83,4 +89,5 @@ public sealed record SimpleFinTransaction(
     string Description,
     string? Payee,
     string? Memo,
-    bool Pending);
+    bool Pending,
+    string? ReplacesId = null);

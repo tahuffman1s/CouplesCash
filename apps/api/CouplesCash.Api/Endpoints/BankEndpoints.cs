@@ -5,6 +5,7 @@ using CouplesCash.Api.Contracts;
 using CouplesCash.Api.Data;
 using CouplesCash.Api.Domain;
 using CouplesCash.Api.Infrastructure;
+using CouplesCash.Api.Plaid;
 using CouplesCash.Api.Services;
 using CouplesCash.Api.SimpleFin;
 using CouplesCash.Api.Validation;
@@ -13,7 +14,7 @@ using Npgsql;
 
 namespace CouplesCash.Api.Endpoints;
 
-/// <summary>Linked banks (SimpleFIN). The access URL never appears in any response.</summary>
+/// <summary>Linked banks (SimpleFIN and, v7, Plaid). Credentials (access URL, access token) never appear in any response.</summary>
 public static class BankEndpoints
 {
     public static RouteGroupBuilder MapBanks(this RouteGroupBuilder v1)
@@ -23,7 +24,14 @@ public static class BankEndpoints
         group.MapGet("", List).WithSummary("Bank links with their external accounts and mappings");
         group.MapPost("/simplefin/claim", Claim).RequireDataKey().WithValidation<BankClaimRequest>()
             .WithSummary("Claim a SimpleFIN setup token, store the access URL encrypted and run a first sync (503 without Security__DataKey)");
-        group.MapDelete("/{id:guid}", Delete).WithSummary("Unlink a bank (inbox rows and mapped accounts are kept)");
+        group.MapGet("/plaid", PlaidStatus).WithSummary("Whether Plaid is offered on this server (keys + Security__DataKey)");
+        group.MapPost("/plaid/link-token", PlaidLinkToken).RequireDataKey()
+            .WithSummary("A Plaid Link token: a new connection, or { linkId } to sign in again (update mode); 503 plaid_not_configured without keys");
+        group.MapPost("/plaid/exchange", PlaidExchange).RequireDataKey().WithValidation<PlaidExchangeRequest>()
+            .WithSummary("Exchange Link's public token, store the access token encrypted and run a first sync");
+        group.MapPost("/{id:guid}/plaid/reconnected", PlaidReconnected).RequireDataKey()
+            .WithSummary("Plaid Link update mode finished: clear 'needs reconnect' and sync now (no cooldown)");
+        group.MapDelete("/{id:guid}", Delete).WithSummary("Unlink a bank (inbox rows and mapped accounts are kept; a Plaid link is revoked at Plaid)");
         group.MapPatch("/{id:guid}", Patch).WithValidation<BankLinkPatchRequest>().WithSummary("Rename a link or pause/resume its sync");
         group.MapPost("/{id:guid}/sync", Sync).WithSummary("Sync now (429 with Retry-After inside the 15-minute cooldown; 502 when the Bridge fails)");
         group.MapPut("/accounts/{externalAccountId:guid}", Map).WithValidation<ExternalAccountMapRequest>()
@@ -62,11 +70,106 @@ public static class BankEndpoints
         }
     }
 
+    private static Ok<PlaidStatusDto> PlaidStatus(BankSyncService sync, PlaidOptions options) =>
+        TypedResults.Ok(new PlaidStatusDto(sync.PlaidConfigured && sync.Configured, options.Environment, options.RedirectUri is not null));
+
+    private static async Task<Results<Ok<PlaidLinkTokenDto>, NotFound, ProblemHttpResult>> PlaidLinkToken(
+        PlaidLinkTokenRequest? request,
+        ClaimsPrincipal principal,
+        BankRepository banks,
+        BankSyncService sync,
+        CancellationToken ct)
+    {
+        if (!sync.PlaidConfigured)
+        {
+            return Problems.PlaidNotConfigured();
+        }
+
+        var householdId = principal.GetHouseholdId();
+        BankLinkRow? link = null;
+        if (request?.LinkId is { } linkId)
+        {
+            link = await banks.GetLinkAsync(householdId, linkId, ct);
+            if (link is not { IsPlaid: true })
+            {
+                return TypedResults.NotFound();
+            }
+        }
+
+        try
+        {
+            var token = await sync.PlaidLinkTokenAsync(householdId, link, ct);
+            return TypedResults.Ok(new PlaidLinkTokenDto(token.LinkToken, token.Expiration));
+        }
+        catch (SimpleFinException ex)
+        {
+            return Problems.BridgeUnreachable(ex.Message, [ex.Message]);
+        }
+    }
+
+    private static async Task<Results<Created<BankLinkDto>, ValidationProblem, ProblemHttpResult>> PlaidExchange(
+        PlaidExchangeRequest request,
+        ClaimsPrincipal principal,
+        BankSyncService sync,
+        CancellationToken ct)
+    {
+        if (!sync.PlaidConfigured)
+        {
+            return Problems.PlaidNotConfigured();
+        }
+
+        var householdId = principal.GetHouseholdId();
+        try
+        {
+            var link = await sync.PlaidLinkAsync(householdId, principal.GetUserId(), principal.GetDisplayName(), request.PublicToken.Trim(), request.InstitutionName, ct);
+            var dto = (await sync.ToDtosAsync(householdId, [link], ct))[0];
+            return TypedResults.Created($"/v1/banks/{link.Id}", dto);
+        }
+        catch (SimpleFinException ex) when (ex.Error is SimpleFinError.InvalidToken)
+        {
+            return Problems.Validation("publicToken", "Plaid did not accept this connection (it may have expired). Connect again.");
+        }
+        catch (SimpleFinException ex)
+        {
+            return Problems.BridgeUnreachable(ex.Message, [ex.Message]);
+        }
+    }
+
+    private static async Task<Results<Ok<SyncResultDto>, NotFound, ProblemHttpResult>> PlaidReconnected(
+        Guid id,
+        ClaimsPrincipal principal,
+        BankRepository banks,
+        BankSyncService sync,
+        CancellationToken ct)
+    {
+        if (!sync.PlaidConfigured)
+        {
+            return Problems.PlaidNotConfigured();
+        }
+
+        var householdId = principal.GetHouseholdId();
+        var link = await banks.GetLinkAsync(householdId, id, ct);
+        if (link is not { IsPlaid: true })
+        {
+            return TypedResults.NotFound();
+        }
+
+        try
+        {
+            return TypedResults.Ok(await sync.PlaidReconnectedAsync(link, principal.GetUserId(), principal.GetDisplayName(), ct));
+        }
+        catch (SimpleFinException ex)
+        {
+            return Problems.BridgeUnreachable(ex.Message, [ex.Message]);
+        }
+    }
+
     private static async Task<Results<NoContent, NotFound>> Delete(
         Guid id,
         ClaimsPrincipal principal,
         NpgsqlDataSource db,
         BankRepository banks,
+        BankSyncService sync,
         ActivityService activity,
         CancellationToken ct)
     {
@@ -74,6 +177,13 @@ public static class BankEndpoints
         var userId = principal.GetUserId();
 
         await using var uow = await db.BeginUnitOfWorkAsync(ct);
+        if (await banks.GetLinkAsync(uow.Connection, householdId, id, ct) is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        // pending charges of this link can no longer post or drop: drop them now (posted rows and mapped accounts stay)
+        await sync.DropPendingForLinkAsync(uow, householdId, id, userId, ct);
         var link = await banks.DeleteLinkAsync(uow.Connection, householdId, id, ct);
         if (link is null)
         {
@@ -81,8 +191,9 @@ public static class BankEndpoints
         }
 
         await activity.RecordAsync(uow, householdId, userId, "bank.unlinked", "bank", link.Id,
-            ActivitySummaries.BankUnlinked(link.Name), new { linkId = link.Id }, ct, principal.GetDisplayName());
+            ActivitySummaries.BankUnlinked(link.Name), new { linkId = link.Id, provider = link.Provider }, ct, principal.GetDisplayName());
         await uow.CommitAsync(ct);
+        await sync.RevokeAsync(link, ct);
         return TypedResults.NoContent();
     }
 
@@ -218,7 +329,7 @@ public static class BankEndpoints
 
         if (account is not null)
         {
-            await sync.ApplyMappingAsync(uow.Connection, householdId, external, account, userId, now, ct);
+            await sync.ApplyMappingAsync(uow, householdId, external, account, userId, now, ct);
             await activity.RecordAsync(uow, householdId, userId, "bank.mapped", "bank", external.BankLinkId,
                 ActivitySummaries.BankMapped(external.Name, account.Name), new { externalAccountId = external.Id, accountId = account.Id }, ct, actorName);
         }

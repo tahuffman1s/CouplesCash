@@ -8,7 +8,7 @@ namespace CouplesCash.Api.Data;
 /// <summary><c>bank_links</c> + <c>external_accounts</c>. Every statement is household-scoped; the scheduler's cross-household list is the one exception and is read-only.</summary>
 public sealed class BankRepository(NpgsqlDataSource db)
 {
-    private const string LinkColumns = "id, household_id, provider, name, access_url_enc, created_by, created_at, last_synced_at, last_manual_sync_at, last_attempt_at, last_error, bridge_errors, sync_enabled";
+    private const string LinkColumns = "id, household_id, provider, name, access_url_enc, created_by, created_at, last_synced_at, last_manual_sync_at, last_attempt_at, last_error, bridge_errors, sync_enabled, plaid_item_id, refresh_until, needs_reconnect";
 
     private const string ExternalSelect =
         """
@@ -51,14 +51,40 @@ public sealed class BankRepository(NpgsqlDataSource db)
             $"SELECT {LinkColumns} FROM bank_links WHERE id = @Id AND household_id = @HouseholdId",
             new { Id = id, HouseholdId = householdId }, ct));
 
-    public Task<BankLinkRow> InsertLinkAsync(NpgsqlConnection conn, Guid householdId, Guid userId, string name, byte[] accessUrlEnc, DateTime now, CancellationToken ct) =>
+    public Task<BankLinkRow> InsertLinkAsync(NpgsqlConnection conn, Guid householdId, Guid userId, string name, byte[] accessUrlEnc, DateTime now, CancellationToken ct,
+        string provider = BankProviders.SimpleFin, string? plaidItemId = null, DateTime? refreshUntil = null) =>
         conn.QuerySingleAsync<BankLinkRow>(Cmd(
             $"""
-            INSERT INTO bank_links (id, household_id, provider, name, access_url_enc, created_by, created_at)
-            VALUES (@Id, @HouseholdId, 'simplefin', @Name, @AccessUrlEnc, @UserId, @Now)
+            INSERT INTO bank_links (id, household_id, provider, name, access_url_enc, created_by, created_at, plaid_item_id, refresh_until)
+            VALUES (@Id, @HouseholdId, @Provider, @Name, @AccessUrlEnc, @UserId, @Now, @PlaidItemId, @RefreshUntil)
             RETURNING {LinkColumns}
             """,
-            new { Id = Guid.CreateVersion7(), HouseholdId = householdId, Name = name, AccessUrlEnc = accessUrlEnc, UserId = userId, Now = now }, ct));
+            new
+            {
+                Id = Guid.CreateVersion7(),
+                HouseholdId = householdId,
+                Provider = provider,
+                Name = name,
+                AccessUrlEnc = accessUrlEnc,
+                UserId = userId,
+                Now = now,
+                PlaidItemId = plaidItemId,
+                RefreshUntil = refreshUntil,
+            }, ct));
+
+    /// <summary>Plaid: poll the link every few minutes until <paramref name="until"/>; <paramref name="reconnected"/> clears "needs reconnect".</summary>
+    public async Task SetRefreshUntilAsync(Guid householdId, Guid id, DateTime until, bool reconnected, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(Cmd(
+            """
+            UPDATE bank_links
+            SET refresh_until = GREATEST(COALESCE(refresh_until, @Until), @Until),
+                needs_reconnect = CASE WHEN @Reconnected THEN false ELSE needs_reconnect END
+            WHERE id = @Id AND household_id = @HouseholdId
+            """,
+            new { Id = id, HouseholdId = householdId, Until = until, Reconnected = reconnected }, ct));
+    }
 
     public Task<BankLinkRow?> UpdateLinkAsync(NpgsqlConnection conn, Guid householdId, Guid id, string? name, bool? syncEnabled, CancellationToken ct) =>
         conn.QuerySingleOrDefaultAsync<BankLinkRow>(Cmd(
@@ -84,6 +110,7 @@ public sealed class BankRepository(NpgsqlDataSource db)
                 last_attempt_at = @Now,
                 last_manual_sync_at = CASE WHEN @Manual THEN @Now ELSE last_manual_sync_at END,
                 last_error = NULL,
+                needs_reconnect = false,
                 bridge_errors = @BridgeErrors,
                 name = COALESCE(@Name, name)
             WHERE id = @Id AND household_id = @HouseholdId
@@ -92,16 +119,18 @@ public sealed class BankRepository(NpgsqlDataSource db)
             new { Id = id, HouseholdId = householdId, Now = now, Manual = manual, BridgeErrors = bridgeErrors.ToArray(), Name = name }, ct));
 
     /// <summary>Records a failure on its own connection (the sync transaction has been rolled back).</summary>
-    public async Task SetErrorAsync(Guid householdId, Guid id, string error, bool manual, DateTime now, CancellationToken ct)
+    public async Task SetErrorAsync(Guid householdId, Guid id, string error, bool manual, DateTime now, CancellationToken ct, bool needsReconnect = false)
     {
         await using var conn = await db.OpenConnectionAsync(ct);
         await conn.ExecuteAsync(Cmd(
             """
             UPDATE bank_links
-            SET last_error = @Error, last_attempt_at = @Now, last_manual_sync_at = CASE WHEN @Manual THEN @Now ELSE last_manual_sync_at END
+            SET last_error = @Error, last_attempt_at = @Now, last_manual_sync_at = CASE WHEN @Manual THEN @Now ELSE last_manual_sync_at END,
+                needs_reconnect = needs_reconnect OR @NeedsReconnect,
+                refresh_until = CASE WHEN @NeedsReconnect THEN NULL ELSE refresh_until END
             WHERE id = @Id AND household_id = @HouseholdId
             """,
-            new { Id = id, HouseholdId = householdId, Error = error, Manual = manual, Now = now }, ct));
+            new { Id = id, HouseholdId = householdId, Error = error, Manual = manual, Now = now, NeedsReconnect = needsReconnect }, ct));
     }
 
     /// <summary>(latest sync across the household's links, number of links) for the inbox summary.</summary>

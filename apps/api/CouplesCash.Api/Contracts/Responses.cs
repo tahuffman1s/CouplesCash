@@ -280,7 +280,13 @@ public sealed record BankLinkDto(
     string? LastError,
     bool SyncEnabled,
     IReadOnlyList<string> BridgeErrors,
-    IReadOnlyList<ExternalAccountDto> Accounts);
+    IReadOnlyList<ExternalAccountDto> Accounts,
+    bool NeedsReconnect);
+
+/// <summary>v7 Plaid: whether this server has Plaid keys (and bank sync's DATA_KEY), and which Plaid environment it talks to.</summary>
+public sealed record PlaidStatusDto(bool Configured, string Environment, bool OAuthRedirect);
+
+public sealed record PlaidLinkTokenDto(string LinkToken, DateTime Expiration);
 
 public sealed record SyncResultDto(Guid LinkId, int NewTransactions, int UpdatedAccounts, int AutoMatched, IReadOnlyList<string> Errors, DateTime SyncedAt);
 

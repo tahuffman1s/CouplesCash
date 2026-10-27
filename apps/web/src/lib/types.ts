@@ -370,7 +370,7 @@ export const COMMON_CURRENCIES: readonly { code: string; name: string }[] = [
 
 export type BankLink = {
 	id: string;
-	provider: 'simplefin';
+	provider: 'simplefin' | 'plaid';
 	name: string;
 	createdAt: string;
 	lastSyncedAt: string | null;
@@ -378,7 +378,16 @@ export type BankLink = {
 	syncEnabled: boolean;
 	bridgeErrors: string[];
 	accounts: ExternalAccount[];
+	/** v7 Plaid: the bank wants you to sign in again (Reconnect opens Plaid Link in update mode). */
+	needsReconnect: boolean;
 };
+/** v7 GET /banks/plaid: whether this server offers Plaid (keys + DATA_KEY). */
+export type PlaidStatus = {
+	configured: boolean;
+	environment: 'production' | 'sandbox';
+	oAuthRedirect: boolean;
+};
+export type PlaidLinkToken = { linkToken: string; expiration: string };
 export type ExternalAccount = {
 	id: string;
 	externalId: string;
@@ -433,7 +442,7 @@ export type InboxItem = {
 	 * `manual` only appears on v5 account transactions (typed expenses); `added` is a transaction
 	 * added by hand that waits for the bank's own copy.
 	 */
-	source: 'simplefin' | 'csv' | 'manual' | 'added';
+	source: 'simplefin' | 'plaid' | 'csv' | 'manual' | 'added';
 	accountId: string | null;
 	accountName: string | null;
 	postedOn: string;

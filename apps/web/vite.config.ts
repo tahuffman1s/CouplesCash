@@ -16,11 +16,13 @@ export default defineConfig({
 				mode: 'auto',
 				directives: {
 					'default-src': ['self'],
-					'script-src': ['self'],
+					// Plaid Link (Settings → Banks) loads its script and runs in a frame from cdn.plaid.com
+					'script-src': ['self', 'https://cdn.plaid.com'],
+					'frame-src': ['https://cdn.plaid.com'],
 					'style-src': ['self', 'unsafe-inline'],
 					'img-src': ['self', 'data:', 'blob:'],
 					'media-src': ['self', 'blob:'],
-					'connect-src': ['self', 'data:'],
+					'connect-src': ['self', 'data:', 'https://*.plaid.com'],
 					'font-src': ['self'],
 					'manifest-src': ['self'],
 					'worker-src': ['self'],

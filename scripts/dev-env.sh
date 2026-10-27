@@ -49,6 +49,11 @@ Scheduler__Enabled=${SCHEDULER_ENABLED:-true}
 # Bank sync (SimpleFIN): empty key = disabled (503 bank_sync_not_configured). Fill it with \`make secrets\`.
 Security__DataKey=${DATA_KEY:-}
 Sync__IntervalHours=${SYNC_INTERVAL_HOURS:-6}
+# Plaid (optional): empty keys = only SimpleFIN is offered. Use PLAID_ENV=sandbox with sandbox keys in dev.
+Plaid__ClientId=${PLAID_CLIENT_ID:-}
+Plaid__Secret=${PLAID_SECRET:-}
+Plaid__Environment=${PLAID_ENV:-production}
+Plaid__RedirectUri=${PLAID_REDIRECT_URI:-}
 # Fuzzy matcher (\`make dev-matcher\`, uvicorn on :${MATCHER_PORT}). Empty key = the matcher refuses to start and the
 # API uses its built-in matcher. \`make secrets\` (or \`make matcher-key\`) fills MATCHER_KEY in .env.
 Matcher__BaseUrl=http://localhost:${MATCHER_PORT}

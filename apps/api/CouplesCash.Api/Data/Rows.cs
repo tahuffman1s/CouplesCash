@@ -533,6 +533,24 @@ public sealed class BankLinkRow
     public string[] BridgeErrors { get; init; } = [];
 
     public bool SyncEnabled { get; init; } = true;
+
+    /// <summary>Plaid's Item id (Plaid links only).</summary>
+    public string? PlaidItemId { get; init; }
+
+    /// <summary>Plaid: check the link every few minutes until then (after linking, reconnecting or "Sync now").</summary>
+    public DateTime? RefreshUntil { get; init; }
+
+    /// <summary>Plaid: the bank wants the user to sign in again (Link update mode).</summary>
+    public bool NeedsReconnect { get; init; }
+
+    public bool IsPlaid => Provider == BankProviders.Plaid;
+}
+
+/// <summary>bank_links.provider values.</summary>
+public static class BankProviders
+{
+    public const string SimpleFin = "simplefin";
+    public const string Plaid = "plaid";
 }
 
 public sealed class ExternalAccountRow
