@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # ---- build -----------------------------------------------------------------------------------
-FROM node:22-alpine AS build
+# The build runs natively on the build host ($BUILDPLATFORM): its output and the production dependencies are plain
+# JavaScript, so only the runtime stage targets the Pi. Building under arm64 emulation (QEMU) hung the image publish.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./

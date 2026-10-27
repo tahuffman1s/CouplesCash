@@ -208,6 +208,8 @@ jobs:
   images:
     name: Publish ${{ matrix.app }} image
     needs: [api, web, matcher, infra, docker]
+    # a normal publish takes ~3 min; never let a stuck build hold the run for hours
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' &&
       (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
