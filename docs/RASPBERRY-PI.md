@@ -181,6 +181,7 @@ To stop typing balances in, *Settings → Linked banks* with a SimpleFIN Bridge 
 | Stop everything | `make down` |
 | Start again | `make tunnel-up` (or `make up` without the tunnel) |
 | Backup | `make backup` → `backups/couplescash-YYYYmmdd-HHMMSS.sql.gz` **+** `couplescash-YYYYmmdd-HHMMSS.env` (the `.env` copy carries `DATA_KEY`; keeps 14 pairs) |
+| Backup to Nextcloud | `make backup-nextcloud` (one dump now) · `make backup-nextcloud-cron` (every 4 h; `EVERY=6` to change, `EVERY=0` to stop) — see below |
 | Restore | `make restore FILE=backups/couplescash-….sql.gz`; if the current `.env` differs from the backup's copy it tells you — copy that `.env` over and `make up` so linked banks decrypt |
 | Rotate the JWT secret (signs everyone out) | edit `JWT_SECRET` in `.env`, then `make up`. `make secrets FORCE=1` rotates **all** secrets incl. the DB password and `DATA_KEY` (**breaks every bank link**) — see below and `docs/SECURITY.md` |
 | Generate / rotate Web Push keys | `make vapid` (fills empty keys) · `make vapid FORCE=1` (rotate; every phone re-enables notifications), then `make up` |
@@ -198,6 +199,35 @@ Copy the `backups/` folder somewhere else occasionally (`rsync` to a laptop, a
 NAS, or `rclone` to cloud storage). A backup on the same SD card as the
 database is not a backup. The folder contains `.env` copies (secrets, incl.
 `DATA_KEY`), so the destination should be encrypted or private storage.
+
+### Database backups to Nextcloud (every 4 hours)
+
+Uploads a compressed `pg_dump` of the database (nothing else — no `.env`) to a
+folder in your Nextcloud over WebDAV, and keeps the newest 42 there (a week).
+
+1. In Nextcloud: *Settings → Security → Devices & sessions → Create new app
+   password* (name it "CouplesCash backups"). Use it instead of your login
+   password; you can revoke it there any time.
+2. On the Pi, fill in `.env`:
+   ```bash
+   NEXTCLOUD_URL=https://cloud.example.com     # your server, no /remote.php…
+   NEXTCLOUD_USER=your-login
+   NEXTCLOUD_APP_PASSWORD=xxxxx-xxxxx-xxxxx-xxxxx-xxxxx
+   # NEXTCLOUD_DIR=CouplesCash/backups         # optional, created if missing
+   # NEXTCLOUD_KEEP=42                         # optional
+   ```
+3. Try one: `make backup-nextcloud` → `uploaded couplescash-db-….sql.gz (…) to CouplesCash/backups`.
+4. Schedule it: `make backup-nextcloud-cron` (adds `17 */4 * * *` to your
+   crontab; re-run with `EVERY=6` to change it, `EVERY=0` to remove it). Each
+   run appends to `backups/nextcloud.log`; a run that finds the previous one
+   still uploading skips.
+
+To restore, download a dump from Nextcloud into `backups/` and run
+`make restore FILE=backups/couplescash-db-….sql.gz`. The dump does not
+contain `DATA_KEY`: linked banks only decrypt with the `.env` the Pi had when
+they were linked — keep a copy of `.env` somewhere safe (a password manager is
+fine), or re-link the banks after a restore. The dump holds all your financial
+data in plain SQL, so keep the Nextcloud folder private.
 
 ### Changing the database password
 

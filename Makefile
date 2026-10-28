@@ -20,13 +20,15 @@ MATCHER_DIR  := apps/matcher
 DB_SERVICE   := db
 DB_USER      := couplescash
 DB_NAME      := couplescash
+EVERY        ?= 4
 BACKUP_DIR   := backups
 STAMP        := $(shell date +%Y%m%d-%H%M%S)
 # Guard against an api build that does not know `--vapid` yet and would start Kestrel instead of exiting.
 TIMEOUT      := $(shell command -v timeout >/dev/null 2>&1 && echo 'timeout 600' || true)
 
 .PHONY: help setup secrets matcher-key vapid dev-env dev-db dev-api dev-web dev-matcher dev migrate up down logs \
-        scheduler-logs matcher-logs ps build pull tunnel-up tunnel-down pi backup restore test test-api test-web \
+        scheduler-logs matcher-logs ps build pull tunnel-up tunnel-down pi backup backup-nextcloud \
+        backup-nextcloud-cron restore test test-api test-web \
         test-matcher lint fmt clean
 
 ##@ Getting started
@@ -174,6 +176,18 @@ pi: ## Raspberry Pi deploy/update: pull images, (re)start stack with tunnel
 
 backup: ## pg_dump → backups/couplescash-<timestamp>.sql.gz + a copy of .env (holds DATA_KEY; KEEP=14 rotation)
 	@scripts/backup.sh
+
+backup-nextcloud: ## pg_dump → your Nextcloud folder over WebDAV (database only; NEXTCLOUD_* in .env, keeps NEXTCLOUD_KEEP=42)
+	@scripts/backup-nextcloud.sh
+
+backup-nextcloud-cron: ## Run backup-nextcloud every EVERY=4 hours from your crontab (re-run to change; EVERY=0 removes it)
+	@[[ "$(EVERY)" =~ ^([0-9]|1[0-9]|2[0-4])$$ ]] || { echo 'EVERY must be 0-24 (hours)'; exit 2; }
+	@mkdir -p $(BACKUP_DIR) && chmod 700 $(BACKUP_DIR)
+	@{ crontab -l 2>/dev/null | grep -v 'make backup-nextcloud' || true; \
+	  [ "$(EVERY)" = 0 ] || echo '17 */$(EVERY) * * * cd $(CURDIR) && make backup-nextcloud >> $(BACKUP_DIR)/nextcloud.log 2>&1'; \
+	} | crontab -
+	@if [ "$(EVERY)" = 0 ]; then echo 'Removed the Nextcloud backup from your crontab.'; \
+	else echo 'Nextcloud backup runs every $(EVERY) h (at :17). Log: $(BACKUP_DIR)/nextcloud.log'; fi
 
 restore: ## Restore a dump: make restore FILE=backups/couplescash-….sql.gz (restore the matching .env copy too, or bank links are unreadable)
 	@[ -n "$(FILE)" ] || { echo 'Usage: make restore FILE=backups/couplescash-YYYYmmdd-HHMMSS.sql.gz'; exit 2; }
