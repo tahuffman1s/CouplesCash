@@ -140,7 +140,7 @@ CouplesCash/
 │  ├─ cloudflared/README.md  Tunnel + Access setup
 │  └─ postgres/postgresql.conf   Pi-tuned Postgres config
 ├─ install.sh                one-line installer (any 64-bit Linux / Pi); generates secrets + VAPID keys
-├─ scripts/                  dev.sh · dev-env.sh · backup.sh (DB dump + .env copy) · backup-nextcloud.sh (DB dump → Nextcloud)
+├─ scripts/                  dev.sh · dev-env.sh · backup.sh (DB dump + .env copy) · backup-nextcloud.sh (DB dump + .env copy → Nextcloud)
 ├─ docs/                     PLAN · PLAN-V2…V6 · API-CONTRACT · MATCHER-CONTRACT · RASPBERRY-PI · SECURITY · NOTIFICATIONS · PASSKEYS · BANK-SYNC
 ├─ .vscode/ · .devcontainer/ · .github/
 ├─ compose.yml               db · migrate · matcher · api · web (· cloudflared via --profile tunnel)

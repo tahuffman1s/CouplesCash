@@ -202,8 +202,9 @@ database is not a backup. The folder contains `.env` copies (secrets, incl.
 
 ### Database backups to Nextcloud (every 4 hours)
 
-Uploads a compressed `pg_dump` of the database (nothing else — no `.env`) to a
-folder in your Nextcloud over WebDAV, and keeps the newest 42 there (a week).
+Uploads a compressed `pg_dump` of the database plus a copy of `.env` next to it
+(`couplescash-db-<stamp>.sql.gz` + `couplescash-db-<stamp>.env`) to a folder in
+your Nextcloud over WebDAV, and keeps the newest 42 pairs there (a week).
 
 1. In Nextcloud: *Settings → Security → Devices & sessions → Create new app
    password* (name it "CouplesCash backups"). Use it instead of your login
@@ -216,18 +217,24 @@ folder in your Nextcloud over WebDAV, and keeps the newest 42 there (a week).
    # NEXTCLOUD_DIR=CouplesCash/backups         # optional, created if missing
    # NEXTCLOUD_KEEP=42                         # optional
    ```
-3. Try one: `make backup-nextcloud` → `uploaded couplescash-db-….sql.gz (…) to CouplesCash/backups`.
+3. Try one: `make backup-nextcloud` → `uploaded couplescash-db-….sql.gz (…) to CouplesCash/backups`
+   and `uploaded couplescash-db-….env`.
 4. Schedule it: `make backup-nextcloud-cron` (adds `17 */4 * * *` to your
    crontab; re-run with `EVERY=6` to change it, `EVERY=0` to remove it). Each
    run appends to `backups/nextcloud.log`; a run that finds the previous one
    still uploading skips.
 
-To restore, download a dump from Nextcloud into `backups/` and run
-`make restore FILE=backups/couplescash-db-….sql.gz`. The dump does not
-contain `DATA_KEY`: linked banks only decrypt with the `.env` the Pi had when
-they were linked — keep a copy of `.env` somewhere safe (a password manager is
-fine), or re-link the banks after a restore. The dump holds all your financial
-data in plain SQL, so keep the Nextcloud folder private.
+To restore, download a dump **and its `.env`** from Nextcloud into `backups/`
+and run `make restore FILE=backups/couplescash-db-….sql.gz`. If that `.env`
+differs from the Pi's, restore tells you — copy it over `.env` and `make up` so
+linked banks decrypt (they need the `DATA_KEY` they were linked with). On a new
+Pi, put the `.env` copy in place before the first `make up`.
+
+The folder now holds everything needed to read your data *and* decrypt your
+bank links (`DATA_KEY`), plus your secrets and the Nextcloud app password
+itself: keep it private, don't share it, and use Nextcloud's encryption if
+you have it. If the folder leaks, rotate the secrets (`docs/SECURITY.md`),
+revoke the app password and re-link the banks.
 
 ### Changing the database password
 

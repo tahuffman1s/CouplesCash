@@ -177,7 +177,7 @@ pi: ## Raspberry Pi deploy/update: pull images, (re)start stack with tunnel
 backup: ## pg_dump → backups/couplescash-<timestamp>.sql.gz + a copy of .env (holds DATA_KEY; KEEP=14 rotation)
 	@scripts/backup.sh
 
-backup-nextcloud: ## pg_dump → your Nextcloud folder over WebDAV (database only; NEXTCLOUD_* in .env, keeps NEXTCLOUD_KEEP=42)
+backup-nextcloud: ## pg_dump + a copy of .env → your Nextcloud folder over WebDAV (NEXTCLOUD_* in .env; keeps NEXTCLOUD_KEEP=42 pairs)
 	@scripts/backup-nextcloud.sh
 
 backup-nextcloud-cron: ## Run backup-nextcloud every EVERY=4 hours from your crontab (re-run to change; EVERY=0 removes it)

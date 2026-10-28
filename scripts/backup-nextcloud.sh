@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # `make backup-nextcloud`: compressed pg_dump of the running db container,
-# uploaded to a Nextcloud folder over WebDAV. Database only — no .env copy, so
-# restoring linked banks also needs the DATA_KEY from the Pi's .env (or a
-# `make backup` copy of it); without it, re-link the banks.
+# uploaded to a Nextcloud folder over WebDAV, plus a copy of .env next to it
+# (couplescash-db-<stamp>.env). The dump alone cannot restore linked banks:
+# their credentials are encrypted with DATA_KEY, which lives only in .env.
 # Settings come from the environment, else from .env:
 #   NEXTCLOUD_URL            https://cloud.example.com (the server, no /remote.php…)
 #   NEXTCLOUD_USER           your Nextcloud login name
 #   NEXTCLOUD_APP_PASSWORD   Settings → Security → Devices & sessions → Create new app password
 #   NEXTCLOUD_DIR            folder in your files (default CouplesCash/backups; created if missing)
-#   NEXTCLOUD_KEEP           newest dumps kept in that folder (default 42 = a week at every 4 hours)
-# Logs carry file names and sizes only — never the password.
+#   NEXTCLOUD_KEEP           newest dump + .env pairs kept in that folder (default 42 = a week at every 4 hours)
+# Logs carry file names and sizes only — never the password or .env contents.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -108,7 +108,8 @@ done
 work="$(mktemp -d)"
 chmod 700 "$work"
 trap 'rm -rf "$work"' EXIT
-name="couplescash-db-$(date +%Y%m%d-%H%M%S).sql.gz"
+stamp="couplescash-db-$(date +%Y%m%d-%H%M%S)"
+name="$stamp.sql.gz"
 dump="$work/$name"
 
 # Same flags as `make backup`, so `make restore FILE=…` takes either dump.
@@ -123,20 +124,36 @@ code="$(dav PUT "$dir_url/$name" --upload-file "$dump" --retry 3 --retry-all-err
 [[ "$code" == 201 || "$code" == 204 ]] || die "upload of $name failed (HTTP $code)"
 log "uploaded $name ($size) to $NEXTCLOUD_DIR"
 
-# Rotation: list the folder, keep the newest $NEXTCLOUD_KEEP of our dumps (the
-# timestamp in the name sorts by age) and leave every other file alone.
+# .env holds DATA_KEY (bank credentials), JWT_SECRET, VAPID keys, the DB
+# password and this script's app password — keep the Nextcloud folder private.
+if [[ -f .env ]]; then
+  code="$(dav PUT "$dir_url/$stamp.env" --upload-file .env --retry 3 --retry-all-errors)" \
+    || die "uploaded $name, but the .env copy failed (network)"
+  [[ "$code" == 201 || "$code" == 204 ]] || die "uploaded $name, but the .env copy failed (HTTP $code)"
+  log "uploaded $stamp.env (DATA_KEY and the other secrets — keep it with the dump)"
+else
+  log "no .env found — bank links cannot be restored from the dump alone" >&2
+fi
+
+# Rotation: list the folder, keep the newest $NEXTCLOUD_KEEP dumps (the
+# timestamp in the name sorts by age) and the .env copies that go with them,
+# and leave every other file alone.
 listing="$(curl_config | curl --config - --silent --show-error --fail \
   --connect-timeout 20 --max-time 120 --request PROPFIND --header 'Depth: 1' "$dir_url/")" \
   || die "uploaded, but could not list $NEXTCLOUD_DIR to prune old dumps"
-mapfile -t old < <(grep -oE 'couplescash-db-[0-9]{8}-[0-9]{6}\.sql\.gz' <<< "$listing" \
-  | sort -u -r | tail -n +"$((NEXTCLOUD_KEEP + 1))")
+mapfile -t files < <(grep -oE 'couplescash-db-[0-9]{8}-[0-9]{6}\.(sql\.gz|env)' <<< "$listing" | sort -u)
+mapfile -t kept < <(printf '%s\n' "${files[@]}" | grep -E '\.sql\.gz$' \
+  | sort -r | head -n "$NEXTCLOUD_KEEP" | sed 's/\.sql\.gz$//')
 pruned=0
-for file in "${old[@]}"; do
+for file in "${files[@]}"; do
+  base_name="${file%.sql.gz}"
+  base_name="${base_name%.env}"
+  printf '%s\n' "${kept[@]}" | grep -qxF "$base_name" && continue
   code="$(dav DELETE "$dir_url/$file")" || code=000
   if [[ "$code" == 204 || "$code" == 404 ]]; then
     pruned=$((pruned + 1))
   else
-    log "could not delete old dump $file (HTTP $code)" >&2
+    log "could not delete old backup file $file (HTTP $code)" >&2
   fi
 done
-(( pruned == 0 )) || log "pruned $pruned old dump(s), keeping $NEXTCLOUD_KEEP"
+(( pruned == 0 )) || log "pruned $pruned old file(s), keeping the newest $NEXTCLOUD_KEEP dump(s) and their .env copies"

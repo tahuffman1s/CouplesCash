@@ -193,8 +193,8 @@ at `http://api:8080`. Consequences:
 
 - Keep the Pi updated: `sudo apt-get update && sudo apt-get upgrade`, and
   `make pi` to pick up new images (Dependabot keeps base images fresh).
-- Back up (`make backup`, or `make backup-nextcloud-cron` for database dumps
-  to Nextcloud every 4 hours with an app password) and store copies off the Pi; dumps contain all
+- Back up (`make backup`, or `make backup-nextcloud-cron` for dumps + `.env`
+  copies to Nextcloud every 4 hours with an app password) and store copies off the Pi; dumps contain all
   financial data — treat them like the database (`chmod 600`, encrypted disk).
   The backup folder now also holds a copy of `.env` per dump (it carries
   `DATA_KEY`, without which linked banks cannot be restored) — it is a secret

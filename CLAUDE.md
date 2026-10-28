@@ -72,7 +72,7 @@ make scheduler-logs                      # api logs filtered to the background j
 make vapid                               # fill empty VAPID_* in .env (part of make secrets; FORCE=1 rotates)
 make secrets                             # fill empty JWT_SECRET / POSTGRES_PASSWORD / DATA_KEY (FORCE=1 rotates — breaks bank links)
 make backup                              # DB dump + .env copy (DATA_KEY) → backups/
-make backup-nextcloud | backup-nextcloud-cron   # DB dump → Nextcloud over WebDAV (NEXTCLOUD_* in .env); cron every EVERY=4 h
+make backup-nextcloud | backup-nextcloud-cron   # DB dump + .env copy → Nextcloud over WebDAV (NEXTCLOUD_* in .env); cron every EVERY=4 h
 make test | lint | fmt                   # all languages (incl. matcher)
 make dev-matcher | test-matcher | matcher-logs
 cd apps/matcher && uv sync && uv run pytest && uv run ruff check . && uv run ruff format --check .
