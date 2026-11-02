@@ -2,7 +2,7 @@
 # ---- build -----------------------------------------------------------------------------------
 # The build runs natively on the build host ($BUILDPLATFORM): its output and the production dependencies are plain
 # JavaScript, so only the runtime stage targets the Pi. Building under arm64 emulation (QEMU) hung the image publish.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:26-alpine AS build
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
@@ -13,7 +13,7 @@ COPY . .
 RUN pnpm build && pnpm prune --prod
 
 # ---- runtime ---------------------------------------------------------------------------------
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
