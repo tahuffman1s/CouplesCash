@@ -8,7 +8,7 @@
 
 FROM ghcr.io/astral-sh/uv:0.11.32 AS uv
 
-FROM python:3.13-slim AS build
+FROM python:3.15-slim AS build
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -23,7 +23,7 @@ COPY src/ ./src/
 # Read-only root FS at runtime + PYTHONDONTWRITEBYTECODE: ship the bytecode instead of compiling on every start.
 RUN python -m compileall -q src
 
-FROM python:3.13-slim AS runtime
+FROM python:3.15-slim AS runtime
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONPATH=/app/src \
     PYTHONDONTWRITEBYTECODE=1 \
